@@ -1,0 +1,80 @@
+{
+  "name": "agent-fleet-chat",
+  "displayName": "Agent Fleet",
+  "description": "Chat with your local Agent Fleet from inside VS Code - runs entirely on your own machines, never uses a Copilot token.",
+  "version": "0.4.1",
+  "publisher": "local",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/miladild/AgentFleet.git",
+    "directory": "vscode-fleet"
+  },
+  "private": true,
+  "engines": {
+    "vscode": "^1.104.0"
+  },
+  "categories": ["Chat"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "agent-fleet.fleet",
+        "name": "fleet",
+        "fullName": "Agent Fleet",
+        "description": "Your local fleet of machines and models. No Copilot tokens used.",
+        "isSticky": true
+      }
+    ],
+    "commands": [
+      {
+        "command": "agentFleet.continueChat",
+        "title": "Continue a fleet chat",
+        "category": "Agent Fleet"
+      },
+      {
+        "command": "agentFleet.unlinkModelPicker",
+        "title": "Stop linking the Fleet Router model to a fleet chat",
+        "category": "Agent Fleet"
+      }
+    ],
+    "languageModelChatProviders": [
+      {
+        "vendor": "agent-fleet",
+        "displayName": "Agent Fleet"
+      }
+    ],
+    "configuration": {
+      "title": "Agent Fleet",
+      "properties": {
+        "agentFleet.contextCarrier": {
+          "type": "boolean",
+          "default": false,
+          "description": "Experimental. Let the Fleet Router entry in the model picker keep one durable context across turns by returning an invisible data part that VS Code should send back with the next request. Off by default; @fleet does not need it."
+        },
+        "agentFleet.instructionFiles": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [".github/copilot-instructions.md"],
+          "description": "Custom instruction files @fleet sends with every turn, relative to the workspace folder. The first one that exists is used. The default is Copilot's own location."
+        },
+        "agentFleet.backendUrl": {
+          "type": "string",
+          "default": "http://localhost:8000",
+          "description": "Address of the Agent Fleet backend. The default is right when VS Code runs on the same machine as the backend; use the hub's address (for example http://192.168.1.10:8000) from another machine on your network."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "tsc -p ./ && node --test \"test/*.test.js\""
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/vscode": "^1.104.0",
+    "typescript": "^5"
+  }
+}

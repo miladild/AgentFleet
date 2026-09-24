@@ -1,0 +1,45 @@
+# ---- Local configuration and secrets -------------------------------------
+.env
+.env.*
+!.env.example
+*.local
+.env.local
+
+# ---- Runtime data the backend writes next to itself ------------------------
+# Your machines, models and MCP servers; conversations; plans; logs.
+fleet.config.json
+fleet.config.json.*.bak
+agent-fleet/agent/sessions/
+agent-fleet/agent/contexts/
+agent-fleet/agent/plans/
+agent-fleet/agent/logs/
+
+# ---- Build output ---------------------------------------------------------
+bin/
+obj/
+artifacts/
+*.tsbuildinfo
+out/
+
+# ---- Node -----------------------------------------------------------------
+node_modules/
+.next/
+.next-dev/
+.next-*/
+*.log
+frontend-service.log
+
+# ---- VS Code extension packages -------------------------------------------
+*.vsix
+
+# ---- Editor and agent tooling state ---------------------------------------
+.claude/
+.cursor/
+.idea/
+.vs/
+
+# Files private to your own copy (notes, local editor setup) belong in .git/info/exclude,
+# which is never committed.
+
+# Development-run data (npm run dev): conversations and plans
+agent-fleet/data/
