@@ -1,0 +1,61 @@
+{
+  "triageModel": "llama3.2:latest",
+  "mode": "conservative",
+  "planModeEnabled": false,
+  "nodes": [
+    {
+      "name": "hub",
+      "url": "http://127.0.0.1:11434/v1",
+      "model": "qwen3-coder:30b",
+      "purpose": "This machine. The strongest model: hard coding work, planning, and the fallback when another machine is down.",
+      "tier": "heavy",
+      "fallback": true
+    },
+    {
+      "name": "worker1",
+      "url": "http://192.168.1.21:11434/v1",
+      "model": "qwen2.5-coder:7b",
+      "purpose": "A second machine for ordinary coding work: bug fixes, small features, running plan steps.",
+      "tier": "standard"
+    },
+    {
+      "name": "worker2",
+      "url": "http://192.168.1.22:11434/v1",
+      "model": "llama3.2:3b",
+      "purpose": "A small, fast model for quick questions and trivial edits.",
+      "tier": "light"
+    },
+    {
+      "name": "eyes",
+      "url": "http://192.168.1.21:11434/v1",
+      "model": "qwen2.5vl:7b",
+      "purpose": "Reads screenshots and images. Only used when a message contains an image.",
+      "vision": true
+    }
+  ],
+  "tools": {
+    "read_file": { "enabled": true },
+    "write_file": { "enabled": true },
+    "edit_file": { "enabled": true },
+    "list_directory": { "enabled": true },
+    "find_files": { "enabled": true },
+    "search_files": { "enabled": true },
+    "run_git_command": { "enabled": true },
+    "run_command": { "enabled": true },
+    "run_sandboxed_code": { "enabled": true },
+    "web_search": { "enabled": true },
+    "web_fetch": { "enabled": true }
+  },
+  "mcpServers": {
+    "microsoft-learn": {
+      "type": "http",
+      "url": "https://learn.microsoft.com/api/mcp"
+    }
+  },
+  "sandbox": {
+    "mode": "auto"
+  },
+  "history": {
+    "deleteAfterDays": 0
+  }
+}

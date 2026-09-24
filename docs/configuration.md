@@ -1,0 +1,166 @@
+# Configuration
+
+Almost everything is in one file, `fleet.config.json`. A few settings that belong to the machine rather than the fleet are
+environment variables.
+
+## Where the file is
+
+| How you run it | Path |
+|---|---|
+| `npm run dev` | `agent-fleet\fleet.config.json` |
+| Installed with `Install-Autostart.ps1` | `<install folder>\backend\fleet.config.json`, by default `C:\AgentFleet\backend\fleet.config.json` |
+| Either, if you set `FLEET_CONFIG_PATH` | wherever you point it |
+
+If the file does not exist, the backend creates one on first start with a single node: this machine, running
+`qwen2.5-coder:7b`. After that the file is the only source of truth. Edit it by hand, from the web UI's **Config** panel,
+or with `Add-FleetNode.ps1`. Machines, the triage model, tools, MCP servers and the history setting apply as soon as they are saved from the Config panel (or through
+`PUT /api/fleet-config`). A change made by hand in the file, and changes to the sandbox, apply when the backend starts. The
+mode and plan-mode switches apply at once. `agent-fleet\fleet.config.example.json` is a complete example.
+
+The backend refuses to start on an invalid file and says what is wrong, for example "Exactly one node must be the
+fallback, found 2."
+
+## The file
+
+```json
+{
+  "triageModel": "llama3.2:latest",
+  "mode": "conservative",
+  "planModeEnabled": false,
+  "nodes": [ ... ],
+  "tools": { ... },
+  "mcpServers": { ... },
+  "sandbox": { ... },
+  "history": { "deleteAfterDays": 90 }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `triageModel` | The small model that decides which machine gets a request. It runs on the fallback node, so install it there. Not used when there is only one text node. |
+| `mode` | `conservative` or `aggressive`. See [adding-machines.md](adding-machines.md#hub-mode). Changed from the web UI. |
+| `planModeEnabled` | Plan mode on or off. Changed from the web UI. |
+
+### `nodes`
+
+```json
+{
+  "name": "worker1",
+  "url": "http://192.168.1.21:11434/v1",
+  "model": "qwen2.5-coder:7b",
+  "purpose": "Ordinary coding work",
+  "tier": "standard",
+  "vision": false,
+  "fallback": false
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `name` | 1 to 32 lowercase letters, digits or hyphens. Must be unique. It is what the router picks, and what the UI shows. |
+| `url` | The machine's Ollama address, ending in `/v1`. Without it, `/v1` is added for you. |
+| `model` | The model that machine serves, exactly as `ollama list` shows it there. |
+| `purpose` | A note for humans. Shown in the UI; the router does not read it. |
+| `tier` | `heavy`, `standard` or `light`. Missing means `standard`. Ignored for a vision node. |
+| `vision` | Reads images. Used only when a message contains one. Never the fallback. |
+| `fallback` | Exactly one node has this. Missing everywhere means the first heavy text node. |
+
+At least one text node (not vision) is required.
+
+### `tools`
+
+`"tools": { "run_command": { "enabled": false } }`. A tool that is not listed is on. See
+[tools-and-mcp.md](tools-and-mcp.md) for the names.
+
+### `mcpServers`
+
+Same shape as VS Code's `mcp.json`:
+
+| Field | For | Meaning |
+|---|---|---|
+| `type` | both | `stdio` (a program the backend starts) or `http` (a remote server) |
+| `command`, `args`, `env` | stdio | What to run. `${env:NAME}` in any value is replaced with that environment variable. |
+| `url`, `headers` | http | Where to connect. `${env:NAME}` works here too. |
+| `enabled` | both | `false` keeps the entry but does not connect |
+
+### `sandbox`
+
+Where `run_sandboxed_code` runs its container. See [tools-and-mcp.md](tools-and-mcp.md#the-sandbox).
+
+| Field | Meaning |
+|---|---|
+| `mode` | `auto` (default), `local`, `ssh` or `off` |
+| `host`, `port`, `user`, `keyPath`, `sudo` | For `ssh` mode: the machine with Docker, and how to log in to it with a key |
+| `timeoutSeconds` | How long a snippet may run, 1 to 120 (default 20) |
+
+### `history`
+
+How long the durable record keeps chats. See [context.md](context.md#keeping-it-small).
+
+| Field | Meaning |
+|---|---|
+| `deleteAfterDays` | Delete a chat and its record once nothing has happened in it for this many days, 1 to 3650. `0` or missing keeps everything. A chat an unfinished plan runs in is kept. |
+
+## Environment variables
+
+The backend reads these from its own environment, not from `.env.local`. When you run it with `npm run dev` or as a task,
+set them in your user environment variables. For a Windows service set them on the service.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `FLEET_CONFIG_PATH` | next to the backend program | The config file |
+| `FLEET_CONTEXTS_DIR` | `contexts` next to the program | The durable record: one SQLite database with every conversation, tool call, decision, plan step, handoff and file hash. See [context.md](context.md) |
+| `FLEET_SESSIONS_DIR` | `sessions` next to the program | Old JSON sessions, imported into the record once at startup |
+| `FLEET_PLANS_DIR` | `plans` next to the program | Saved plans |
+| `FLEET_FILES_ROOT` | the backend's working folder | What relative paths in file tools are relative to |
+| `FLEET_ALLOWED_HOSTS` | none | Extra host names the backend answers to (comma separated). See [security.md](security.md) |
+| `FLEET_FRONTEND_URL` | `http://localhost:3000` | Where the backend finds the web UI, used to check plan diagrams |
+| `FLEET_NETWORK_TIMEOUT_SECONDS` | 300 | How long to wait for one model reply (10 to 900) |
+| `FLEET_HEALTH_PROBE_TIMEOUT_SECONDS` | 3 | Health probe timeout (1 to 30) |
+| `FLEET_HEALTH_CACHE_SECONDS` | 10 | How often nodes are probed (1 to 300) |
+| `SHELL_EXECUTION_TIMEOUT_SECONDS` | 120 | How long one `run_command` may run |
+| `SANDBOX_*` | | The same settings as the `sandbox` section, used when the file does not give them |
+| `HUB_OLLAMA_URL`, `HUB_OLLAMA_MODEL`, `TRIAGE_OLLAMA_MODEL` | | Seed values for the first-ever start only |
+
+For the web UI (`agent-fleet\.env.local`, or the environment):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AGENT_URL` | `http://localhost:8000` | Where the backend is |
+| `FLEET_WEB_HOST` | `127.0.0.1` | The address the web UI listens on. `0.0.0.0` lets other machines open it. |
+| `PORT` | 3000 | The web UI's port |
+
+For the PowerShell scripts in `scripts\`:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AGENT_FLEET_INSTALL_ROOT` | the folder the registered backend service or task runs from, else `C:\AgentFleet` | Where `Install-Autostart.ps1` installs, and where `Deploy-Fleet.ps1`, `Test-Fleet.ps1`, `Add-FleetNode.ps1` and `Get-FleetModels.ps1` look. `-InstallRoot` on any of them wins. |
+
+## Ports
+
+| Port | What |
+|---|---|
+| 3000 | Web UI |
+| 8000 | Backend (also `@fleet`'s address) |
+| 11434 | Ollama on each machine |
+
+## HTTP interface
+
+The backend answers these on port 8000. They are what the web UI and the VS Code extension use.
+
+| Path | What |
+|---|---|
+| `GET /health` | Overall status and each node. 503 if the fallback node is down. |
+| `GET /api/fleet-status` | Nodes with recent activity |
+| `GET`, `PUT /api/fleet-config` | Read or change the configuration |
+| `GET /api/fleet-config/models?url=` | Models installed at an Ollama address |
+| `GET`, `POST /api/fleet-mode`, `/api/plan-mode` | The two switches |
+| `GET /api/plans`, `/api/plans/{id}`, `/api/plans/{id}/markdown`, `/api/plans/{id}/report` | Plans, a readable copy, and the run report |
+| `POST /api/plans/{id}/approve`, `/reject`, `/stop` | Act on a plan |
+| `GET`, `PUT`, `DELETE /api/sessions[/{id}]` | Saved conversations (the visible chats of the durable record) |
+| `GET /api/contexts[/{id}[/events|deliveries|artifacts|export]]`, `POST .../decisions|compact` | The durable record. See [context.md](context.md) |
+| `GET /api/contexts/storage?olderThanDays=`, `POST /api/contexts/cleanup` | The record's size and a preview of a cleanup; deleting chats not used for a number of days |
+| `GET /api/logs/tail?lines=` | End of today's log |
+| `POST /` | The chat itself, over the [AG-UI](https://github.com/ag-ui-protocol/ag-ui) protocol |
+
+There is no authentication. See [security.md](security.md).

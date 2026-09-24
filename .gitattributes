@@ -1,0 +1,8 @@
+# Line endings: shell scripts must stay LF (a CRLF breaks the shebang), batch files must stay CRLF.
+* text=auto
+*.sh text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=lf
+*.png binary
+*.vsix binary
