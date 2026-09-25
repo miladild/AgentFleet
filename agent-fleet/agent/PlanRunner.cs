@@ -431,7 +431,13 @@ internal sealed partial class PlanRunner
                     return $"step {step.Id} has an invalid file path";
                 }
 
-                if (!path.StartsWith(rootPrefix, comparison) || Directory.Exists(path) || HasLinkedPathComponent(root, path))
+                // A whole folder could hold the other steps' files, so it cannot be shown to be separate from them.
+                if (Directory.Exists(path) || Path.EndsInDirectorySeparator(requestedPath))
+                {
+                    return $"step {step.Id} names a whole folder";
+                }
+
+                if (!path.StartsWith(rootPrefix, comparison) || HasLinkedPathComponent(root, path))
                 {
                     return $"step {step.Id} names a path outside the project or through a link";
                 }
@@ -725,9 +731,15 @@ internal sealed partial class PlanRunner
             named.UnionWith(FleetPlanContext.DeclaredPaths(plan, other));
         }
 
+        // A step that names a folder ("test/") names what it puts in it.
+        StringComparison comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        string[] folders = named
+            .Where(Directory.Exists)
+            .Select(folder => Path.EndsInDirectorySeparator(folder) ? folder : folder + Path.DirectorySeparatorChar)
+            .ToArray();
         string root = plan.WorkingDirectory ?? string.Empty;
         return FleetPlanContext.SnapshotFiles(plan.WorkingDirectory)
-            .Where(file => !before.Contains(file) && !named.Contains(file))
+            .Where(file => !before.Contains(file) && !named.Contains(file) && !folders.Any(folder => file.StartsWith(folder, comparison)))
             .OrderBy(file => file, StringComparer.OrdinalIgnoreCase)
             .Take(10)
             .Select(file => Path.GetRelativePath(root, file))
@@ -754,7 +766,7 @@ internal sealed partial class PlanRunner
             $"{plan.Id}:{step.Id}",
             // Without a project folder on disk there is nothing to check against (and nowhere the model could create files).
             !string.IsNullOrWhiteSpace(plan.WorkingDirectory) && Directory.Exists(plan.WorkingDirectory)
-                ? FleetPlanContext.DeclaredPaths(plan, step).Where(path => !File.Exists(path)).ToArray()
+                ? FleetPlanContext.DeclaredPaths(plan, step).Where(path => !File.Exists(path) && !Directory.Exists(path)).ToArray()
                 : []);
 
     private string[]? FilesToCreate(PlanRecord plan, PlanStep step) =>

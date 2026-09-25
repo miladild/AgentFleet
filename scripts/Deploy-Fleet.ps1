@@ -85,6 +85,12 @@ try {
 }
 finally { Pop-Location }
 
+if ($mode -eq 'service') {
+    # Installs made before this setting existed get it here: a backend that stops unexpectedly is started again, so a
+    # plan running overnight carries on (it resumes from disk).
+    sc.exe failure $BackendName reset= 86400 actions= restart/5000/restart/30000/restart/60000 | Out-Null
+}
+
 Write-Step "Starting $BackendName"
 Start-One $BackendName
 

@@ -981,6 +981,67 @@ app.MapPost("/api/plans/{id}/reject", (string id) =>
         : Results.Json(planStore.Reject(id));
 });
 
+// A plan written outside the fleet, for example by GitHub Copilot in VS Code (the extension's "Run a plan on Agent
+// Fleet" tool). It gets the same review and store as propose_plan, and a durable record of its own, so every machine
+// that runs a step is handed the plan's history. dryRun only reviews it; approve starts it at once, for a caller that
+// already had the user confirm it.
+app.MapPost("/api/plans", async (PlanSubmitRequest request, CancellationToken cancellationToken) =>
+{
+    string title = request.Title?.Trim() ?? string.Empty;
+    IReadOnlyList<string> problems = title.Length == 0
+        ? ["The plan needs a title."]
+        : planTools.Review(request.WorkingDirectory, request.Steps);
+    // Which machines take which tier, so whoever confirms the plan sees where its steps will run.
+    string machines = string.Join("; ", FleetTiers.All
+        .Select(tier => (Tier: tier, Nodes: fleetConfigStore.Current.Nodes
+            .Where(node => !node.Vision && string.Equals(node.Tier ?? FleetTiers.Standard, tier, StringComparison.OrdinalIgnoreCase))
+            .Select(node => $"{node.Name} ({node.Model})")
+            .ToList()))
+        .Where(entry => entry.Nodes.Count > 0)
+        .Select(entry => $"{entry.Tier}: {string.Join(", ", entry.Nodes)}"));
+    if (problems.Count > 0)
+    {
+        return Results.BadRequest(new { error = "The plan would fail when it runs, so it was not saved.", problems, machines });
+    }
+
+    if (request.DryRun)
+    {
+        return Results.Json(new { problems, machines });
+    }
+
+    string contextId = Guid.TryParse(request.ContextId, out Guid given) ? given.ToString("D") : Guid.NewGuid().ToString("D");
+    string source = string.IsNullOrWhiteSpace(request.Source) ? "api" : request.Source.Trim();
+    string goal = string.IsNullOrWhiteSpace(request.Goal) ? title : request.Goal.Trim();
+    contextStore.EnsureContext(contextId, title);
+    string result;
+    using (contextJournal.Push(new FleetRequestIdentity(contextId, RunId: null, Surface: source)))
+    {
+        result = await planTools.ProposePlanAsync(
+            title, goal, request.WorkingDirectory, request.Assumptions, request.OpenQuestions, request.Risks, diagram: null, request.Steps, cancellationToken);
+    }
+
+    if (FleetPlanStore.FindMarkerId(result) is not { } planId || planStore.Get(planId) is not { } plan)
+    {
+        return Results.BadRequest(new { error = result, problems = new[] { result } });
+    }
+
+    // The chat the plan came from is not the fleet's, so the record starts with the plan itself: the Sessions list
+    // shows it, and "Continue a fleet chat" can pick it up later.
+    string markdown = FleetPlanStore.ToMarkdown(plan);
+    contextStore.UpsertMessages(contextId, title, System.Text.Json.JsonSerializer.SerializeToElement(new[]
+    {
+        new { id = $"{contextId[..8]}-handoff", role = "user", content = $"Carry out this plan, written with {source}: {goal}" },
+        new { id = $"{contextId[..8]}-plan", role = "assistant", content = markdown }
+    }), source);
+
+    if (request.Approve)
+    {
+        plan = planStore.Approve(planId, exportToProject: false) ?? plan;
+    }
+
+    return Results.Json(new { id = plan.Id, contextId, status = plan.Status, title = plan.Title, markdown, machines });
+});
+
 app.MapPost("/api/plans/{id}/stop", (string id) =>
     planStore.Get(id) is null
         ? Results.NotFound()
@@ -1538,6 +1599,19 @@ internal sealed record FleetModeRequest(string Mode);
 internal sealed record FleetPlanModeRequest(bool Enabled);
 
 internal sealed record SessionUpsertRequest(string? Title, System.Text.Json.JsonElement Messages);
+
+internal sealed record PlanSubmitRequest(
+    string? Title,
+    string? Goal,
+    string? WorkingDirectory,
+    System.Text.Json.JsonElement? Steps,
+    System.Text.Json.JsonElement? Assumptions = null,
+    System.Text.Json.JsonElement? OpenQuestions = null,
+    System.Text.Json.JsonElement? Risks = null,
+    string? Source = null,
+    string? ContextId = null,
+    bool Approve = false,
+    bool DryRun = false);
 
 internal sealed record McpTestRequest(string? Name, FleetMcpServerConfig Server);
 

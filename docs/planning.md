@@ -48,13 +48,34 @@ steps, and checks each step with a real command instead of trusting itself.
    current plan's report in the chat, with **Stop it**, or **Approve and resume** for a blocked plan. Close the browser and
    VS Code, go to bed: the plan runs in the backend. **Stop** halts a running plan.
 
+## A plan made with GitHub Copilot
+
+You can work a plan out with Copilot (or any chat model in VS Code) and have the fleet carry it out. There are two ways.
+
+- **Ask Copilot to hand it over.** The extension gives Copilot a tool, **Run a plan on Agent Fleet** (`#fleetPlan`). In
+  agent mode, say "send this plan to the fleet" or "run it overnight on my machines". Copilot sends the plan with a check
+  command and a tier for every step, the fleet reviews it as it would its own (and tells Copilot what to fix), and VS
+  Code asks you to confirm with the steps in front of you. Once you allow it, the plan starts in the background. The
+  plan gets its own record in the fleet (it appears under **Sessions**), so every machine that runs a step is handed
+  the plan's history. `#fleetStatus`, or `@fleet /status`, tells you how it is going.
+- **Ask `@fleet`.** After planning with Copilot in a chat, send `@fleet /plan` (or `@fleet run the plan above`) in the
+  same chat. VS Code shows a chat participant only its own turns, so `@fleet` reads the rest of the chat with the chat's
+  **Copy All** command and puts your clipboard text back afterwards (turn this off with the `agentFleet.readWholeChat`
+  setting). The strongest machine keeps the plan's steps and decisions, checks them against the code, and proposes
+  them as a fleet plan with checks and tiers, for you to approve as usual.
+
+The first way keeps Copilot's wording and needs no planning on your machines; the second lets the fleet check the plan
+against the code first.
+
 ## Leaving it overnight
 
 What keeps a plan going when something happens in the night:
 
 - **The backend restarts** (a crash, a Windows update, a reboot): the plan, every step's status and the whole record of
   the conversation are on disk. The plan picks up at the step that was interrupted; finished steps are not redone. Plan
-  files are flushed to disk before they replace the old one, so a power cut cannot leave a half-written plan.
+  files are flushed to disk before they replace the old one, so a power cut cannot leave a half-written plan. Run as a
+  Windows service (`Install-Autostart.ps1 -Mode Service`), the backend is started again within seconds if it stops
+  unexpectedly, and at boot; the scheduled-task mode retries three times, a minute apart.
 - **A machine goes down or slows down.** Each call goes to a ready machine of the step's tier; a machine that is off, or
   fails a call, is replaced by the fallback machine. A machine that times out rests for ten minutes, so the rest of the
   step does not wait for it again. If no machine can answer at all (the network is down, the fallback is rebooting), the

@@ -363,6 +363,27 @@ public sealed class PlanContextTests : ContextTestBase
     }
 
     [Fact]
+    public async Task A_step_that_names_a_folder_passes_once_the_folder_exists_and_its_files_are_not_scratch_files()
+    {
+        // Measured on a real fleet: a step naming "test/" was failed three times after its check passed, because the
+        // folder was looked for as a file, and the plan blocked overnight.
+        PlanRecord plan = Approved(Plans, Step("Write the tests", "test/"));
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            Directory.CreateDirectory(Path.Combine(_project, "test"));
+            File.WriteAllText(Path.Combine(_project, "test", "slug.test.js"), "test");
+            return Task.FromResult("Done.");
+        });
+
+        await Runner(agent).RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Plans.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.Single(agent.Calls);
+        Assert.DoesNotContain(after.Events!, e => e.Kind == RunEventKind.StepDone && e.Detail.Contains("does not name"));
+    }
+
+    [Fact]
     public async Task A_file_that_already_existed_is_not_required_to_be_created_so_a_removal_step_can_pass()
     {
         File.WriteAllText(File1, "old");

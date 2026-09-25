@@ -138,6 +138,15 @@ internal sealed partial class PlanTools
                FleetPlanStore.ToMarkdown(plan);
     }
 
+    /// <summary>The same review propose_plan does, without saving anything: for a plan written outside the fleet.</summary>
+    public IReadOnlyList<string> Review(string? workingDirectory, JsonElement? steps)
+    {
+        List<PlanStepInput> stepInputs = ToSteps(steps);
+        return stepInputs.Count == 0
+            ? ["The plan has no steps: send steps as an array of objects with title, detail, files, verify and tier."]
+            : PlanReview.Problems(workingDirectory, stepInputs, _programExists);
+    }
+
     // One chat, one plan waiting for approval: a revised plan replaces the earlier proposal instead of leaving two
     // sets of Approve buttons (measured: a planner called propose_plan three times in one turn).
     private string ReplaceOlderProposals(PlanRecord plan)
@@ -294,7 +303,8 @@ internal sealed partial class PlanTools
 
         if (passed && requiredFiles is { Count: > 0 })
         {
-            string[] missing = requiredFiles.Where(path => !File.Exists(path)).ToArray();
+            // A named folder ("test/") counts once it exists.
+            string[] missing = requiredFiles.Where(path => !File.Exists(path) && !Directory.Exists(path)).ToArray();
             if (missing.Length > 0)
             {
                 string shown = string.Join(", ", missing.Select(path => RelativeTo(plan.WorkingDirectory, path)));
