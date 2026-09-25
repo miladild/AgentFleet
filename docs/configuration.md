@@ -83,6 +83,21 @@ Same shape as VS Code's `mcp.json`:
 | `url`, `headers` | http | Where to connect. `${env:NAME}` works here too. |
 | `enabled` | both | `false` keeps the entry but does not connect |
 
+### `customTools`
+
+Tools made from a command, usually from **Config > Tools > Your own tools**. See
+[tools-and-mcp.md](tools-and-mcp.md#your-own-tools-from-a-command).
+
+| Field | Meaning |
+|---|---|
+| (the key) | The tool's name: 2 to 48 lowercase letters, digits or underscores, not a built-in tool's name |
+| `description` | What it does; the model reads this to decide when to use it |
+| `command` | The command line with `{name}` placeholders for what the model fills in. The program (first word) is fixed |
+| `parameters` | One `{ "name", "description", "required" }` per placeholder |
+| `workingDirectory` | Where it runs; may contain placeholders. Missing means the backend's working folder |
+| `timeoutSeconds` | 1 to 600, default 120 |
+| `readOnly` | It changes nothing, so it stays available while a plan waits for approval |
+| `enabled` | Offered to the model |
 ### `sandbox`
 
 Where `run_sandboxed_code` runs its container. See [tools-and-mcp.md](tools-and-mcp.md#the-sandbox).
@@ -168,6 +183,11 @@ The backend answers these on port 8000. They are what the web UI and the VS Code
 | `POST /api/setup/start-ollama` | Start the Ollama app on this computer (not when the backend runs as a Windows service) |
 | `GET`, `PUT /api/setup/sandbox` | The sandbox settings; a PUT applies them at once |
 | `POST /api/setup/sandbox/key`, `/test`, `/install-key`, `/prepare` | Make the fleet's SSH key, test a sandbox setting, add the key to a machine with its password (used once, never stored), download the container images |
+| `POST /api/contexts/{id}/feedback` `{rating, messageId, excerpt}`, `GET /api/feedback` | A thumbs up or down on an answer, kept with the machine that answered; counts per machine |
+| `POST /api/tools/run` `{name, arguments}` | Run one tool as the model would (the Try links); plan and context tools are refused |
+| `POST /api/tools/custom/test` `{name, tool, arguments}` | Run a command tool that is not saved yet |
+| `GET /api/tools/prerequisites` | Whether `npx`, `uvx`, `docker` and `git` are on the backend's PATH |
+| `GET`, `POST /api/tools/import` | MCP servers found in other apps' settings (secrets masked), and adding chosen ones |
 | `POST /` | The chat itself, over the [AG-UI](https://github.com/ag-ui-protocol/ag-ui) protocol |
 
 There is no authentication. See [security.md](security.md).

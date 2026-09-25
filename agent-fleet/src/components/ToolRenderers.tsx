@@ -1,6 +1,6 @@
 "use client";
 
-import { useRenderTool } from "@copilotkit/react-core/v2";
+import { useDefaultRenderTool, useRenderTool } from "@copilotkit/react-core/v2";
 import { z } from "zod";
 import { PlanCard } from "./PlanCard";
 
@@ -34,10 +34,11 @@ function CodeBlock({ text }: { text: string }) {
   );
 }
 
-/** Registers custom renderers for the fleet's four tools, replacing plain prose
- * descriptions with a small code-block-style view (path/language header, output
- * or new content below), so tool activity reads more like Copilot/Claude Code's
- * inline diffs than a wall of text. Must render inside the CopilotKit provider. */
+/** Registers renderers for the fleet's tools, replacing plain prose descriptions
+ * with a small code-block-style view (path/language header, output or new content
+ * below), so tool activity reads more like Copilot/Claude Code's inline diffs than
+ * a wall of text, plus one fallback for every other tool (MCP servers, command
+ * tools). Must render inside the CopilotKit provider. */
 export function ToolRenderers() {
   useRenderTool(
     {
@@ -417,6 +418,125 @@ export function ToolRenderers() {
             {parameters?.command && <CodeBlock text={parameters.command} />}
             <div className={`px-3 py-2 border-t border-neutral-800 text-xs whitespace-pre-wrap ${failed ? "text-red-400" : "text-emerald-400"}`}>
               {text}
+            </div>
+          </ToolFrame>
+        );
+      },
+    },
+    [],
+  );
+
+  useRenderTool(
+    {
+      name: "project_overview",
+      parameters: z.object({ path: z.string(), depth: z.number().optional() }),
+      render: ({ parameters, status, result }) => {
+        if (status !== "complete") return <ToolFrame label="Looking over the project" detail={parameters?.path ?? ""} />;
+        const text = typeof result === "string" ? result : JSON.stringify(result);
+        return (
+          <ToolFrame label={text.startsWith("Error:") ? "Could not read the project" : "Looked over the project"} detail={parameters?.path ?? ""}>
+            <CodeBlock text={text} />
+          </ToolFrame>
+        );
+      },
+    },
+    [],
+  );
+
+  useRenderTool(
+    {
+      name: "http_request",
+      parameters: z.object({ url: z.string(), method: z.string().optional(), headers: z.string().optional(), body: z.string().optional() }),
+      render: ({ parameters, status, result }) => {
+        const call = `${(parameters?.method ?? "GET").toUpperCase()} ${parameters?.url ?? ""}`;
+        if (status !== "complete") {
+          return (
+            <ToolFrame label="Calling an API" detail={call}>
+              {parameters?.body && <CodeBlock text={parameters.body} />}
+            </ToolFrame>
+          );
+        }
+        const text = typeof result === "string" ? result : JSON.stringify(result);
+        const code = /^HTTP (\d{3})/.exec(text)?.[1];
+        const failed = text.startsWith("Error:") || (code !== undefined && Number(code) >= 400);
+        return (
+          <ToolFrame label={failed ? `API call failed${code ? ` (${code})` : ""}` : `API answered ${code ?? ""}`} detail={call}>
+            {parameters?.body && <CodeBlock text={parameters.body} />}
+            <div className={`border-t border-neutral-800 ${failed ? "text-red-300" : ""}`}>
+              <CodeBlock text={text} />
+            </div>
+          </ToolFrame>
+        );
+      },
+    },
+    [],
+  );
+
+  useRenderTool(
+    {
+      name: "move_file",
+      parameters: z.object({ source: z.string(), destination: z.string(), overwrite: z.boolean().optional() }),
+      render: ({ parameters, status, result }) => {
+        const detail = `${parameters?.source ?? ""} → ${parameters?.destination ?? ""}`;
+        if (status !== "complete") return <ToolFrame label="Moving" detail={detail} />;
+        const text = typeof result === "string" ? result : JSON.stringify(result);
+        const failed = text.startsWith("Error:");
+        return (
+          <ToolFrame label={failed ? "Could not move" : "Moved"} detail={detail}>
+            {failed && <div className="px-3 py-1.5 text-xs text-red-400">{text}</div>}
+          </ToolFrame>
+        );
+      },
+    },
+    [],
+  );
+
+  useRenderTool(
+    {
+      name: "delete_file",
+      parameters: z.object({ path: z.string() }),
+      render: ({ parameters, status, result }) => {
+        if (status !== "complete") return <ToolFrame label="Deleting" detail={parameters?.path ?? ""} />;
+        const text = typeof result === "string" ? result : JSON.stringify(result);
+        const failed = text.startsWith("Error:");
+        return (
+          <ToolFrame label={failed ? "Did not delete" : "Deleted"} detail={parameters?.path ?? ""}>
+            {failed && <div className="px-3 py-1.5 text-xs text-amber-300">{text}</div>}
+          </ToolFrame>
+        );
+      },
+    },
+    [],
+  );
+
+  // Every other tool (MCP servers, the user's own command tools): the same frame, with what it was called with and
+  // what came back, instead of CopilotKit's generic card.
+  useDefaultRenderTool(
+    {
+      render: ({ name, parameters, status, result }) => {
+        const args = parameters && typeof parameters === "object" ? (parameters as Record<string, unknown>) : {};
+        const firstText = Object.values(args).find((value): value is string => typeof value === "string") ?? "";
+        const detail = firstText.length > 80 ? `${firstText.slice(0, 80)}...` : firstText;
+        const argsText = Object.keys(args).length > 0 ? JSON.stringify(args, null, 2) : "";
+        if (status !== "complete") {
+          return (
+            <ToolFrame label={`Using ${name}`} detail={detail}>
+              {argsText && <CodeBlock text={argsText} />}
+            </ToolFrame>
+          );
+        }
+        const text = result ?? "";
+        const failed = text.startsWith("Error") || /Exit code: [^0]/.test(text);
+        return (
+          <ToolFrame label={failed ? `${name} reported a problem` : `Used ${name}`} detail={detail}>
+            {argsText && (
+              <details className="px-3 pt-1.5 text-xs text-neutral-500">
+                <summary className="cursor-pointer">what it was asked</summary>
+                <CodeBlock text={argsText} />
+              </details>
+            )}
+            <div className={failed ? "text-red-300" : ""}>
+              <CodeBlock text={text.length > 6000 ? `${text.slice(0, 6000)}\n\n[... ${text.length - 6000} more characters]` : text} />
             </div>
           </ToolFrame>
         );

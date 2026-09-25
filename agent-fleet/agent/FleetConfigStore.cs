@@ -121,7 +121,11 @@ internal sealed class FleetConfigStore
                 ["run_git_command"] = new FleetToolConfig(true),
                 ["run_command"] = new FleetToolConfig(true),
                 ["web_search"] = new FleetToolConfig(true),
-                ["web_fetch"] = new FleetToolConfig(true)
+                ["web_fetch"] = new FleetToolConfig(true),
+                ["project_overview"] = new FleetToolConfig(true),
+                ["move_file"] = new FleetToolConfig(true),
+                ["delete_file"] = new FleetToolConfig(true),
+                ["http_request"] = new FleetToolConfig(true)
             });
 
         FleetConfig prepared = Prepare(seeded);
@@ -275,6 +279,11 @@ internal sealed class FleetConfigStore
                 throw new InvalidOperationException(
                     $"MCP server '{serverName}' has type '{server.Type}' - it must be stdio or http.");
             }
+        }
+
+        foreach ((string toolName, FleetCustomToolConfig tool) in config.CustomToolMap)
+        {
+            CustomToolRunner.Validate(toolName, tool);
         }
 
         if (config.History?.DeleteAfterDays is < 0 or > FleetConfig.MaxHistoryDays)

@@ -9,6 +9,13 @@ The panel at the top of the page shows each machine and whether it is up (green
 or red), and the **Config** button is where machines, models, tools and MCP
 servers are set up.
 
+Set the **Project folder** on the main page (or tell the assistant which
+project to work on) and every message carries it: "run the tests" or "where is
+login handled?" then need no path, and the chat suggests things to do with that
+project. Give answers a thumbs up or down: **Config > Machines** counts them per
+machine. Ask the assistant how to set something up and it can open the right
+settings tab for you.
+
 New here, or something is red? **Config > Setup** lists what the fleet needs,
 with the fix for each item and a button for the ones it can do itself:
 downloading a model that suits this computer, starting Ollama, downloading a
@@ -64,21 +71,33 @@ diagram.
 Built-in tools:
 
 - **read_file**, **write_file**, **edit_file**, **list_directory**,
-  **find_files** (by name), **search_files** (by content) - work on real files
-  on the hub machine. `edit_file` changes part of a file by replacing exact
-  text, which is far safer than rewriting the whole file.
+  **find_files** (by name), **search_files** (by content), **move_file**,
+  **delete_file** - work on real files on the hub machine. `edit_file` changes
+  part of a file by replacing exact text, which is far safer than rewriting the
+  whole file. `delete_file` removes single files and empty folders only.
+- **project_overview** - a project at a glance: its layout, how to build and
+  test it, and the start of its README. Ask "give me an overview of
+  C:\path\to\project" to see it.
 - **run_command** - runs any shell command on the hub (build, test, install).
 - **run_git_command** - git in a repository folder.
 - **run_sandboxed_code** - runs a snippet in a throwaway Docker container, when
   Docker is set up.
 - **web_search**, **web_fetch** - look things up online and read a page.
+- **http_request** - call an API, such as the one you are building on
+  localhost, and see the raw response.
 - **validate_diagram** - checks Mermaid source with the real parser and returns
   a corrected version when the checker can reach the web app. Fenced Mermaid
   diagrams in ordinary answers show a render control in the chat.
 
-More tools can be added without code, and without a restart: in **Config**, pick an **MCP server** from the list, paste one
-from a README, or type one in; **Test** it, then **Add and save**. Its tools appear here and in
-`@fleet` in VS Code.
+More tools can be added without code, and without a restart, in **Config > Tools**:
+
+- **Your own tools**: turn a command into a tool, for example `dotnet test {project}` becomes `run_tests`. Templates
+  for .NET tests, npm scripts and pytest get you started; **Try it** before you save.
+- **MCP servers**: pick one from the list (documentation, browsers, GitHub, git, memory, Azure...), bring over the ones
+  you already use in VS Code, Claude or Cursor with **From your other apps**, paste one from a README, or type one in.
+  **Test** it, then **Add and save**.
+
+Every tool has a **Try** link that runs it with values you type. New tools appear here and in `@fleet` in VS Code.
 
 To work on a project, give the full path:
 

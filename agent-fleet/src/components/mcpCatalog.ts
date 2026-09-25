@@ -11,19 +11,24 @@ export type McpServerConfig = {
 export type CatalogEntry = {
   id: string;
   title: string;
+  category: "Docs and search" | "Browser" | "Code and files" | "Thinking and memory" | "Cloud";
   what: string;
   needs: string;
+  /** A program that must be on the hub for it to start. */
+  requires?: "npx" | "uvx";
   server: McpServerConfig;
   /** Shown in the form after picking it: what to fill in or set up first. */
   setup?: string;
 };
 
-// A short list of servers that are useful for coding and known to work with this fleet. Anything else
-// can be added with the Custom form or by pasting an mcp.json entry.
+// Servers that are useful for coding and known to work with this fleet. {name} in an argument is filled in in the form
+// (for example the folder a server may use). Anything else can be added with the Custom form, by pasting an mcp.json
+// entry, or by importing it from another app.
 export const MCP_CATALOG: CatalogEntry[] = [
   {
     id: "microsoft-learn",
     title: "Microsoft Learn",
+    category: "Docs and search",
     what: "Search and read official Microsoft and Azure documentation and code samples.",
     needs: "Nothing. No account.",
     server: { type: "http", url: "https://learn.microsoft.com/api/mcp", enabled: true },
@@ -31,6 +36,7 @@ export const MCP_CATALOG: CatalogEntry[] = [
   {
     id: "context7",
     title: "Context7",
+    category: "Docs and search",
     what: "Up-to-date documentation for thousands of libraries and frameworks (React, Next.js, EF Core, ...).",
     needs: "Nothing to start. A free API key raises the limits.",
     server: { type: "http", url: "https://mcp.context7.com/mcp", enabled: true },
@@ -38,27 +44,44 @@ export const MCP_CATALOG: CatalogEntry[] = [
       "Optional: with an API key, add a header CONTEXT7_API_KEY = ${env:CONTEXT7_API_KEY} and set that environment variable on the hub.",
   },
   {
+    id: "deepwiki",
+    title: "DeepWiki",
+    category: "Docs and search",
+    what: "Ask questions about any public GitHub repository: how it is built, where things are, how to use it.",
+    needs: "Nothing. No account.",
+    server: { type: "http", url: "https://mcp.deepwiki.com/mcp", enabled: true },
+  },
+  {
+    id: "hugging-face",
+    title: "Hugging Face",
+    category: "Docs and search",
+    what: "Search models, datasets, Spaces and papers on Hugging Face.",
+    needs: "Nothing to start. A token raises the limits.",
+    server: { type: "http", url: "https://huggingface.co/mcp", enabled: true },
+    setup: "Optional: add a header Authorization = Bearer ${env:HF_TOKEN} and set HF_TOKEN on the hub.",
+  },
+  {
     id: "playwright",
     title: "Playwright browser",
+    category: "Browser",
     what: "Drive a real browser: open pages, click, fill forms, read the page, take screenshots.",
     needs: "Node.js on the hub. Downloads a browser the first time.",
+    requires: "npx",
     server: { type: "stdio", command: "npx", args: ["-y", "@playwright/mcp@latest"], enabled: true },
   },
   {
-    id: "sequential-thinking",
-    title: "Sequential thinking",
-    what: "A structured scratchpad that helps a model work through a hard problem step by step.",
-    needs: "Node.js on the hub.",
-    server: {
-      type: "stdio",
-      command: "npx",
-      args: ["-y", "@modelcontextprotocol/server-sequential-thinking"],
-      enabled: true,
-    },
+    id: "chrome-devtools",
+    title: "Chrome DevTools",
+    category: "Browser",
+    what: "Inspect a live Chrome: console messages, network requests, performance traces and screenshots. Good for debugging a web app.",
+    needs: "Node.js and Google Chrome on the hub.",
+    requires: "npx",
+    server: { type: "stdio", command: "npx", args: ["-y", "chrome-devtools-mcp@latest"], enabled: true },
   },
   {
     id: "github",
     title: "GitHub",
+    category: "Code and files",
     what: "Issues, pull requests, repositories and code search on GitHub.",
     needs: "A GitHub personal access token, kept in an environment variable on the hub.",
     server: {
@@ -70,7 +93,77 @@ export const MCP_CATALOG: CatalogEntry[] = [
     setup:
       "Create a token at github.com (Settings, Developer settings, Personal access tokens) and set it as the environment variable GITHUB_PERSONAL_ACCESS_TOKEN for the account the backend runs as, then restart the backend once so it sees the variable. The token itself never goes in the config.",
   },
+  {
+    id: "git",
+    title: "Git (one repository)",
+    category: "Code and files",
+    what: "Structured git tools for one repository: status, diff, log, branches, commit.",
+    needs: "uv on the hub.",
+    requires: "uvx",
+    server: { type: "stdio", command: "uvx", args: ["mcp-server-git", "--repository", "{repository}"], enabled: true },
+  },
+  {
+    id: "filesystem",
+    title: "Files in one folder",
+    category: "Code and files",
+    what: "Read and write files, but only inside the folders you name. Pair it with the built-in file tools switched off for a fleet that cannot touch anything else.",
+    needs: "Node.js on the hub.",
+    requires: "npx",
+    server: { type: "stdio", command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "{folder}"], enabled: true },
+  },
+  {
+    id: "sequential-thinking",
+    title: "Sequential thinking",
+    category: "Thinking and memory",
+    what: "A structured scratchpad that helps a model work through a hard problem step by step.",
+    needs: "Node.js on the hub.",
+    requires: "npx",
+    server: {
+      type: "stdio",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+      enabled: true,
+    },
+  },
+  {
+    id: "memory",
+    title: "Memory",
+    category: "Thinking and memory",
+    what: "A small knowledge graph the model can store facts in and look up in later chats.",
+    needs: "Node.js on the hub.",
+    requires: "npx",
+    server: { type: "stdio", command: "npx", args: ["-y", "@modelcontextprotocol/server-memory"], enabled: true },
+  },
+  {
+    id: "time",
+    title: "Time",
+    category: "Thinking and memory",
+    what: "The current date and time, and conversions between time zones. Local models do not know today's date.",
+    needs: "uv on the hub.",
+    requires: "uvx",
+    server: { type: "stdio", command: "uvx", args: ["mcp-server-time"], enabled: true },
+  },
+  {
+    id: "azure",
+    title: "Azure",
+    category: "Cloud",
+    what: "Work with your Azure resources: storage, databases, app services, logs and more.",
+    needs: "Node.js on the hub, and the Azure CLI signed in (az login) as the backend's account.",
+    requires: "npx",
+    server: { type: "stdio", command: "npx", args: ["-y", "@azure/mcp@latest", "server", "start"], enabled: true },
+  },
 ];
+
+export const CATALOG_CATEGORIES = ["Docs and search", "Browser", "Code and files", "Thinking and memory", "Cloud"] as const;
+
+/** The {name} placeholders in a server's command, arguments or address that still need filling in. */
+export function catalogPlaceholders(text: string): string[] {
+  return [...new Set([...text.matchAll(/\{([a-zA-Z_][a-zA-Z0-9_]*)\}/g)].map((match) => match[1]))];
+}
+
+export function fillPlaceholders(text: string, values: Record<string, string>): string {
+  return text.replace(/\{([a-zA-Z_][a-zA-Z0-9_]*)\}/g, (whole, key: string) => values[key]?.trim() || whole);
+}
 
 /**
  * Reads what people paste: a whole VS Code mcp.json ({"servers": {...}}), a Claude/Cursor style file

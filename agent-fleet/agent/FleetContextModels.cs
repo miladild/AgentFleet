@@ -21,6 +21,7 @@ internal static class FleetContextEventKind
     public const string Checkpoint = "checkpoint";
     public const string Compaction = "compaction";
     public const string ContextAssembled = "context-assembled";
+    public const string Feedback = "feedback";
 }
 
 internal sealed record FleetContextSummary(

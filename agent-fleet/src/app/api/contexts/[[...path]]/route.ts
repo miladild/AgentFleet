@@ -1,8 +1,8 @@
 const BACKEND_URL = (process.env.AGENT_URL || "http://localhost:8000/").replace(/\/$/, "");
 
 // Only the durable-record API is forwarded: the list, one context, the few actions on it, and the
-// storage view and cleanup of the History settings.
-const ALLOWED = /^(|storage|cleanup|[0-9a-f-]{36}(\/(events|deliveries|artifacts|decisions|compact|export|events\/\d+\/pin))?)$/;
+// storage view and cleanup of the History settings, and thumbs up or down on an answer.
+const ALLOWED = /^(|storage|cleanup|[0-9a-f-]{36}(\/(events|deliveries|artifacts|decisions|compact|export|feedback|events\/\d+\/pin))?)$/;
 
 async function forward(request: Request, path: string[] | undefined, method: "GET" | "POST") {
   const joined = (path ?? []).join("/");

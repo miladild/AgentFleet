@@ -35,7 +35,7 @@ internal static partial class PlanGate
     // server marks them read-only.
     public static readonly IReadOnlySet<string> BuiltInReadOnlyTools = new HashSet<string>(StringComparer.Ordinal)
     {
-        "read_file", "list_directory", "find_files", "search_files", "web_search", "web_fetch", "validate_diagram", "get_plan",
+        "read_file", "list_directory", "find_files", "search_files", "project_overview", "web_search", "web_fetch", "validate_diagram", "get_plan",
         // These two only touch the fleet's own record of the conversation: pinning a decision while
         // planning is exactly when it is most useful, and looking something up changes nothing.
         "record_decision", "search_context"

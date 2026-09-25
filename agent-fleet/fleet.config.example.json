@@ -44,12 +44,26 @@
     "run_command": { "enabled": true },
     "run_sandboxed_code": { "enabled": true },
     "web_search": { "enabled": true },
-    "web_fetch": { "enabled": true }
+    "web_fetch": { "enabled": true },
+    "project_overview": { "enabled": true },
+    "move_file": { "enabled": true },
+    "delete_file": { "enabled": true },
+    "http_request": { "enabled": true }
   },
   "mcpServers": {
     "microsoft-learn": {
       "type": "http",
       "url": "https://learn.microsoft.com/api/mcp"
+    }
+  },
+  "customTools": {
+    "run_tests": {
+      "description": "Runs the .NET tests of a project or solution and reports which failed.",
+      "command": "dotnet test {project} --nologo",
+      "parameters": [{ "name": "project", "description": "Path to the test project, the solution, or its folder", "required": true }],
+      "timeoutSeconds": 300,
+      "readOnly": false,
+      "enabled": true
     }
   },
   "sandbox": {

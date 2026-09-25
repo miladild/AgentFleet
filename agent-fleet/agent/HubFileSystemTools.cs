@@ -24,6 +24,12 @@ internal static class HubFileSystemTools
         "__pycache__", ".idea", ".vs", "target", "coverage"
     };
 
+    /// <summary>Dependency and build folders the file tools never descend into.</summary>
+    internal static IReadOnlySet<string> SkippedFolderNames => SkippedDirectories;
+
+    /// <summary>A path as every hub tool reads it: absolute as given, relative to FLEET_FILES_ROOT or the working folder.</summary>
+    internal static string Resolve(string path) => Path.GetFullPath(ResolvePath(path));
+
     public static async Task<string> ReadFileAsync(
         string path,
         int? startLine,

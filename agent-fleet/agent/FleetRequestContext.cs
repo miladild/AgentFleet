@@ -11,7 +11,64 @@ namespace AgentFleet;
 /// The request comes from a surface that joined the conversation with a message list of its own (the model
 /// picker linked to a chat), so the conversation's recent turns are not in what it sent.
 /// </param>
-internal sealed record FleetRequestIdentity(string ContextId, string? RunId, string Surface, string? TaskId = null, bool Joined = false);
+/// <param name="ClientContext">
+/// What the client said about the user's situation (AG-UI's "context": the web UI's project folder, for example).
+/// The framework's endpoint drops it, so the router hands it to the model with the durable record.
+/// </param>
+internal sealed record FleetRequestIdentity(
+    string ContextId,
+    string? RunId,
+    string Surface,
+    string? TaskId = null,
+    bool Joined = false,
+    IReadOnlyList<ClientContextItem>? ClientContext = null);
+
+/// <summary>One AG-UI context entry: a description and its value, as text.</summary>
+internal sealed record ClientContextItem(string Description, string Value)
+{
+    public const int MaxItems = 8;
+    public const int MaxDescription = 200;
+    public const int MaxValue = 2000;
+
+    /// <summary>Reads AG-UI's "context" array, bounded so a client cannot flood the prompt.</summary>
+    public static IReadOnlyList<ClientContextItem>? Read(JsonElement root)
+    {
+        if (!root.TryGetProperty("context", out JsonElement context) || context.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        var items = new List<ClientContextItem>();
+        foreach (JsonElement entry in context.EnumerateArray())
+        {
+            if (items.Count == MaxItems || entry.ValueKind != JsonValueKind.Object ||
+                !entry.TryGetProperty("description", out JsonElement description) || description.ValueKind != JsonValueKind.String ||
+                !entry.TryGetProperty("value", out JsonElement value))
+            {
+                continue;
+            }
+
+            string text = value.ValueKind == JsonValueKind.String ? value.GetString() ?? string.Empty : value.GetRawText();
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                continue;
+            }
+
+            items.Add(new ClientContextItem(Clip(description.GetString()!.Trim(), MaxDescription), Clip(text.Trim(), MaxValue)));
+        }
+
+        return items.Count == 0 ? null : items;
+    }
+
+    /// <summary>The block the model is given, or null when there is nothing to say.</summary>
+    public static string? Describe(IReadOnlyList<ClientContextItem>? items) =>
+        items is not { Count: > 0 }
+            ? null
+            : "The user's current settings in the app they are chatting from (use them; the user can change them there):\n" +
+              string.Join('\n', items.Select(item => $"- {item.Description}: {item.Value}"));
+
+    private static string Clip(string text, int length) => text.Length <= length ? text : text[..length] + "...";
+}
 
 /// <summary>An AG-UI run request reduced to what the journal needs: who it is for and the transcript it carried.</summary>
 /// <param name="JournalOnly">
@@ -90,7 +147,7 @@ internal sealed class FleetRequestContext
                 ? messagesElement.Clone()
                 : null;
             return new FleetRunRequest(
-                new FleetRequestIdentity(Guid.Parse(contextId!).ToString("D"), runId, surface, Joined: journalOnly),
+                new FleetRequestIdentity(Guid.Parse(contextId!).ToString("D"), runId, surface, Joined: journalOnly, ClientContext: ClientContextItem.Read(root)),
                 messages,
                 journalOnly);
         }

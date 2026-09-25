@@ -103,13 +103,19 @@ internal sealed record FleetConfig(
     IReadOnlyDictionary<string, FleetToolConfig> Tools,
     IReadOnlyDictionary<string, FleetMcpServerConfig>? McpServers = null,
     FleetSandboxConfig? Sandbox = null,
-    FleetHistoryConfig? History = null)
+    FleetHistoryConfig? History = null,
+    IReadOnlyDictionary<string, FleetCustomToolConfig>? CustomTools = null)
 {
     public const int MaxHistoryDays = 3650;
 
     [System.Text.Json.Serialization.JsonIgnore]
     public IReadOnlyDictionary<string, FleetMcpServerConfig> McpServerMap =>
         McpServers ?? new Dictionary<string, FleetMcpServerConfig>(StringComparer.Ordinal);
+
+    /// <summary>Tools made from commands in the Config panel (see CustomTools.cs).</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public IReadOnlyDictionary<string, FleetCustomToolConfig> CustomToolMap =>
+        CustomTools ?? new Dictionary<string, FleetCustomToolConfig>(StringComparer.Ordinal);
 
     public bool IsToolEnabled(string name) =>
         !Tools.TryGetValue(name, out FleetToolConfig? tool) || tool.Enabled;

@@ -26,16 +26,20 @@ flowchart LR
 - **Routing.** A small model reads each request and picks a machine: a strong one for hard work, a mid-size one for
   ordinary work, a fast one for quick questions. Machines that are off are skipped. With one machine there is no
   routing at all.
-- **Real tools.** Read, search, edit and write files; run commands and git; run code in a throwaway Docker
-  container; search and fetch web pages. More tools can be added without code by connecting
-  [MCP](https://modelcontextprotocol.io) servers.
+- **Real tools.** Read, search, edit, move and write files; see a project at a glance; run commands and git; call
+  HTTP APIs; run code in a throwaway Docker container, locally or on another machine over SSH; search and fetch web
+  pages. Add more without code: turn a command such as `dotnet test {project}` into a tool, pick an
+  [MCP](https://modelcontextprotocol.io) server from a catalog, or bring over the ones you use in VS Code, Claude or
+  Cursor. Every tool can be tried from the settings.
 - **Plan mode.** Turn it on and the strongest model first explores your code with read-only tools and proposes a plan:
   steps, files, a check for each step, and a diagram. You approve it. Then the plan runs in the background, one step at a
   time, and after each step the fleet itself runs that step's check and retries with the real error. You can go to bed
   and read what happened in the morning. See [docs/planning.md](docs/planning.md).
 - **Two front ends.** A web UI, and a VS Code extension with `@fleet` plus a selectable Fleet Router chat model. Both use the same local backend.
-- **Setup scripts.** One script sets up the hub, one sets up each extra machine, one adds it to the fleet, one checks
-  that everything is healthy.
+- **Setup in the browser.** A checklist that suggests a model for your hardware and downloads it with a progress bar,
+  downloads models onto other machines, sets up the code sandbox (including SSH keys), and says what to fix and how.
+  Scripts cover the same from a terminal: one sets up the hub, one each extra machine, one checks that everything is
+  healthy.
 
 ## Requirements
 

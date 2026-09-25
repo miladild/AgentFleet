@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { CopilotSidebar } from "@copilotkit/react-core/v2";
+import { CopilotSidebar, useAgent } from "@copilotkit/react-core/v2";
 import { Fragment } from "react";
 import { AttachmentMenuButton } from "@/components/AttachmentMenuButton";
 import { ToolRenderers } from "@/components/ToolRenderers";
@@ -10,6 +10,9 @@ import { PlansPanel } from "@/components/PlansPanel";
 import { ContextPanel } from "@/components/ContextPanel";
 import { ConfigPanel } from "@/components/ConfigPanel";
 import { SetupBanner } from "@/components/SetupBanner";
+import { ChatFeatures } from "@/components/ChatFeatures";
+import { ProjectFolderBar } from "@/components/ProjectFolderBar";
+import { useProjectFolder } from "@/components/projectFolder";
 
 type FleetMode = "conservative" | "aggressive";
 
@@ -184,7 +187,7 @@ function LogPanel() {
           >
             <div className="flex items-center justify-between mb-3 shrink-0">
               <h2 className="text-sm font-medium text-neutral-300">
-                Backend log{tail?.file ? ` — ${tail.file}` : ""}
+                Backend log{tail?.file ? `: ${tail.file}` : ""}
               </h2>
               <button
                 type="button"
@@ -349,6 +352,8 @@ function StatusPanel() {
 
       <SetupBanner />
 
+      <ProjectFolderBar />
+
       <SessionPanel />
 
       {status && (
@@ -393,10 +398,53 @@ function StatusPanel() {
   );
 }
 
+type ChatMessageLike = { id: string; content?: unknown };
+
+/**
+ * The chat, with thumbs up and down wired to the fleet: each is kept in the conversation's durable record with the
+ * machine that answered, and the Machines settings count them per machine.
+ */
+function FleetSidebar() {
+  const { agent } = useAgent();
+  const folder = useProjectFolder();
+
+  function feedback(rating: "up" | "down", message: ChatMessageLike) {
+    const threadId = agent?.threadId;
+    if (!threadId) return;
+    const excerpt = typeof message.content === "string" ? message.content.slice(0, 300) : "";
+    void fetch(`/api/contexts/${threadId}/feedback`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ rating, messageId: message.id, excerpt }),
+    }).catch(() => {});
+  }
+
+  return (
+    <CopilotSidebar
+      defaultOpen={true}
+      attachments={{ enabled: true, accept: "image/*" }}
+      input={{ addMenuButton: AttachmentMenuButton }}
+      messageView={{
+        assistantMessage: {
+          onThumbsUp: (message) => feedback("up", message),
+          onThumbsDown: (message) => feedback("down", message),
+        },
+      }}
+      labels={{
+        modalHeaderTitle: "Agent Fleet",
+        welcomeMessageText: folder
+          ? `Working on ${folder}. Ask anything about it, or pick a suggestion.`
+          : "Hi! Describe a coding task and I'll route it to the right machine.",
+      }}
+    />
+  );
+}
+
 export default function AgentFleetPage() {
   return (
     <main className="h-screen flex items-center justify-center bg-neutral-950 text-neutral-100 relative">
       <ToolRenderers />
+      <ChatFeatures />
       <HelpPanel />
       <LogPanel />
       <ConfigPanel />
@@ -405,16 +453,7 @@ export default function AgentFleetPage() {
       <FleetModeToggle />
       <PlanModeToggle />
       <StatusPanel />
-      <CopilotSidebar
-        defaultOpen={true}
-        attachments={{ enabled: true, accept: "image/*" }}
-        input={{ addMenuButton: AttachmentMenuButton }}
-        labels={{
-          modalHeaderTitle: "Agent Fleet",
-          welcomeMessageText:
-            "Hi! Describe a coding task and I'll route it to the right agent.",
-        }}
-      />
+      <FleetSidebar />
     </main>
   );
 }
