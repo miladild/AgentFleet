@@ -26,6 +26,15 @@ internal static class FleetTiers
 /// another node is down. Triage itself runs against it. Missing means the first heavy
 /// text node, or failing that the first text node.
 /// </param>
+/// <param name="ContextLength">
+/// How many tokens of conversation the model may see (Ollama's num_ctx). Missing means the fleet's default (32768, or
+/// FLEET_CONTEXT_LENGTH), capped at what the model supports. Ollama's own default, 4096, is smaller than the fleet's
+/// instructions and tool list together, so without this Ollama silently cuts off the start of every request.
+/// </param>
+/// <param name="Api">
+/// "ollama" (default): Ollama's native API, which is what lets the fleet set the context size. "openai": any
+/// OpenAI-compatible server (LM Studio, vLLM, llama.cpp), which gets requests the way it expects and sets its own size.
+/// </param>
 internal sealed record FleetNodeConfig(
     string Name,
     string Url,
@@ -33,7 +42,9 @@ internal sealed record FleetNodeConfig(
     string Purpose,
     string? Tier = null,
     bool Vision = false,
-    bool Fallback = false);
+    bool Fallback = false,
+    int? ContextLength = null,
+    string? Api = null);
 
 internal sealed record FleetToolConfig(bool Enabled);
 

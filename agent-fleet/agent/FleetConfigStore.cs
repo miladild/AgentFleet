@@ -148,7 +148,11 @@ internal sealed class FleetConfigStore
     private static FleetConfig Normalize(FleetConfig config)
     {
         List<FleetNodeConfig> nodes = config.Nodes
-            .Select(node => node with { Url = NormalizeUrl(node.Url) })
+            .Select(node => node with
+            {
+                Url = NormalizeUrl(node.Url),
+                Api = string.IsNullOrWhiteSpace(node.Api) ? null : node.Api.Trim().ToLowerInvariant()
+            })
             .Select(node => node.Vision
                 ? node with { Tier = null, Fallback = false }
                 : node with
@@ -233,6 +237,16 @@ internal sealed class FleetConfigStore
             if (string.IsNullOrWhiteSpace(node.Model))
             {
                 throw new InvalidOperationException($"Node '{node.Name}' must have a model.");
+            }
+
+            if (node.ContextLength is < 2048 or > 1_048_576)
+            {
+                throw new InvalidOperationException($"Node '{node.Name}' has contextLength {node.ContextLength}: use 2048 to 1048576 tokens, or leave it out for the default.");
+            }
+
+            if (node.Api is not (null or "ollama" or "openai"))
+            {
+                throw new InvalidOperationException($"Node '{node.Name}' has api '{node.Api}': it must be ollama (the default) or openai.");
             }
 
             if (!node.Vision && !FleetTiers.All.Contains(node.Tier!, StringComparer.Ordinal))

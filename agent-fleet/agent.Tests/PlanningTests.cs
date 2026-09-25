@@ -201,12 +201,12 @@ public sealed class PlanToolsTests : PlanTestBase
         var broken = new FakeValidator(code => new DiagramCheck(false, true, code, "Parse error on line 2"));
         PlanTools tools = Tools(Pass, broken);
 
-        string first = await tools.ProposePlanAsync("Same title", "G", null, null, null, null, "flowchart TD\n A(", Steps(Step("x")), default);
+        string first = await tools.ProposePlanAsync("Same title", "G", @"C:\p", null, null, null, "flowchart TD\n A(", Steps(Step("x")), default);
         Assert.Contains("NOT saved", first);
         Assert.Contains("Parse error on line 2", first);
         Assert.Empty(Store.List());
 
-        string second = await tools.ProposePlanAsync("Same title", "G", null, null, null, null, "flowchart TD\n A(", Steps(Step("x")), default);
+        string second = await tools.ProposePlanAsync("Same title", "G", @"C:\p", null, null, null, "flowchart TD\n A(", Steps(Step("x")), default);
         Assert.Contains("Plan saved", second);
         PlanRecord saved = Store.Get(Store.List()[0].Id)!;
         Assert.Null(saved.Diagram);
@@ -218,7 +218,7 @@ public sealed class PlanToolsTests : PlanTestBase
     {
         var unchecked_ = new FakeValidator(code => new DiagramCheck(true, false, code, null));
 
-        await Tools(Pass, unchecked_).ProposePlanAsync("T", "G", null, null, null, null, "flowchart TD\n A-->B", Steps(Step("x")), default);
+        await Tools(Pass, unchecked_).ProposePlanAsync("T", "G", @"C:\p", null, null, null, "flowchart TD\n A-->B", Steps(Step("x")), default);
 
         PlanRecord saved = Store.Get(Store.List()[0].Id)!;
         Assert.NotNull(saved.Diagram);
@@ -374,6 +374,21 @@ public sealed class PlanToolsTests : PlanTestBase
             Json("[\"Create ratelimit.js with a TokenBucket class taking capacity and refillPerSecond, and a tryTake() method\",\"Create ratelimit.test.js using node:test\"]"),
             default);
 
+        // Steps as bare strings are read, but they carry no checks, and a plan without checks is sent back.
+        Assert.Contains("NOT saved", reply);
+        Assert.Contains("No step has a check", reply);
+
+        reply = await Tools(Pass).ProposePlanAsync(
+            "Create Token Bucket Rate Limiter Module",
+            "Create a JavaScript module with a TokenBucket class and a test file",
+            @"C:\work",
+            Json("\"The directory exists and is writable. Node.js is installed on the system.\""),
+            Json("\"None\""),
+            Json("\"None significant\""),
+            "",
+            Json("[\"Create ratelimit.js with a TokenBucket class taking capacity and refillPerSecond, and a tryTake() method\",{\"title\":\"Create ratelimit.test.js using node:test\",\"verify\":\"dotnet --version\"}]"),
+            default);
+
         Assert.Contains("Plan saved", reply);
         PlanRecord plan = Store.Get(Store.List()[0].Id)!;
         Assert.Equal(2, plan.Steps.Count);
@@ -420,7 +435,7 @@ public sealed class PlanArgumentParsingTests
         PlanStepInput step = Assert.Single(steps);
         Assert.Equal("Add class", step.Title);
         Assert.Equal("Write it", step.Detail);
-        Assert.Equal(["a.js", "b.js"], step.Files);
+        Assert.Equal(["a.js", "b.js"], Assert.IsType<string[]>(step.Files));
         Assert.Equal("node --test", step.Verify);
         Assert.Equal("heavy", step.Tier);
     }
@@ -435,7 +450,7 @@ public sealed class PlanArgumentParsingTests
         PlanStepInput step = Assert.Single(steps);
         Assert.Equal("Wire it up", step.Title);
         Assert.Equal("Connect x to y", step.Detail);
-        Assert.Equal(["a.cs", "b.cs"], step.Files);
+        Assert.Equal(["a.cs", "b.cs"], Assert.IsType<string[]>(step.Files));
         Assert.Equal("dotnet build", step.Verify);
     }
 
@@ -460,7 +475,7 @@ public sealed class PlanArgumentParsingTests
 
         Assert.Equal(["Create the module", "Add tests"], steps.Select(step => step.Title));
         Assert.Equal("node --test", steps[1].Verify);
-        Assert.Equal(["ratelimit.js"], steps[0].Files);
+        Assert.Equal(["ratelimit.js"], Assert.IsType<string[]>(steps[0].Files));
     }
 
     [Fact]

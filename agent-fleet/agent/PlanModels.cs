@@ -51,6 +51,7 @@ internal static class RunEventKind
     public const string FilesChanged = "files-changed";
     public const string ParallelStarted = "parallel-started";
     public const string ParallelFallback = "parallel-fallback";
+    public const string Waiting = "waiting";
 }
 
 /// <summary>

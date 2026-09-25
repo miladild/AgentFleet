@@ -10,8 +10,13 @@ internal sealed record FleetNodeDefinition(
     string Purpose,
     string? Tier,
     bool Vision,
-    bool Fallback)
+    bool Fallback,
+    int? ContextLength = null,
+    string? Api = null)
 {
+    /// <summary>The machine's Ollama root, http://host:11434/, for the native API.</summary>
+    public Uri OllamaRoot => new UriBuilder(OpenAiEndpoint.Scheme, OpenAiEndpoint.Host, OpenAiEndpoint.IsDefaultPort ? -1 : OpenAiEndpoint.Port, "/").Uri;
+
     public Uri TagsEndpoint => new UriBuilder(
         OpenAiEndpoint.Scheme,
         OpenAiEndpoint.Host,
@@ -120,7 +125,9 @@ internal sealed class FleetOptions
             config.Purpose,
             config.Tier,
             config.Vision,
-            config.Fallback);
+            config.Fallback,
+            config.ContextLength,
+            config.Api);
     }
 
     private static TimeSpan ReadDuration(

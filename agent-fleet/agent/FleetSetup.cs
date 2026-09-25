@@ -590,6 +590,16 @@ internal sealed class FleetSetupService(
                 $"On {where}.");
         }
 
+        if (snapshot.Failure is "slow" or "request_failed")
+        {
+            return new SetupCheck($"node:{node.Name}", "machines", Warn, $"{node.Name}: resting after a failed request",
+                snapshot.Failure == "slow"
+                    ? $"A request to {node.Model} on {where} took longer than the time limit, so the fleet uses the fallback machine for ten minutes. " +
+                      "Usually the model does not fit in that machine's graphics memory with the context it needed."
+                    : $"A request to {node.Model} on {where} failed, so the fleet uses the fallback machine for a minute.",
+                "A smaller model, or a smaller contextLength for this machine, keeps it in graphics memory. The backend log says what happened.");
+        }
+
         if (snapshot.Failure == "model_missing")
         {
             double? size = ModelAdvisor.DownloadGb(node.Model);

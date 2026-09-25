@@ -27,13 +27,14 @@ jobs:
         working-directory: agent-fleet
         run: dotnet test agent.Tests --nologo
 
-      - name: Web UI typecheck
+      - name: Web UI typecheck and production build
         working-directory: agent-fleet
         env:
           COPILOTKIT_TELEMETRY_DISABLED: "true"
         run: |
           npm ci --no-audit --no-fund
           npm run typecheck
+          npm run build
 
       - name: VS Code extension tests
         working-directory: vscode-fleet

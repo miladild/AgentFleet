@@ -62,23 +62,8 @@ builder.Services.AddSingleton<ContextRetentionService>();
 builder.Services.AddSingleton<ModelPullService>();
 builder.Services.AddHostedService(services => services.GetRequiredService<ContextRetentionService>());
 
-static IChatClient CreateOllamaChatClient(Uri baseUrl, string model, TimeSpan networkTimeout, Microsoft.Extensions.Logging.ILogger rescueLogger)
-{
-    var client = new OpenAIClient(
-        new ApiKeyCredential("ollama"), // Ollama ignores the key, but the SDK requires one.
-        new OpenAIClientOptions
-        {
-            Endpoint = baseUrl,
-            NetworkTimeout = networkTimeout
-        });
-    IChatClient raw = client.GetChatClient(model).AsIChatClient();
-
-    // Works around a known, open Ollama bug (ollama/ollama#18530, #18563) where its
-    // qwen3-coder tool-call parser can silently fail to structure a tool call, leaking
-    // it as plain <function=...> text instead - see ToolCallRescueChatClient. No-op
-    // for any node/model that isn't hitting this.
-    return new ToolCallRescueChatClient(raw, rescueLogger);
-}
+// How much conversation each model sees, when a machine does not set its own (see OllamaNodeClient).
+int defaultContextLength = OllamaNodeClient.ConfiguredDefault(builder.Configuration["FLEET_CONTEXT_LENGTH"]);
 
 var app = builder.Build();
 RequestGuard.Use(app, RequestGuard.ParseAllowedNames(builder.Configuration["FLEET_ALLOWED_HOSTS"]));
@@ -124,9 +109,11 @@ FleetRoutingChatClient BuildRouter(FleetConfig config)
 
     IChatClient BuildNodeClient(FleetNodeDefinition node, IChatClient? fallback) =>
         new ResilientChatClient(
-            CreateOllamaChatClient(
+            OllamaNodeClient.Create(
                 node.OpenAiEndpoint,
                 node.Model,
+                node.Api,
+                node.ContextLength ?? defaultContextLength,
                 fleetOptions.NetworkTimeout,
                 loggerFactory.CreateLogger($"AgentFleet.Node.{node.Name}")),
             node,
@@ -138,7 +125,8 @@ FleetRoutingChatClient BuildRouter(FleetConfig config)
 
     // The triage classifier runs on the fallback node's machine, with its own small model.
     IChatClient triageClient = new ResilientChatClient(
-        CreateOllamaChatClient(fallbackNode.OpenAiEndpoint, config.TriageModel, fleetOptions.NetworkTimeout, loggerFactory.CreateLogger("AgentFleet.Triage")),
+        OllamaNodeClient.Create(fallbackNode.OpenAiEndpoint, config.TriageModel, fallbackNode.Api, OllamaNodeClient.TriageContextLength,
+            fleetOptions.NetworkTimeout, loggerFactory.CreateLogger("AgentFleet.Triage")),
         fallbackNode,
         healthMonitor,
         loggerFactory.CreateLogger("AgentFleet.Triage"));
@@ -236,7 +224,10 @@ Dictionary<string, string> toolDescriptions = new(StringComparer.Ordinal)
         "risks (array of strings), diagram (optional Mermaid source with every node label in double quotes), and steps: an array of objects, each with title, detail (specific enough for a smaller model to do without the rest of the conversation), " +
         "files (array of the files it touches), verify (a shell command that fails if the step did not work, such as \"dotnet build\" or \"node --test\"), tier (heavy, standard or light), and optional parallelGroup. " +
         "Only label consecutive steps with the same parallelGroup when they are independent and touch disjoint files; otherwise omit it. " +
-        "Example: {\"title\":\"Add rate limiter\",\"goal\":\"...\",\"workingDirectory\":\"C:\\\\proj\",\"assumptions\":[\"...\"],\"openQuestions\":[],\"risks\":[\"...\"],\"steps\":[{\"title\":\"Create the class\",\"detail\":\"...\",\"files\":[\"limiter.js\"],\"verify\":\"node --test\",\"tier\":\"standard\"}]} ",
+        "Example: {\"title\":\"Add two helpers\",\"goal\":\"...\",\"workingDirectory\":\"C:\\\\proj\",\"assumptions\":[\"...\"],\"openQuestions\":[],\"risks\":[\"...\"],\"steps\":[" +
+        "{\"title\":\"Add slugify and its test\",\"detail\":\"...\",\"files\":[\"src/slug.js\",\"test/slug.test.js\"],\"verify\":\"node --test test/slug.test.js\",\"tier\":\"standard\",\"parallelGroup\":\"helpers\"}," +
+        "{\"title\":\"Add titleCase and its test\",\"detail\":\"...\",\"files\":[\"src/title.js\",\"test/title.test.js\"],\"verify\":\"node --test test/title.test.js\",\"tier\":\"light\",\"parallelGroup\":\"helpers\"}," +
+        "{\"title\":\"Export both and run every test\",\"detail\":\"...\",\"files\":[\"src/index.js\"],\"verify\":\"npm test\",\"tier\":\"light\"}]} ",
     ["get_plan"] = "Shows a plan, its status and how far each step has got. Without a planId it shows the most recent plan that is waiting or in progress.",
     ["record_decision"] = "Pins a decision or constraint in the durable record of this conversation so every agent that continues the work receives it, even on another machine or after a restart. " +
         "Use it for choices later work must follow (a library, a file layout, a naming rule, an interface, something the user decided). category is decision or constraint. Keep it to one clear sentence. " +
@@ -376,7 +367,7 @@ AITool proposePlanTool = AIFunctionFactory.Create(
     // the schema literal "true" (anything), and Ollama refuses a tool whose property is not an
     // object. A description makes each one an object, and tells the model what to send.
     (string title,
-        string goal,
+        [Description("One or two sentences: what the plan achieves")] string? goal = null,
         string? workingDirectory = null,
         [Description("Array of strings: what you are assuming")] System.Text.Json.JsonElement? assumptions = null,
         [Description("Array of strings: questions for the user, empty if none")] System.Text.Json.JsonElement? openQuestions = null,
@@ -384,7 +375,7 @@ AITool proposePlanTool = AIFunctionFactory.Create(
         string? diagram = null,
         [Description("Array of step objects, each with title, detail, files (array), verify and tier")] System.Text.Json.JsonElement? steps = null,
         CancellationToken cancellationToken = default) =>
-        planTools.ProposePlanAsync(title, goal, workingDirectory, assumptions, openQuestions, risks, diagram, steps, cancellationToken),
+        planTools.ProposePlanAsync(title, string.IsNullOrWhiteSpace(goal) ? title : goal, workingDirectory, assumptions, openQuestions, risks, diagram, steps, cancellationToken),
     name: "propose_plan",
     description: toolDescriptions["propose_plan"]);
 
@@ -469,7 +460,7 @@ static IReadOnlyList<object> ParametersOf(AITool? tool)
 object ToolsPayload(FleetConfig config) =>
     toolDescriptions
         .Where(pair => pair.Key != "run_sandboxed_code" || sandbox.Executor is not null)
-        .Select(pair => (Name: pair.Key, Description: pair.Value, Source: "built-in", Tool: builtInTools.FirstOrDefault(tool => tool.Name == pair.Key).Tool))
+        .Select(pair => (Name: pair.Key, Description: pair.Value, Source: "built-in", Tool: (AITool?)builtInTools.FirstOrDefault(tool => tool.Name == pair.Key).Tool))
         .Concat(toolRegistry.Mcp.Tools.Select(entry => (
             Name: entry.Tool.Name,
             Description: entry.Tool.Description ?? string.Empty,
@@ -536,7 +527,7 @@ IChatClient agentClient = new ChatClientBuilder(fleetClient)
         ContextTools.ShouldOffer(
             toolName,
             hasContext: contextJournal.Current is not null,
-            planModeOn: planModeService.Enabled,
+            planModeOn: planModeService.Effective,
             fromPlanRunner: options?.AdditionalProperties?.ContainsKey(FleetRoutingChatClient.RunnerTierKey) == true,
             lastUserText: messages.LastOrDefault(message => message.Role == ChatRole.User)?.Text)))
     .UseFunctionInvocation(loggerFactory, invocation =>
@@ -552,7 +543,7 @@ IChatClient agentClient = new ChatClientBuilder(fleetClient)
             if (toolName != PlanGate.BlockedToolName && !fromRunner)
             {
                 PlanGateResult gate = PlanGate.Evaluate(
-                    planModeService.Enabled,
+                    planModeService.Effective,
                     context.Messages as IReadOnlyList<ChatMessage> ?? context.Messages.ToList(),
                     planStore);
                 if (gate.Phase != PlanPhase.Off && !PlanGate.IsAllowed(gate.Phase, toolName, readOnlyTools))
@@ -567,6 +558,15 @@ IChatClient agentClient = new ChatClientBuilder(fleetClient)
             {
                 object? result = await context.Function.InvokeAsync(context.Arguments, cancellationToken);
                 RecordToolCall(context, toolName, result?.ToString() ?? string.Empty, isError: false);
+
+                // A saved plan ends the turn. The planner has nothing left to do, but it has been seen proposing again and
+                // again in one reply, and each proposal replaces the last, so a later, worse version won (measured: six
+                // proposals in one turn, the last a one-step plan). The plan itself is the answer the user sees.
+                if (toolName == "propose_plan" && result?.ToString()?.StartsWith("Plan saved", StringComparison.Ordinal) == true)
+                {
+                    context.Terminate = true;
+                }
+
                 return result;
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
@@ -662,7 +662,8 @@ var planRunner = new PlanRunner(
     fleetOptions: fleetOptions,
     healthMonitor: healthMonitor,
     recorder: new PlanContextRecorder(contextStore, planStore, loggerFactory.CreateLogger("AgentFleet.PlanContext")),
-    journal: contextJournal);
+    journal: contextJournal,
+    sleepGuard: new SystemSleepGuard(loggerFactory.CreateLogger("AgentFleet.Power")));
 planStore.Approved += planRunner.Enqueue;
 app.Lifetime.ApplicationStarted.Register(() => planRunner.Start(app.Lifetime.ApplicationStopping));
 
@@ -740,7 +741,7 @@ app.MapGet("/api/fleet-config", () =>
     return Results.Json(new
     {
         triageModel = config.TriageModel,
-        nodes = config.Nodes.Select(node => new { node.Name, node.Url, node.Model, node.Purpose, node.Tier, node.Vision, node.Fallback }),
+        nodes = config.Nodes.Select(node => new { node.Name, node.Url, node.Model, node.Purpose, node.Tier, node.Vision, node.Fallback, node.ContextLength, node.Api }),
         tools = ToolsPayload(config),
         mcpServers = config.McpServerMap,
         // What actually happened at the last startup, which can differ from the saved
@@ -855,7 +856,9 @@ app.MapPut("/api/fleet-config", async (FleetConfigUpdateRequest request, Cancell
                     node.Purpose,
                     node.Tier,
                     node.Vision,
-                    node.Fallback)).ToList()
+                    node.Fallback,
+                    node.ContextLength,
+                    node.Api)).ToList()
                 : current.Nodes,
             Tools = request.Tools is { Count: > 0 }
                 ? request.Tools.ToDictionary(kv => kv.Key, kv => new FleetToolConfig(kv.Value), StringComparer.Ordinal)
@@ -903,7 +906,7 @@ app.MapPut("/api/fleet-config", async (FleetConfigUpdateRequest request, Cancell
         return Results.Json(new
         {
             triageModel = saved.TriageModel,
-            nodes = saved.Nodes.Select(node => new { node.Name, node.Url, node.Model, node.Purpose, node.Tier, node.Vision, node.Fallback }),
+            nodes = saved.Nodes.Select(node => new { node.Name, node.Url, node.Model, node.Purpose, node.Tier, node.Vision, node.Fallback, node.ContextLength, node.Api }),
             tools = ToolsPayload(saved),
             mcpServers = saved.McpServerMap,
             mcpStatus = toolRegistry.Mcp.Statuses,
@@ -1562,7 +1565,9 @@ internal sealed record FleetConfigNodeUpdate(
     string Purpose,
     string? Tier = null,
     bool Vision = false,
-    bool Fallback = false);
+    bool Fallback = false,
+    int? ContextLength = null,
+    string? Api = null);
 
 internal sealed record FleetConfigUpdateRequest(
     string? TriageModel,

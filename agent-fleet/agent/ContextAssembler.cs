@@ -138,6 +138,7 @@ internal static class ContextText
             FleetContextEventKind.Route =>
                 $"routed to {String(p, "node")} ({Clip(String(p, "reason"), 80)})",
             FleetContextEventKind.AssistantOutput => Clip(String(p, "text"), 200),
+            FleetContextEventKind.Feedback => $"the user gave an answer a thumbs {String(p, "rating")}",
             _ => Clip(p.ValueKind == JsonValueKind.Object ? p.GetRawText() : string.Empty, 160)
         };
     }

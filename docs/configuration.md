@@ -64,6 +64,8 @@ fallback, found 2."
 | `tier` | `heavy`, `standard` or `light`. Missing means `standard`. Ignored for a vision node. |
 | `vision` | Reads images. Used only when a message contains one. Never the fallback. |
 | `fallback` | Exactly one node has this. Missing everywhere means the first heavy text node. |
+| `contextLength` | The most tokens of conversation this machine's model may be asked to see (Ollama's `num_ctx`). Each request asks for what it needs, up to this. Missing means 32768 (or `FLEET_CONTEXT_LENGTH`). Lower it for a machine whose model spills out of graphics memory; see [planning.md](planning.md#how-much-a-model-sees) |
+| `api` | `ollama` (default): Ollama's native API, which is what lets the fleet set the context size. `openai`: any OpenAI-compatible server (LM Studio, vLLM, llama.cpp); it then chooses its own context size |
 
 At least one text node (not vision) is required.
 
@@ -135,6 +137,7 @@ set them in your user environment variables. For a Windows service set them on t
 | `FLEET_HEALTH_PROBE_TIMEOUT_SECONDS` | 3 | Health probe timeout (1 to 30) |
 | `FLEET_HEALTH_CACHE_SECONDS` | 10 | How often nodes are probed (1 to 300) |
 | `SHELL_EXECUTION_TIMEOUT_SECONDS` | 120 | How long one `run_command` may run |
+| `FLEET_CONTEXT_LENGTH` | 32768 | The most tokens of context a machine is asked for when it does not set `contextLength` |
 | `SANDBOX_*` | | The same settings as the `sandbox` section, used when the file does not give them |
 | `HUB_OLLAMA_URL`, `HUB_OLLAMA_MODEL`, `TRIAGE_OLLAMA_MODEL` | | Seed values for the first-ever start only |
 

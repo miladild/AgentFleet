@@ -87,7 +87,7 @@ internal sealed class FleetRoutingChatClient : IChatClient
         IReadOnlyList<ChatMessage> messageList = PrepareMessages(messages);
         string? runnerTier = RunnerTier(options);
         PlanGateResult gate = runnerTier is null
-            ? PlanGate.Evaluate(_planModeService.Enabled, messageList, _planStore)
+            ? PlanGate.Evaluate(_planModeService.Effective, messageList, _planStore)
             : new PlanGateResult(PlanPhase.Off, null);
         // Non-streaming path isn't used by the AG-UI chat flow today, so it doesn't get
         // the "answered by" footer that GetStreamingResponseAsync appends.
@@ -126,7 +126,7 @@ internal sealed class FleetRoutingChatClient : IChatClient
         // routing and the tool filter must both see the same result.
         string? runnerTier = RunnerTier(options);
         PlanGateResult gate = runnerTier is null
-            ? PlanGate.Evaluate(_planModeService.Enabled, messageList, _planStore)
+            ? PlanGate.Evaluate(_planModeService.Effective, messageList, _planStore)
             : new PlanGateResult(PlanPhase.Off, null);
         FleetRouteTarget target = runnerTier is null
             ? await SelectTargetAsync(messageList, gate, cancellationToken)
@@ -571,16 +571,23 @@ internal sealed class FleetRoutingChatClient : IChatClient
                 // Swap the agent's instructions out rather than adding to them (see PlanningInstructions).
                 // Clone first: with no tools the filter hands back the caller's own options object.
                 ChatOptions planning = filtered.Clone();
-                planning.Instructions = PlanGate.PlanningInstructions(gate.Plan);
+                planning.Instructions = PlanGate.PlanningInstructions(gate.Plan, MachinesByTier());
                 return (messages, planning);
             case PlanPhase.Planning:
-                return (Prepend(PlanGate.PlanningInstructions(gate.Plan), messages), filtered);
+                return (Prepend(PlanGate.PlanningInstructions(gate.Plan, MachinesByTier()), messages), filtered);
             case PlanPhase.Executing:
                 return (Prepend(PlanGate.MonitorDirective(gate.Plan!), messages), filtered);
             default:
                 return (messages, filtered);
         }
     }
+
+    // "heavy: hub (qwen3-coder:30b); standard: worker1 (qwen2.5-coder:7b)": what the planner can spread steps over.
+    private string MachinesByTier() =>
+        string.Join("; ", FleetTiers.All
+            .Select(tier => (Tier: tier, Nodes: _textTargets.Where(target => target.Node.Tier == tier).Select(target => $"{target.Node.Name} ({target.Node.Model})").ToList()))
+            .Where(entry => entry.Nodes.Count > 0)
+            .Select(entry => $"{entry.Tier}: {string.Join(", ", entry.Nodes)}"));
 
     private static IReadOnlyList<ChatMessage> Prepend(string directive, IReadOnlyList<ChatMessage> messages) =>
         new List<ChatMessage> { new(ChatRole.System, directive) }.Concat(messages).ToList();

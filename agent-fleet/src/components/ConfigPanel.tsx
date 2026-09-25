@@ -17,6 +17,9 @@ type FleetConfigNode = {
   tier: string | null;
   vision: boolean;
   fallback: boolean;
+  /** The most tokens of context this machine is asked for; null means the fleet's default. */
+  contextLength?: number | null;
+  api?: string | null;
 };
 
 type FleetConfigData = {
@@ -457,6 +460,27 @@ function MachineCard({
                 onChange={(e) => onChange({ ...node, purpose: e.target.value })}
                 className="w-full text-xs px-2 py-1 rounded bg-neutral-900 border border-neutral-700 text-neutral-300"
               />
+            </div>
+          </div>
+          <div>
+            <label className="block text-[10px] uppercase tracking-wide text-neutral-500 mb-0.5">Most context (tokens)</label>
+            <div className="flex items-center gap-2">
+              <select
+                value={node.contextLength ?? ""}
+                onChange={(e) => onChange({ ...node, contextLength: e.target.value ? Number(e.target.value) : null })}
+                className="text-xs px-2 py-1 rounded bg-neutral-900 border border-neutral-700 text-neutral-200"
+              >
+                <option value="">Default (32K)</option>
+                {[8192, 12288, 16384, 24576, 32768, 65536, 131072].map((size) => (
+                  <option key={size} value={size}>
+                    {size / 1024}K
+                  </option>
+                ))}
+              </select>
+              <span className="text-[11px] text-neutral-600">
+                Each request asks for what it needs, up to this. Lower it if this machine&apos;s model spills out of graphics memory
+                (slow answers); raise it for long files.
+              </span>
             </div>
           </div>
           <p className="text-[10px] text-neutral-600">Machine {index + 1}</p>

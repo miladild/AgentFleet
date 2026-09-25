@@ -53,6 +53,13 @@ internal sealed partial class PlanRunner
 {
     public const int MaxAttemptsPerStep = 3;
 
+    /// <summary>
+    /// How often a step waits for the machines to come back before a model call that could not reach any machine
+    /// counts as one of its attempts. With the default delays that is about an hour: long enough for a machine to
+    /// reboot for updates or Ollama to restart overnight, short enough that a plan does not hang for ever.
+    /// </summary>
+    public const int MaxTransientWaits = 8;
+
     private const int MaxStepContextFiles = 8;
     private const int MaxStepContextBytesPerFile = 32 * 1024;
     private const int MaxStepContextCharacters = 48_000;
@@ -74,6 +81,8 @@ internal sealed partial class PlanRunner
     private readonly Channel<string> _queue = Channel.CreateUnbounded<string>();
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _active = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, bool> _stopRequested = new(StringComparer.Ordinal);
+    private readonly Func<int, TimeSpan> _transientDelay;
+    private readonly ISleepGuard _sleepGuard;
 
     public PlanRunner(
         FleetPlanStore store,
@@ -84,8 +93,12 @@ internal sealed partial class PlanRunner
         FleetOptions? fleetOptions = null,
         FleetHealthMonitor? healthMonitor = null,
         PlanContextRecorder? recorder = null,
-        FleetContextJournal? journal = null)
+        FleetContextJournal? journal = null,
+        Func<int, TimeSpan>? transientDelay = null,
+        ISleepGuard? sleepGuard = null)
     {
+        _transientDelay = transientDelay ?? DefaultTransientDelay;
+        _sleepGuard = sleepGuard ?? NoSleepGuard.Instance;
         _recorder = recorder;
         _journal = journal;
         _store = store;
@@ -170,6 +183,9 @@ internal sealed partial class PlanRunner
         using var runCancellation = CancellationTokenSource.CreateLinkedTokenSource(stopping);
         _active[planId] = runCancellation;
         _stopRequested.TryRemove(planId, out _);
+
+        // A plan left running overnight must not be stopped by the computer going to sleep.
+        using IDisposable awake = _sleepGuard.Hold($"Agent Fleet is running the plan \"{plan.Title}\"");
 
         try
         {
@@ -458,6 +474,7 @@ internal sealed partial class PlanRunner
         bool deferPlanBlock = false)
     {
         string? lastFailure = previousFailure;
+        int waits = 0;
 
         for (int attempt = firstAttempt; attempt <= MaxAttemptsPerStep; attempt++)
         {
@@ -467,6 +484,22 @@ internal sealed partial class PlanRunner
                 plan, step, attempt, lastFailure, tier, parallelGroup: false, cancellationToken: cancellationToken);
             if (!model.ShouldVerify)
             {
+                // No machine could answer at all (fallback included): the step did nothing wrong, the network or a
+                // machine did. Wait for it instead of spending an attempt, so a reboot overnight does not block the plan.
+                if (model.Transient && waits < MaxTransientWaits)
+                {
+                    TimeSpan delay = _transientDelay(waits++);
+                    _logger.LogWarning(
+                        "Plan {PlanId} step {StepId}: no machine answered; waiting {Delay} before trying again ({Wait} of {MaxWaits}).",
+                        plan.Id, step.Id, delay, waits, MaxTransientWaits);
+                    _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.Waiting, tier,
+                        detail: $"No machine could answer ({Summarize(model.Failure ?? string.Empty)}). Waiting {Duration(delay)} before trying again; " +
+                                $"this does not count as an attempt ({waits} of {MaxTransientWaits} waits).");
+                    await Task.Delay(delay, cancellationToken);
+                    attempt--;
+                    continue;
+                }
+
                 lastFailure = model.Failure;
                 continue;
             }
@@ -627,9 +660,40 @@ internal sealed partial class PlanRunner
             _logger.LogWarning(exception, "Plan {PlanId} step {StepId} attempt {Attempt}: the model call failed.", plan.Id, step.Id, attempt);
             string failure = $"The model call failed: {exception.Message}";
             _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.ModelFailed, tier, detail: failure);
-            return new ModelAttemptResult(step.Id, string.Empty, failure, ShouldVerify: false);
+            return new ModelAttemptResult(step.Id, string.Empty, failure, ShouldVerify: false, Transient: IsTransient(exception));
         }
     }
+
+    /// <summary>
+    /// A failure of the network or a machine rather than of the model's work: nothing answered, the connection
+    /// broke, or Ollama said it was overloaded or down. Worth waiting for; a bad answer is not.
+    /// </summary>
+    internal static bool IsTransient(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            switch (current)
+            {
+                case OllamaSharp.Models.Exceptions.ModelDoesNotSupportToolsException:
+                    return false;
+                case OllamaSharp.Models.Exceptions.OllamaException:
+                case HttpRequestException or System.Net.Sockets.SocketException or IOException or TimeoutException:
+                case System.ClientModel.ClientResultException { Status: 0 or 408 or 429 or >= 500 }:
+                    return true;
+                case AggregateException aggregate when aggregate.InnerExceptions.Any(IsTransient):
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    // 30 s, 1, 2, 4 and 8 minutes, then every 15 minutes.
+    private static TimeSpan DefaultTransientDelay(int wait) =>
+        TimeSpan.FromSeconds(Math.Min(30 * Math.Pow(2, wait), 15 * 60));
+
+    private static string Duration(TimeSpan delay) =>
+        delay.TotalMinutes >= 1 ? $"{delay.TotalMinutes:0} minute{(delay.TotalMinutes >= 1.5 ? "s" : string.Empty)}" : $"{delay.TotalSeconds:0} seconds";
 
     // The files a step names that do not exist when it first starts: it is expected to create them, and
     // is not done until they exist. Taken once, on the first attempt, so a retry cannot move the goalposts.
@@ -715,7 +779,7 @@ internal sealed partial class PlanRunner
         _logger.LogWarning("Plan {PlanId} is blocked at step {StepId} ({Title}).", planId, step.Id, step.Title);
     }
 
-    private sealed record ModelAttemptResult(int StepId, string Summary, string? Failure, bool ShouldVerify);
+    private sealed record ModelAttemptResult(int StepId, string Summary, string? Failure, bool ShouldVerify, bool Transient = false);
 
     internal static string BuildPrompt(
         PlanRecord plan,
