@@ -43,7 +43,14 @@ rules to the named peer IPs. `-RestrictOllamaRules` remains accepted for compati
 - **`fetch failed` or a stream error.** The machine that was chosen is unreachable. Check the panel on the left; requests
   for a down machine normally go to the fallback node, but a vision request has no fallback (nothing else can read images).
 - **Nothing happens for minutes.** The model may be spilling out of graphics memory. A model bigger than your card's memory
-  can be ten times slower. Use a smaller one, or check `ollama ps` on that machine to see how it is loaded.
+  can be ten times slower. Use a smaller one, or check `ollama ps` on that machine to see how it is loaded: the
+  `CONTEXT` column is the size the fleet asked for, and a `PROCESSOR` split such as `20%/80% CPU/GPU` means it did not
+  fit. Lower that machine's `contextLength` ([configuration.md](configuration.md#nodes)) or use a smaller model. A machine
+  that times out rests for ten minutes (the Setup tab says so) while the fallback answers.
+- **The model forgets the task, ignores the tools, or answers something else.** Most often the conversation did not fit in
+  what the model may see. The fleet sizes each request for Ollama; if the log says a request "needs about N tokens but
+  the most it may use is M", give that machine a larger `contextLength` (if its memory allows) or a model with a longer
+  window. A machine set to `"api": "openai"` chooses its own size, which may be small.
 
 ## The backend will not start
 
@@ -97,9 +104,14 @@ this.
 
 ## Plans
 
-- **Blocked at a step.** Open the plan: the step says how many attempts it took and the last problem. Look at the files, fix
-  what is wrong (or the step's check), and press **Approve and resume**; finished steps are kept and it continues from
-  the blocked one.
+- **Blocked at a step.** Open the plan (or `@fleet /status` in VS Code): the step says how many attempts it took and the
+  last problem. Look at the files, fix what is wrong (or the step's check), and press **Approve and resume**; finished
+  steps are kept and it continues from the blocked one.
+- **"Waiting ... before trying again" in the run log.** No machine could answer (the network, or the fallback machine,
+  was down). The step waits for up to about an hour without spending its attempts; nothing needs doing unless it lasts.
+- **The plan was sent back while planning** ("The plan was NOT saved, because it would fail when it runs"). That is the
+  fleet catching a bad check before the night; the planner fixes it and proposes again. If it keeps failing, say in your
+  request how the project is tested (for example "tests run with `npm test`").
 - **A check hangs.** It timed out after 120 seconds. Usually something keeps the process alive: a timer, a server, a watch
   mode. Reject the plan and ask for a check that finishes on its own.
 - **The plan has no diagram.** The model's diagram failed validation twice, or the web UI was not reachable from the

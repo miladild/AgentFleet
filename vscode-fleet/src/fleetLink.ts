@@ -84,3 +84,59 @@ export function describeSession(messageCount: number, updatedAtUtc: string, now:
     minutes < 1 ? "just now" : minutes < 60 ? `${minutes} min ago` : minutes < 48 * 60 ? `${Math.round(minutes / 60)} h ago` : `${Math.round(minutes / 1440)} days ago`;
   return `${messageCount} message${messageCount === 1 ? "" : "s"}, ${ago}`;
 }
+
+/** One AG-UI context entry: what it is, and its value. */
+export interface ContextEntry {
+  description: string;
+  value: string;
+}
+
+const MAX_CONTEXT_VALUE_CHARS = 2000;
+const UNSAFE_PATH_CHARACTER = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+
+/**
+ * The workspace folders as AG-UI context, so the fleet knows which project "the tests" or "this file" means. Only when
+ * the backend runs on this same computer: the fleet's file tools work on the hub's disk, and a path on another
+ * machine (or a remote workspace) would send it looking in the wrong place.
+ */
+export function workspaceContext(backendUrl: string, folders: ReadonlyArray<{ scheme: string; fsPath: string }>): ContextEntry[] {
+  let host: string;
+  try {
+    host = new URL(backendUrl).hostname.toLowerCase();
+  } catch {
+    return [];
+  }
+
+  if (!["localhost", "127.0.0.1", "[::1]", "::1"].includes(host)) {
+    return [];
+  }
+
+  const local: string[] = [];
+  let used = 0;
+  for (const folder of folders) {
+    const path = folder.fsPath;
+    if (folder.scheme !== "file" || !path || UNSAFE_PATH_CHARACTER.test(path) || local.includes(path)) {
+      continue;
+    }
+
+    // Keep paths whole. A partial path looks valid but sends the agent to the wrong place.
+    const added = path.length + (local.length === 0 ? 0 : 2);
+    if (used + added > MAX_CONTEXT_VALUE_CHARS) {
+      continue;
+    }
+
+    local.push(path);
+    used += added;
+  }
+
+  if (local.length === 0) {
+    return [];
+  }
+
+  return [
+    {
+      description: local.length === 1 ? "The project folder the user is working in (open in VS Code)" : "The project folders open in VS Code",
+      value: local.join("; "),
+    },
+  ];
+}

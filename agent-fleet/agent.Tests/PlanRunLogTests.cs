@@ -161,12 +161,14 @@ public sealed class PlanRunLogTests : PlanTestBase
             new PlanTools(Store, Valid, (command, _, _) => Task.FromResult(Pass(command))),
             agent,
             NullLogger.Instance,
-            TimeSpan.FromMilliseconds(150));
+            TimeSpan.FromMilliseconds(150),
+            transientDelay: _ => TimeSpan.Zero);
 
         await runner.RunPlanAsync(plan.Id, default);
 
         IReadOnlyList<PlanRunEvent> events = Store.Get(plan.Id)!.Events!;
         Assert.Contains(events, e => e.Kind == RunEventKind.ModelFailed && e.Detail.Contains("connection reset"));
+        Assert.Contains(events, e => e.Kind == RunEventKind.Waiting);
         Assert.Contains(events, e => e.Kind == RunEventKind.TimedOut);
     }
 

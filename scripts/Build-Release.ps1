@@ -79,10 +79,23 @@ if (-not $SkipFleet) {
     Push-Location $web
     try {
         if (-not (Test-Path 'node_modules')) { npm ci --no-audit --no-fund }
+        # Next rewrites these files to name the chosen build folder. Preserve the caller's exact bytes, including
+        # uncommitted work, instead of using git checkout (which would discard their edits).
+        $generatedFiles = 'next-env.d.ts', 'tsconfig.json'
+        $generatedState = @{}
+        foreach ($generatedFile in $generatedFiles) {
+            if (Test-Path $generatedFile) { $generatedState[$generatedFile] = [IO.File]::ReadAllBytes((Resolve-Path $generatedFile)) }
+            else { $generatedState[$generatedFile] = $null }
+        }
         $env:FLEET_STANDALONE = '1'; $env:NEXT_DIST_DIR = $distDir; $env:NEXT_TELEMETRY_DISABLED = '1'
-        try { npm run build } finally { $env:FLEET_STANDALONE = $null; $env:NEXT_DIST_DIR = $null }
-        # next build rewrites these two files to point at the build folder; put back the committed versions.
-        if (Test-Path (Join-Path $root '.git')) { git checkout -- next-env.d.ts tsconfig.json 2>$null }
+        try { npm run build }
+        finally {
+            $env:FLEET_STANDALONE = $null; $env:NEXT_DIST_DIR = $null
+            foreach ($generatedFile in $generatedFiles) {
+                if ($null -eq $generatedState[$generatedFile]) { Remove-Item $generatedFile -Force -ErrorAction SilentlyContinue }
+                else { [IO.File]::WriteAllBytes((Join-Path (Get-Location) $generatedFile), [byte[]]$generatedState[$generatedFile]) }
+            }
+        }
 
         $webStage = Join-Path $stage 'web'
         Copy-Item -Recurse (Join-Path $distDir 'standalone') $webStage
@@ -111,7 +124,15 @@ if (-not $SkipFleet) {
     # Windows: something to double-click.
     if ($Runtime -like 'win-*') { Copy-Item -LiteralPath (Join-Path $root 'scripts/release/Start Agent Fleet.cmd') $stage }
     # Whatever this machine has lying around (its own config, keys, conversations) must never reach a download.
-    Write-Ok 'Copied'
+    $forbidden = @(Get-ChildItem $stage -Recurse -Force -File | Where-Object {
+        $_.Name -eq 'fleet.config.json' -or $_.Name -like 'fleet.config.json.*' -or
+        $_.Name -eq '.env' -or $_.Name -like '.env.*' -or
+        $_.Name -like '*.db' -or $_.Name -like '*.db-*' -or $_.Name -like '*.log'
+    })
+    if ($forbidden.Count -gt 0) {
+        throw "Release contains private runtime file(s): $($forbidden.FullName -join ', ')"
+    }
+    Write-Ok 'Copied; no local config, environment, database or log files found'
 
     Write-Step 'Archive'
     if ($Runtime -like 'win-*') {
@@ -136,7 +157,7 @@ if ($Extension) {
         npm run compile
         $extensionVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
         $vsix = Join-Path $OutDir "agent-fleet-chat-$extensionVersion.vsix"
-        npx --yes '@vscode/vsce' package --skip-license --out $vsix
+        npx --yes '@vscode/vsce@4.0.0' package --out $vsix
     }
     finally { Pop-Location }
     $assets += $vsix

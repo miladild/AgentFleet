@@ -23,6 +23,7 @@ internal sealed class FleetHealthMonitor
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ConcurrentDictionary<string, NodeHealthSnapshot> _snapshots = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _probeLocks = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, (DateTimeOffset Until, string Failure)> _coolingDown = new(StringComparer.Ordinal);
 
     public FleetHealthMonitor(FleetOptions options, IHttpClientFactory httpClientFactory)
     {
@@ -39,6 +40,18 @@ internal sealed class FleetHealthMonitor
         if (!_options.TryGetNode(nodeName, out FleetNodeDefinition? node))
         {
             return new NodeHealthSnapshot(nodeName, string.Empty, false, false, DateTimeOffset.UtcNow, "not_configured");
+        }
+
+        // A machine that just failed a real request (it timed out, or Ollama broke) rests for a while even though its
+        // model list still answers: otherwise every model call of a plan step would wait out the same timeout again.
+        if (_coolingDown.TryGetValue(node.Name, out (DateTimeOffset Until, string Failure) cooling))
+        {
+            if (cooling.Until > DateTimeOffset.UtcNow)
+            {
+                return new NodeHealthSnapshot(node.Name, node.Model, Reachable: false, ModelAvailable: false, DateTimeOffset.UtcNow, cooling.Failure);
+            }
+
+            _coolingDown.TryRemove(node.Name, out _);
         }
 
         if (!forceProbe && TryGetFreshSnapshot(node.Name, out NodeHealthSnapshot? snapshot))
@@ -75,7 +88,21 @@ internal sealed class FleetHealthMonitor
     }
 
     /// <summary>Drops every cached result, so a machine whose address or model changed is probed afresh.</summary>
-    public void Forget() => _snapshots.Clear();
+    public void Forget()
+    {
+        _snapshots.Clear();
+        _coolingDown.Clear();
+    }
+
+    /// <summary>Takes a machine out of use for a while after a real request failed on it, whatever its probes say.</summary>
+    public void CoolDown(string nodeName, string failure, TimeSpan duration)
+    {
+        MarkUnavailable(nodeName, failure);
+        if (_options.TryGetNode(nodeName, out FleetNodeDefinition? node))
+        {
+            _coolingDown[node.Name] = (DateTimeOffset.UtcNow + duration, failure);
+        }
+    }
 
     public void MarkUnavailable(string nodeName, string failure)
     {

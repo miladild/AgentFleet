@@ -17,8 +17,9 @@ public sealed class PlanRunnerTests : PlanTestBase
 {
     private static readonly FakeValidator Valid = new(code => new DiagramCheck(true, true, code, null));
 
-    private PlanRunner Runner(FakeStepAgent agent, Func<string, string> verify, TimeSpan? timeout = null) =>
-        new(Store, new PlanTools(Store, Valid, (command, _, _) => Task.FromResult(verify(command))), agent, NullLogger.Instance, timeout);
+    private PlanRunner Runner(FakeStepAgent agent, Func<string, string> verify, TimeSpan? timeout = null, ISleepGuard? sleepGuard = null) =>
+        new(Store, new PlanTools(Store, Valid, (command, _, _) => Task.FromResult(verify(command))), agent, NullLogger.Instance, timeout,
+            transientDelay: _ => TimeSpan.Zero, sleepGuard: sleepGuard);
 
     private static string Pass(string _) => "Exit code: 0\n--- stdout ---\nok";
 
@@ -32,7 +33,7 @@ public sealed class PlanRunnerTests : PlanTestBase
     public async Task Steps_run_in_order_each_on_its_own_tier_and_the_plan_finishes()
     {
         PlanRecord plan = ApprovedPlan(Step("first", tier: "light"), Step("second", tier: "heavy"));
-        FakeStepAgent agent = Agent("Did the thing.\n\n_— via aiserver_");
+        FakeStepAgent agent = Agent("Did the thing.\n\n_— via worker1_");
 
         await Runner(agent, Pass).RunPlanAsync(plan.Id, default);
 
@@ -101,7 +102,7 @@ public sealed class PlanRunnerTests : PlanTestBase
     {
         PlanRecord plan = ApprovedPlan(Step("flaky"));
         int calls = 0;
-        var agent = new FakeStepAgent((_, _, _) => ++calls == 1 ? throw new HttpRequestException("node went away") : Task.FromResult("fine"));
+        var agent = new FakeStepAgent((_, _, _) => ++calls == 1 ? throw new InvalidOperationException("node went away") : Task.FromResult("fine"));
         int verifications = 0;
 
         // The end-of-run "what changed" lookup is a command too, so count only the step's own check.
@@ -113,6 +114,80 @@ public sealed class PlanRunnerTests : PlanTestBase
         Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
     }
 
+    [Fact]
+    public async Task When_no_machine_answers_the_step_waits_without_spending_its_attempts()
+    {
+        PlanRecord plan = ApprovedPlan(Step("during a reboot", tier: "standard"));
+        int calls = 0;
+        var agent = new FakeStepAgent((_, _, _) => ++calls <= 5
+            ? throw new HttpRequestException("No connection could be made because the target machine actively refused it.")
+            : Task.FromResult("fine"));
+
+        await Runner(agent, Pass).RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Done, after.Status);
+        // Five outages and then the first real attempt, still on the step's own tier: nothing was escalated.
+        Assert.Equal(6, agent.Calls.Count);
+        Assert.All(agent.Calls, call => Assert.Equal("standard", call.Tier));
+        Assert.Equal(5, after.Events!.Count(e => e.Kind == RunEventKind.Waiting));
+        Assert.Contains("does not count as an attempt", after.Events!.First(e => e.Kind == RunEventKind.Waiting).Detail);
+    }
+
+    [Fact]
+    public async Task A_long_outage_does_eventually_use_the_attempts_and_block_the_plan()
+    {
+        PlanRecord plan = ApprovedPlan(Step("machines gone"));
+        var agent = new FakeStepAgent((_, _, _) => throw new HttpRequestException("unreachable"));
+
+        await Runner(agent, Pass).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(PlanStatus.Blocked, Store.Get(plan.Id)!.Status);
+        Assert.Equal(PlanRunner.MaxTransientWaits + PlanRunner.MaxAttemptsPerStep, agent.Calls.Count);
+    }
+
+    [Theory]
+    [InlineData(typeof(HttpRequestException), true)]
+    [InlineData(typeof(System.Net.Sockets.SocketException), true)]
+    [InlineData(typeof(TimeoutException), true)]
+    [InlineData(typeof(InvalidOperationException), false)]
+    [InlineData(typeof(ArgumentException), false)]
+    public void Outages_are_told_apart_from_other_failures(Type type, bool transient) =>
+        Assert.Equal(transient, PlanRunner.IsTransient((Exception)Activator.CreateInstance(type)!));
+
+    [Fact]
+    public void An_outage_wrapped_in_another_exception_is_still_an_outage() =>
+        Assert.True(PlanRunner.IsTransient(new InvalidOperationException("wrapper", new HttpRequestException("refused"))));
+
+    private sealed class CountingSleepGuard : ISleepGuard
+    {
+        public int Held { get; private set; }
+
+        public int Released { get; private set; }
+
+        public IDisposable Hold(string reason)
+        {
+            Held++;
+            return new Release(this);
+        }
+
+        private sealed class Release(CountingSleepGuard owner) : IDisposable
+        {
+            public void Dispose() => owner.Released++;
+        }
+    }
+
+    [Fact]
+    public async Task The_computer_is_kept_awake_while_a_plan_runs_and_released_after()
+    {
+        PlanRecord plan = ApprovedPlan(Step("one"), Step("two"));
+        var guard = new CountingSleepGuard();
+
+        await Runner(Agent(), Pass, sleepGuard: guard).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(1, guard.Held);
+        Assert.Equal(1, guard.Released);
+    }
     [Fact]
     public async Task A_step_that_times_out_is_still_checked_because_the_work_may_be_done()
     {

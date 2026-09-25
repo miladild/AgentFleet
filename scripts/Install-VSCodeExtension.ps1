@@ -33,7 +33,7 @@ try {
     npm run compile; if ($LASTEXITCODE) { throw 'npm run compile failed.' }
     $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
     $vsix = Join-Path $extensionDir "agent-fleet-chat-$version.vsix"
-    npx --yes '@vscode/vsce' package --allow-missing-repository --skip-license --out $vsix
+    npx --yes '@vscode/vsce@4.0.0' package --out $vsix
     if ($LASTEXITCODE -or -not (Test-Path $vsix)) { throw 'Packaging failed.' }
     Write-Ok "Built $vsix"
 

@@ -159,3 +159,5 @@ hub setup can install prerequisites; Linux and macOS hub setup expects them to b
 ## License
 
 [MIT](LICENSE).
+
+Security issues should be reported privately through GitHub's **Report a vulnerability** form; see [SECURITY.md](SECURITY.md).

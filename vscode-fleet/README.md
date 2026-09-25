@@ -65,11 +65,12 @@ the one you actually use.
 
 ## Plan mode from VS Code
 
-Plan mode is a switch on the backend, not in VS Code: turn it on with the
-toggle in the web UI (top right) and `@fleet` follows it. Then
-`@fleet add rate limiting to the API in C:\src\myapp` explores the code with
-read-only tools and answers with a plan (the goal, the steps, any diagram),
-followed by buttons:
+Start the request with `/plan`:
+`@fleet /plan add rate limiting to the API in C:\src\myapp`. Plan mode then
+applies to that chat (its follow-ups too), whatever the web UI's switch says;
+the switch still turns it on for every chat. The strongest machine explores the
+code with read-only tools and answers with a plan (the goal, the steps, which
+kind of machine does each, any diagram), followed by buttons:
 
 - **Approve and run** starts the plan in the background on the backend, one
   step at a time, with the fleet running each step's own check.
@@ -77,8 +78,11 @@ followed by buttons:
 - **Stop** halts a running plan. The plan card also shows the plan's status.
 
 You can close VS Code once a plan is approved. The backend keeps running it,
-and the web UI's **Plans** button shows progress. Typing `approve` in the chat
-also approves the pending plan.
+spreading the steps over your machines by tier, and carries on after a restart.
+`@fleet /status` shows the current plan's report in the chat (steps, attempts,
+which machine did what, the files changed) with **Stop it**, or **Approve and
+resume** when it is blocked. The web UI's **Plans** button shows the same.
+Typing `approve` in the chat also approves the pending plan.
 
 ## Which tools does `@fleet` see?
 
@@ -162,6 +166,10 @@ After adding or changing a server:
   `agentFleet.instructionFiles` setting, paths relative to the workspace
   folder (for example `["AGENTS.md", ".github/copilot-instructions.md"]`); the
   first one that exists is sent.
+- The extension tells the fleet which local workspace folders are open, so
+  requests such as "run the tests" have a project location. It sends paths
+  only when the backend URL is loopback and the workspace uses local files;
+  remote workspaces and a backend on another machine are left out.
 - Conversations are saved to the same record as the web UI, so a chat
   started in VS Code can be resumed from the web UI's Sessions list. To go
   the other way, see [Continue a fleet chat](#continue-a-fleet-chat).

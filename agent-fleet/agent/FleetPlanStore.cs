@@ -525,8 +525,29 @@ internal sealed partial class FleetPlanStore
     {
         string path = PathFor(plan.Id);
         string temp = path + ".tmp";
-        File.WriteAllText(temp, JsonSerializer.Serialize(plan, SerializerOptions));
-        File.Move(temp, path, overwrite: true);
+        byte[] json = System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(plan, SerializerOptions));
+
+        // The plan file is what a restart resumes from, so it must never be half written: written to a temporary file,
+        // flushed to the disk (a power cut then cannot leave an empty file behind the rename), then swapped in. A
+        // virus scanner holding the file for a moment is waited out rather than stopping a plan in the night.
+        for (int tries = 1; ; tries++)
+        {
+            try
+            {
+                using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    stream.Write(json);
+                    stream.Flush(flushToDisk: true);
+                }
+
+                File.Move(temp, path, overwrite: true);
+                break;
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException && tries < 5)
+            {
+                Thread.Sleep(200 * tries);
+            }
+        }
 
         // A readable copy next to the data, so a run left going overnight can be read with any text
         // viewer. Best effort: the JSON above is the record, this is for people.

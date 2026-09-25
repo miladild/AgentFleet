@@ -23,14 +23,18 @@ internal sealed partial class PlanTools
     private readonly IDiagramValidator _validator;
     private readonly Func<string, string?, CancellationToken, Task<string>> _runCommand;
     private readonly FleetContextJournal? _journal;
+    private readonly Func<string, bool>? _programExists;
     private readonly ConcurrentDictionary<string, int> _diagramAttempts = new(StringComparer.Ordinal);
 
+    /// <param name="programExists">Whether a check's program is installed; defaults to looking on PATH (a seam for tests).</param>
     public PlanTools(
         FleetPlanStore store,
         IDiagramValidator validator,
         Func<string, string?, CancellationToken, Task<string>> runCommand,
-        FleetContextJournal? journal = null)
+        FleetContextJournal? journal = null,
+        Func<string, bool>? programExists = null)
     {
+        _programExists = programExists;
         _store = store;
         _validator = validator;
         _runCommand = runCommand;
@@ -58,6 +62,15 @@ internal sealed partial class PlanTools
         {
             return "Error: the plan has no steps. Call propose_plan again with a steps array: each step an object with " +
                    "title, detail, files, verify and tier.";
+        }
+
+        // Mistakes that would only show in the night, as a blocked plan: caught now, while the planner can fix them.
+        IReadOnlyList<string> problems = PlanReview.Problems(workingDirectory, stepInputs, _programExists);
+        if (problems.Count > 0)
+        {
+            return "The plan was NOT saved, because it would fail when it runs:\n" +
+                   string.Join('\n', problems.Select(problem => $"- {problem}")) +
+                   "\n\nFix these and call propose_plan again with the whole plan.";
         }
 
         string? diagramCode = null;
@@ -116,12 +129,36 @@ internal sealed partial class PlanTools
         }
 
         plan = LinkToContext(plan);
+        string replaced = ReplaceOlderProposals(plan);
 
-        return $"Plan saved. {FleetPlanStore.Marker(plan.Id)}\n" +
+        return $"Plan saved. {FleetPlanStore.Marker(plan.Id)}{replaced}\n" +
                "The plan is waiting for the user's approval and nothing has been changed. Stop here. In two or three sentences " +
                "tell the user the plan is ready to review (in the Plans panel, or reply APPROVE), and mention any open question. " +
                "Do not start the work.\n\n" +
                FleetPlanStore.ToMarkdown(plan);
+    }
+
+    // One chat, one plan waiting for approval: a revised plan replaces the earlier proposal instead of leaving two
+    // sets of Approve buttons (measured: a planner called propose_plan three times in one turn).
+    private string ReplaceOlderProposals(PlanRecord plan)
+    {
+        if (plan.ContextId is null)
+        {
+            return string.Empty;
+        }
+
+        var replaced = new List<string>();
+        foreach (PlanSummary summary in _store.List().Where(summary => summary.Status == PlanStatus.AwaitingApproval && summary.Id != plan.Id))
+        {
+            if (_store.Get(summary.Id) is { } older && older.ContextId == plan.ContextId && _store.Reject(older.Id) is not null)
+            {
+                replaced.Add(older.Id);
+            }
+        }
+
+        return replaced.Count == 0
+            ? string.Empty
+            : $"\nIt replaces the earlier proposal in this conversation ({string.Join(", ", replaced.Select(FleetPlanStore.Marker))}), which is withdrawn.";
     }
 
     // A plan proposed in a chat belongs to that chat's durable context, so what the user decided while

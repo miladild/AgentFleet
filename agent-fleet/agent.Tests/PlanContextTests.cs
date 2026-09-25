@@ -152,7 +152,7 @@ public sealed class PlanContextTests : ContextTestBase
         var planTools = new PlanTools(Plans, Valid, (_, _, _) => Task.FromResult("Exit code: 0"), Journal);
         JsonElement steps = JsonSerializer.SerializeToElement(new[]
         {
-            new { title = "Only step", detail = "do it", files = new[] { "a.txt" }, verify = "check", tier = "standard" }
+            new { title = "Only step", detail = "do it", files = new[] { "a.txt" }, verify = "dotnet build", tier = "standard" }
         });
         using (Scope(chat))
         {

@@ -163,11 +163,12 @@ internal static partial class PlanGate
     // the longer, earlier text says: in testing it wrote out a whole file into a write_file call
     // (minutes of generation on a large model) before being refused. So the planning phase never
     // shows it those instructions at all.
-    public static string PlanningInstructions(PlanRecord? existing) =>
+    /// <param name="machines">Which machines serve which tier, so the planner can spread independent steps over them.</param>
+    public static string PlanningInstructions(PlanRecord? existing, string? machines = null) =>
         $"You are a careful software planner working on the user's own machine, which runs {HubPlatform.Name}: use " +
-        "paths in that machine's own style exactly as given, never rewrite them into another style.\n\n" + PlanningDirective(existing);
+        "paths in that machine's own style exactly as given, never rewrite them into another style.\n\n" + PlanningDirective(existing, machines);
 
-    public static string PlanningDirective(PlanRecord? existing) =>
+    public static string PlanningDirective(PlanRecord? existing, string? machines = null) =>
         """
         Plan mode is on and no plan has been approved yet. You can look around, but you cannot change anything:
         only read-only tools are available to you until the user approves a plan. Do not write files, run commands
@@ -186,19 +187,30 @@ internal static partial class PlanGate
            behavior (call the function and check the result, run the tests, build the project) rather than only
            loading the file, and it must finish on its own: never a server, a watcher or anything that waits.
            Later steps build on earlier ones, so a weak check early on hides bugs until a later step fails.
+           The fleet runs each verify command itself, exactly as written, in workingDirectory: it must be a real
+           command (for example node --test test/slug.test.js, npm test, dotnet test), never a sentence. Make every
+           step able to pass its own check when it is done: write a piece of code and its test in the same step, and
+           never check a step with a file that a later step creates. Name every file a step creates in its files.
            Give each step a tier: heavy for hard or risky
-           work, standard for ordinary work, light for trivial edits. Set workingDirectory to the project folder.
+           work, standard for ordinary work, light for trivial edits. Set workingDirectory to the project folder
+           (its full path).
            Leave parallelGroup empty by default. Only give the same parallelGroup label to consecutive steps when
            they are independent, name disjoint files, and can safely be edited at the same time. Parallel groups
-           must use different tiers; the runner also checks that those routes are configured and healthy, and will
-           run the steps in order if any safety check fails. Group checks run after all group edits finish.
+           must use different tiers, so different machines do them at the same time; the runner also checks that
+           those routes are configured and healthy, and will run the steps in order if any safety check fails.
+           Group checks run after all group edits finish. When the work splits into independent parts (two separate
+           helpers, a feature and an unrelated fix), make them a parallel group on different tiers so the plan is
+           spread over the machines instead of queuing on one.
            Add a Mermaid diagram only when the change affects how several parts fit together (a flowchart,
            sequenceDiagram or classDiagram, with every node label in double quotes); skip it for small tasks.
            Keep the plan compact: at most eight steps, one or two sentences of detail each. Send each list as a
            real JSON array (steps as an array of objects), not as text.
         4. When propose_plan returns, stop. Tell the user in two or three sentences that the plan is ready to review
-           and approve. Do not start the work.
-        """ + (existing is null
+           and approve. Do not start the work. If it says the plan was NOT saved, fix what it names and call
+           propose_plan again with the whole plan.
+        """ + (string.IsNullOrWhiteSpace(machines)
+            ? string.Empty
+            : $"\n\nThe machines that will carry the plan out, by tier: {machines}.") + (existing is null
             ? string.Empty
             : $"\n\nThe plan {FleetPlanStore.Marker(existing.Id)} is currently {existing.Status.Replace('-', ' ')}. " +
               "If the user asks for changes to it, revise it by calling propose_plan again with the full updated plan.");

@@ -119,6 +119,7 @@ function Section({ title, items }: { title: string; items: string[] }) {
 const EVENT_STYLE: Record<string, string> = {
   "parallel-started": "text-violet-300",
   "parallel-fallback": "text-amber-400",
+  waiting: "text-amber-400",
   "check-passed": "text-emerald-400",
   "step-done": "text-emerald-400",
   "plan-done": "text-emerald-400",

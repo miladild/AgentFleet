@@ -6,6 +6,7 @@ import {
   describeSession,
   pickerMessageId,
   routePickerRequest,
+  workspaceContext,
   type WireMessage,
 } from "./fleetLink";
 
@@ -187,6 +188,64 @@ async function planAction(planId: string, action: "approve" | "reject" | "stop")
   } catch (error) {
     void vscode.window.showErrorMessage(`Could not reach the fleet backend at ${backendBase()}: ${error}`);
     return null;
+  }
+}
+
+interface PlanSummaryWire {
+  id: string;
+  title: string;
+  status: string;
+  stepsDone: number;
+  stepsTotal: number;
+  updatedUtc: string;
+}
+
+// The plan that matters now: one running, then one waiting to start, one waiting for approval, one blocked,
+// and otherwise the most recent.
+function pickPlan(plans: PlanSummaryWire[]): PlanSummaryWire | undefined {
+  const rank = (status: string) => ["running", "approved", "awaiting-approval", "blocked"].indexOf(status);
+  return [...plans].sort((a, b) => {
+    const ra = rank(a.status) < 0 ? 99 : rank(a.status);
+    const rb = rank(b.status) < 0 ? 99 : rank(b.status);
+    return ra !== rb ? ra - rb : Date.parse(b.updatedUtc) - Date.parse(a.updatedUtc);
+  })[0];
+}
+
+// "@fleet /status": the run report in the chat, with the buttons that fit the plan's state.
+async function showStatusInChat(stream: vscode.ChatResponseStream): Promise<void> {
+  let plans: PlanSummaryWire[];
+  try {
+    const res = await fetch(plansUrl());
+    plans = (await res.json()) as PlanSummaryWire[];
+  } catch (error) {
+    stream.markdown(`Could not reach the fleet backend at ${backendBase()}: ${error}`);
+    return;
+  }
+
+  const plan = pickPlan(plans);
+  if (!plan) {
+    stream.markdown("There are no plans yet. Start one with `@fleet /plan` and what you want done, for example `@fleet /plan add input validation to the signup form`.");
+    return;
+  }
+
+  const res = await fetch(`${plansUrl()}/${plan.id}/report`);
+  const report = res.ok ? (await res.text()).replace(new RegExp(PLAN_MARKER.source, "g"), "").trim() : `# ${plan.title}\n\nStatus: ${plan.status}.`;
+  stream.markdown(report + "\n\n");
+  if (plan.status === "running" || plan.status === "approved") {
+    stream.button({ command: "agentFleet.stopPlan", title: "Stop it", arguments: [plan.id] });
+  } else if (plan.status === "blocked") {
+    stream.button({ command: "agentFleet.approvePlan", title: "Approve and resume", arguments: [plan.id] });
+  } else if (plan.status === "awaiting-approval") {
+    stream.button({ command: "agentFleet.approvePlan", title: "Approve and run", arguments: [plan.id] });
+    stream.button({ command: "agentFleet.rejectPlan", title: "Reject", arguments: [plan.id] });
+  }
+  stream.button({ command: "agentFleet.showPlan", title: "Open the report", arguments: [plan.id] });
+
+  const others = plans.filter((other) => other.id !== plan.id && ["running", "approved", "awaiting-approval", "blocked"].includes(other.status));
+  if (others.length > 0) {
+    stream.markdown(
+      "\n\nAlso: " + others.map((other) => `${other.title} (${other.status.replace("-", " ")}, ${other.stepsDone} of ${other.stepsTotal} steps)`).join("; ") + ".",
+    );
   }
 }
 
@@ -708,7 +767,7 @@ class FleetLanguageModelProvider implements vscode.LanguageModelChatProvider {
           threadId: routing.threadId,
           runId: randomUUID(),
           tools: tools.map(toAGUITool),
-          context: [],
+          context: workspaceContext(backendUrl(), vscode.workspace.workspaceFolders?.map((folder) => folder.uri) ?? []),
           // "journal": this chat joined a conversation; record it without replacing that conversation's
           // transcript with VS Code's (the backend hands the model the conversation's latest turns instead).
           forwardedProps: routing.journalOnly ? { fleetSurface: "vscode-model", fleetTranscript: "journal" } : { fleetSurface: "vscode-model" },
@@ -841,6 +900,27 @@ const handler: vscode.ChatRequestHandler = async (request, chatContext, stream, 
   const chatResult: vscode.ChatResult = { metadata: { fleetContextId: contextId, fleetContinued: continued } };
   const idPrefix = contextId.slice(0, 8);
 
+  if (request.command === "status") {
+    await showStatusInChat(stream);
+    return chatResult;
+  }
+
+  // "/plan" turns plan mode on for this chat only (the web UI's switch stays as it is), and it stays on for the
+  // rest of the chat, so "change step 2" or "how is it going?" after the plan are still about the plan.
+  const planMode =
+    request.command === "plan" || chatContext.history.some((turn) => turn instanceof vscode.ChatRequestTurn && turn.command === "plan");
+  if (request.command === "plan" && !request.prompt.trim()) {
+    stream.markdown(
+      "Say what to plan, for example `@fleet /plan add input validation to the signup form in C:\\projects\\shop`. " +
+        "The strongest machine explores the code and proposes a plan; approve it and the fleet carries it out in the background, " +
+        "each step on a machine that suits it and checked before the next starts. `@fleet /status` shows how it is going.",
+    );
+    return chatResult;
+  }
+  if (request.command === "plan") {
+    stream.progress("Planning: the strongest machine is reading the code. Nothing is changed until you approve the plan.");
+  }
+
   // Every VS Code Language Model Tool currently available - this includes tools
   // from any configured MCP server (VS Code surfaces MCP-provided tools through
   // this same registry) as well as ones any other extension registers. The AG-UI
@@ -886,8 +966,10 @@ const handler: vscode.ChatRequestHandler = async (request, chatContext, stream, 
           threadId,
           runId,
           tools: clientTools.map(toAGUITool),
+          // buildEditorContext already carries this path for @fleet. Avoid duplicating it in a system-context block.
           context: [],
-          forwardedProps: { fleetSurface: "vscode" },
+          // "/plan" earlier in this chat: plan mode for this chat only, whatever the web UI's switch says.
+          forwardedProps: planMode ? { fleetSurface: "vscode", fleetPlanMode: true } : { fleetSurface: "vscode" },
           state: {},
           messages,
         }),
@@ -1070,7 +1152,7 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
       const choice = await vscode.window.showInformationMessage(
-        "Plan approved. It is running in the background: each step is checked before the next one starts.",
+        "Plan approved. It runs in the background across your machines, each step checked before the next one starts. Ask @fleet /status any time.",
         "Show status",
       );
       if (choice === "Show status") await showPlanStatus(planId);

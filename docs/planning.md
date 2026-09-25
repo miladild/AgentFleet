@@ -7,7 +7,8 @@ steps, and checks each step with a real command instead of trusting itself.
 ## The flow
 
 1. **Turn plan mode on** (switch, top right of the web UI). The setting is stored by the backend, so the web UI and
-   `@fleet` in VS Code both follow it.
+   `@fleet` in VS Code both follow it. In VS Code you can instead start the request with **`@fleet /plan`**: plan mode
+   then applies to that chat only (and stays on for its follow-ups), whatever the switch says.
 2. **Ask for the change** in plain words, with the project folder:
    `In C:\src\shop, add rate limiting to the login endpoint.`
 3. **Exploring.** The strongest machine reads your code with read-only tools: read, list, find, search, web search. It
@@ -16,6 +17,11 @@ steps, and checks each step with a real command instead of trusting itself.
 4. **The plan.** The assistant calls `propose_plan`, and the plan appears as a card: goal, assumptions, risks, an optional
    diagram, and numbered steps. Each step names the files it touches, has a **check** (a command that must succeed, such
    as `dotnet build` or `npm test`), and a tier (which kind of machine should do it). The plan is saved as a file.
+   Before saving, the fleet reviews it for mistakes that would only show at night, and sends it back to the planner to
+   fix when it finds one: a missing project folder, a check that is a sentence rather than a command (or uses a program
+   the hub does not have), a check that relies on a file only a later step creates, or a plan with no checks or no check
+   on its last step. A revised plan replaces the earlier proposal in the same chat, so there is only ever one waiting
+   for approval, and the turn ends once a plan is saved.
 5. **You decide.** Press **Approve and run**, press **Reject**, or reply in the chat with what to change and it proposes a
    revised plan. Typing `approve` also works. (`approve the idea but change step 3` counts as feedback, not approval.)
    In the web UI, you can optionally check **Save a Markdown copy** before approving; it writes the plan into the project
@@ -36,8 +42,25 @@ steps, and checks each step with a real command instead of trusting itself.
    - A failed check goes back to the model with the real output, up to three attempts. The last attempt is given to the
      strongest machine.
    - If a step still fails, the plan stops as **Blocked**, says which step and why, and leaves your files as they are.
-7. **Afterwards.** The **Plans** button lists every plan and how far it got. Close the browser, go to bed: a plan that
-   was running when the backend restarted picks up where it left off. **Stop** halts a running plan.
+7. **Afterwards.** The **Plans** button lists every plan and how far it got; in VS Code, **`@fleet /status`** shows the
+   current plan's report in the chat, with **Stop it**, or **Approve and resume** for a blocked plan. Close the browser and
+   VS Code, go to bed: the plan runs in the backend. **Stop** halts a running plan.
+
+## Leaving it overnight
+
+What keeps a plan going when something happens in the night:
+
+- **The backend restarts** (a crash, a Windows update, a reboot): the plan, every step's status and the whole record of
+  the conversation are on disk. The plan picks up at the step that was interrupted; finished steps are not redone. Plan
+  files are flushed to disk before they replace the old one, so a power cut cannot leave a half-written plan.
+- **A machine goes down or slows down.** Each call goes to a ready machine of the step's tier; a machine that is off, or
+  fails a call, is replaced by the fallback machine. A machine that times out rests for ten minutes, so the rest of the
+  step does not wait for it again. If no machine can answer at all (the network is down, the fallback is rebooting), the
+  step waits and tries again: after 30 seconds, then 1, 2, 4 and 8 minutes, then every 15 minutes, about an hour in all.
+  Those waits do not count as attempts; the run log shows each one.
+- **The hub goes to sleep.** While a plan runs, the backend asks the operating system to stay awake (Windows, macOS and
+  Linux with systemd). It cannot stop someone closing a laptop's lid or choosing Sleep, and it does nothing for the other
+  machines: set those to stay awake (the worker setup's `-KeepAwake`).
 
 ## Reading what happened overnight
 
@@ -90,6 +113,16 @@ notes them when a step is done. The fleet reports leftovers; it never deletes a 
 A step's check is the only thing that turns "the model says it is done" into "it is done", so a weak check hides
 problems until a later step fails. The planner is told to write checks that exercise behavior and finish by themselves
 (never a server or a watcher). If you see a plan with `echo done` as a check, reject it and ask for real ones.
+
+## How much a model sees
+
+Each request tells Ollama how much of the conversation the model should see (its context size): enough for that request,
+in a few fixed sizes from 8K tokens up, at most 32K unless a machine sets its own `contextLength`
+([configuration.md](configuration.md#nodes)), and never more than the model supports. Ollama's own default is 4K, which
+is less than the fleet's instructions and tools on their own; before the fleet set the size, Ollama quietly dropped the
+start of every request and a step's model could lose its task. A larger context takes more graphics memory: a model that
+no longer fits runs partly on the processor and becomes much slower, so on a machine with a small card, lower its
+`contextLength` or give it a smaller model.
 
 ## What to expect from small local models
 
