@@ -39,8 +39,10 @@ steps, and checks each step with a real command instead of trusting itself.
      instructions.
    - For a parallel group, the runner waits until all first attempts finish, then runs checks one at a time. Retries
      also run sequentially. **The fleet runs every step's check itself**; only a pass marks the step done.
-   - A failed check goes back to the model with the real output, up to three attempts. The last attempt is given to the
-     strongest machine.
+   - A failed check goes back to the model with the real output, up to three attempts. The first attempt runs on a machine
+     of the step's own tier, which is what spreads a plan over your machines; after a failure the next attempts go to the
+     strongest machine, because a small model rarely does better the second time (`FLEET_PLAN_CHEAP_ATTEMPTS=2` gives the
+     step's own machine a second try first).
    - If a step still fails, the plan stops as **Blocked**, says which step and why, and leaves your files as they are.
 7. **Afterwards.** The **Plans** button lists every plan and how far it got; in VS Code, **`@fleet /status`** shows the
    current plan's report in the chat, with **Stop it**, or **Approve and resume** for a blocked plan. Close the browser and
@@ -128,9 +130,10 @@ no longer fits runs partly on the processor and becomes much slower, so on a mac
 
 They are noisy. Expect one to three attempts per step, occasionally a plan that needs a second proposal, and now and then
 a step that blocks. That is what the retry loop and the checks are for. A block is a good outcome compared with a
-confident wrong answer. The strongest machine plans; ordinary steps run on the cheaper machines, and the last attempt at
-any step escalates to the strongest. Planning on a large model can take a few minutes, especially if the model does not
-fit in graphics memory.
+confident wrong answer. The strongest machine plans; ordinary steps start on the cheaper machines, and a step that fails
+there moves to the strongest. Planning on a large model can take a few minutes, especially if the model does not fit in
+graphics memory. A worker model that describes what it would do ("I'll read the file...") instead of calling its tools
+is a sign it is too small for tool use: give that machine a model that handles tools well, such as `qwen2.5-coder:7b`.
 
 ## Limits
 

@@ -65,7 +65,7 @@ public sealed class PlanRunnerTests : PlanTestBase
     }
 
     [Fact]
-    public async Task A_failing_check_is_retried_with_the_real_output_and_the_last_attempt_moves_to_the_heavy_tier()
+    public async Task A_failing_check_is_retried_with_the_real_output_on_the_heavy_tier()
     {
         PlanRecord plan = ApprovedPlan(Step("build it", tier: "standard"));
         int verifications = 0;
@@ -73,12 +73,25 @@ public sealed class PlanRunnerTests : PlanTestBase
 
         await Runner(agent, command => ++verifications < 3 ? Fail(command) : Pass(command)).RunPlanAsync(plan.Id, default);
 
-        Assert.Equal(["standard", "standard", "heavy"], agent.Calls.Select(call => call.Tier));
+        Assert.Equal(["standard", "heavy", "heavy"], agent.Calls.Select(call => call.Tier));
         Assert.DoesNotContain("did not pass", agent.Calls[0].Prompt);
         Assert.Contains("did not pass", agent.Calls[1].Prompt);
         Assert.Contains("CS1002", agent.Calls[1].Prompt);
         Assert.Contains("CS1002", agent.Calls[2].Prompt);
         Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+    }
+
+    [Fact]
+    public async Task With_two_cheap_attempts_only_the_last_goes_to_the_heavy_tier()
+    {
+        PlanRecord plan = ApprovedPlan(Step("build it", tier: "light"));
+        FakeStepAgent agent = Agent();
+        var runner = new PlanRunner(Store, new PlanTools(Store, Valid, (command, _, _) => Task.FromResult(Fail(command))), agent,
+            NullLogger.Instance, transientDelay: _ => TimeSpan.Zero, cheapAttempts: 2);
+
+        await runner.RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(["light", "light", "heavy"], agent.Calls.Select(call => call.Tier));
     }
 
     [Fact]

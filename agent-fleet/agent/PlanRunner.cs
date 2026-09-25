@@ -83,6 +83,7 @@ internal sealed partial class PlanRunner
     private readonly ConcurrentDictionary<string, bool> _stopRequested = new(StringComparer.Ordinal);
     private readonly Func<int, TimeSpan> _transientDelay;
     private readonly ISleepGuard _sleepGuard;
+    private readonly int _cheapAttempts;
 
     public PlanRunner(
         FleetPlanStore store,
@@ -95,8 +96,10 @@ internal sealed partial class PlanRunner
         PlanContextRecorder? recorder = null,
         FleetContextJournal? journal = null,
         Func<int, TimeSpan>? transientDelay = null,
-        ISleepGuard? sleepGuard = null)
+        ISleepGuard? sleepGuard = null,
+        int cheapAttempts = 1)
     {
+        _cheapAttempts = Math.Clamp(cheapAttempts, 1, MaxAttemptsPerStep);
         _transientDelay = transientDelay ?? DefaultTransientDelay;
         _sleepGuard = sleepGuard ?? NoSleepGuard.Instance;
         _recorder = recorder;
@@ -478,8 +481,11 @@ internal sealed partial class PlanRunner
 
         for (int attempt = firstAttempt; attempt <= MaxAttemptsPerStep; attempt++)
         {
-            // Cheap first. Only the last attempt is escalated to the heavy tier.
-            string tier = attempt == MaxAttemptsPerStep ? FleetTiers.Heavy : step.Tier;
+            // Cheap first, then the strongest machine. Measured on a real fleet: a small worker that failed a check did not
+            // do better with the error in front of it (it described reading the file instead of reading it, for minutes),
+            // while the strongest model fixed it in seconds. So after the cheap attempts (one by default,
+            // FLEET_PLAN_CHEAP_ATTEMPTS) the rest go to the heavy tier, and the last one always does.
+            string tier = attempt > _cheapAttempts || attempt == MaxAttemptsPerStep ? FleetTiers.Heavy : step.Tier;
             ModelAttemptResult model = await RunModelAttemptAsync(
                 plan, step, attempt, lastFailure, tier, parallelGroup: false, cancellationToken: cancellationToken);
             if (!model.ShouldVerify)
