@@ -4,18 +4,16 @@ A coding assistant that runs on your own machines. This download is ready to run
 
 ## What you need
 
-- **Ollama** (<https://ollama.com>) on this machine, with a coding model, for example `ollama pull qwen2.5-coder:7b`.
 - **Node.js 20 or newer** (<https://nodejs.org>) for the web UI.
+- **Ollama** (<https://ollama.com>) on this machine, if it will run a model. You do not need to download a model first:
+  the web UI does that for you.
 
 The backend is included with its own runtime; you do not need .NET.
 
 ## Start it
 
-Windows (PowerShell, in this folder):
-
-```powershell
-.\scripts\Start-Fleet.ps1
-```
+Windows: double-click **Start Agent Fleet.cmd** in this folder. Keep its window open while you use the fleet; close it to
+stop the fleet.
 
 Linux:
 
@@ -23,11 +21,12 @@ Linux:
 bash scripts/start-fleet.sh
 ```
 
-Open <http://localhost:3000>. The first start writes `backend/fleet.config.json` with one machine, this one, using
-`qwen2.5-coder:7b`. Change the model, and add more machines, in the web UI under **Config**.
+The web UI opens in your browser when it is ready (<http://localhost:3000>). The first time, a **Welcome** box leads to
+**Config > Setup**, which suggests a model that suits this computer and downloads it with one button, and lists anything
+else that needs doing. More machines are added under **Config > Machines**; it shows the command to prepare each one.
 
-If PowerShell says running scripts is disabled: `powershell -ExecutionPolicy Bypass -File .\scripts\Start-Fleet.ps1`.
-A downloaded zip may be marked as blocked; `Get-ChildItem -Recurse | Unblock-File` in this folder clears that.
+From PowerShell instead: `.\scripts\Start-Fleet.ps1` (it takes `-BackendPort`, `-FrontendPort`, `-WebOnLan`,
+`-NoBrowser`). The starter unblocks the downloaded files the first time (Windows marks files from the internet).
 
 The very first start of a new download can be slow: the web UI is about 11,000 small files, and antivirus software
 may scan each one before it runs. If <http://localhost:3000> does not answer after a minute, give it another minute;

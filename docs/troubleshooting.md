@@ -1,7 +1,9 @@
 # Troubleshooting
 
-Start with `.\scripts\Test-Fleet.ps1`. It checks the tools, the configuration, every machine, the running backend and
-the VS Code extension, and prints the fix for each problem. The web UI's **Logs** button shows the backend's log live.
+Start with the web UI's **Config > Setup** tab: it checks this computer, every machine, the sandbox, the tools and the
+network, says what to do about each problem, and has a button for the fixes it can make itself (downloading a model,
+starting Ollama). From a terminal, `.\scripts\Test-Fleet.ps1` checks the same and also the VS Code extension. The web
+UI's **Logs** button shows the backend's log live.
 
 ## A machine is red
 
@@ -11,7 +13,7 @@ backend's `/health` page) says why.
 | Reason | What it means | Fix |
 |---|---|---|
 | `timeout` | Nothing answered | The machine is off, asleep, on another address, or a firewall drops the hub. See below. |
-| `model_missing` | Ollama answers but the model is not installed | On that machine: `ollama pull <model>`, or from the hub `Add-FleetNode.ps1 ... -Pull` |
+| `model_missing` | Ollama answers but the model is not installed | The machine's card in **Config > Machines** has a **Download** button. Or on that machine: `ollama pull <model>` |
 | `unreachable` | The connection was refused or the address does not exist. The machine is up but Ollama is not listening on the network, or the address is wrong | Set `OLLAMA_HOST=0.0.0.0` and restart Ollama. `Setup-Worker.ps1` does this. |
 | `http_error` | Something answered, but not like Ollama | Check the port and that the address is Ollama's |
 
@@ -66,6 +68,19 @@ seconds. Add an exclusion for the folder you unpacked it to if that first start 
 If it runs fine in a terminal but not as a Windows service, the service's account is different from yours: it has a different
 user profile, different environment variables and a different `PATH`. The scheduled-task install runs as you and avoids
 this.
+
+## The code sandbox
+
+**Config > Sandbox**, **Test** names the failing step and the fix. The usual ones:
+
+- **"did not accept the fleet's key"**: the key is not on that machine yet, or the account name is wrong. Use **Add the
+  key to that machine**, or add the public key by hand.
+- **"not allowed to use Docker"**: on that machine, `sudo usermod -aG docker <account>`, then sign out and back in.
+- **"sudo asked for a password"**: untick **use sudo** and use the docker group instead.
+- **"Docker is installed but not running"**: start Docker Desktop, or `sudo systemctl start docker` on Linux.
+- **"identity ... is not the one the fleet remembered"**: the machine at that address has a different SSH host key. If you
+  reinstalled it, **Test** and **Save** again. If you did not, find out what is answering at that address before you do.
+- The first call timed out: the container images were still downloading. **Test**, then **Download them now**.
 
 ## A tool does nothing, or the model says it cannot
 

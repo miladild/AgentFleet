@@ -108,6 +108,8 @@ if (-not $SkipFleet) {
     Copy-Item (Join-Path $root 'LICENSE') $stage
     Copy-Item (Join-Path $web 'fleet.config.example.json') $stage
     Copy-Item (Join-Path $root 'scripts/release/README.md') (Join-Path $stage 'README.md')
+    # Windows: something to double-click.
+    if ($Runtime -like 'win-*') { Copy-Item -LiteralPath (Join-Path $root 'scripts/release/Start Agent Fleet.cmd') $stage }
     # Whatever this machine has lying around (its own config, keys, conversations) must never reach a download.
     Write-Ok 'Copied'
 

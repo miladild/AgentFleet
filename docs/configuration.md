@@ -13,8 +13,8 @@ environment variables.
 
 If the file does not exist, the backend creates one on first start with a single node: this machine, running
 `qwen2.5-coder:7b`. After that the file is the only source of truth. Edit it by hand, from the web UI's **Config** panel,
-or with `Add-FleetNode.ps1`. Machines, the triage model, tools, MCP servers and the history setting apply as soon as they are saved from the Config panel (or through
-`PUT /api/fleet-config`). A change made by hand in the file, and changes to the sandbox, apply when the backend starts. The
+or with `Add-FleetNode.ps1`. Machines, the triage model, tools, MCP servers, the history setting and the sandbox apply as soon as they are saved from the Config panel (or through
+`PUT /api/fleet-config` and `PUT /api/setup/sandbox`). A change made by hand in the file applies when the backend starts. The
 mode and plan-mode switches apply at once. `agent-fleet\fleet.config.example.json` is a complete example.
 
 The backend refuses to start on an invalid file and says what is wrong, for example "Exactly one node must be the
@@ -91,6 +91,7 @@ Where `run_sandboxed_code` runs its container. See [tools-and-mcp.md](tools-and-
 |---|---|
 | `mode` | `auto` (default), `local`, `ssh` or `off` |
 | `host`, `port`, `user`, `keyPath`, `sudo` | For `ssh` mode: the machine with Docker, and how to log in to it with a key |
+| `hostKey` | For `ssh` mode: that machine's SSH host key fingerprint (`SHA256:...`), saved by the Sandbox tab after a test. A machine answering with another key is refused. Missing means any key is accepted |
 | `timeoutSeconds` | How long a snippet may run, 1 to 120 (default 20) |
 
 ### `history`
@@ -161,6 +162,12 @@ The backend answers these on port 8000. They are what the web UI and the VS Code
 | `GET /api/contexts[/{id}[/events|deliveries|artifacts|export]]`, `POST .../decisions|compact` | The durable record. See [context.md](context.md) |
 | `GET /api/contexts/storage?olderThanDays=`, `POST /api/contexts/cleanup` | The record's size and a preview of a cleanup; deleting chats not used for a number of days |
 | `GET /api/logs/tail?lines=` | End of today's log |
+| `GET /api/setup` | The Setup tab's checklist: this computer's hardware, suggested models and every check with its fix |
+| `GET /api/setup/hub` | This computer's name and private addresses (for the worker setup commands) |
+| `POST /api/setup/pull` `{url, model}`, `GET /api/setup/pulls`, `POST /api/setup/pulls/{id}/cancel` | Download a model onto a machine in the background, and follow or cancel it |
+| `POST /api/setup/start-ollama` | Start the Ollama app on this computer (not when the backend runs as a Windows service) |
+| `GET`, `PUT /api/setup/sandbox` | The sandbox settings; a PUT applies them at once |
+| `POST /api/setup/sandbox/key`, `/test`, `/install-key`, `/prepare` | Make the fleet's SSH key, test a sandbox setting, add the key to a machine with its password (used once, never stored), download the container images |
 | `POST /` | The chat itself, over the [AG-UI](https://github.com/ag-ui-protocol/ag-ui) protocol |
 
 There is no authentication. See [security.md](security.md).

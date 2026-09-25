@@ -164,8 +164,8 @@ internal sealed class DockerSandboxExecutor
     {
         string dockerCommand = (_options.UseSudo ? "sudo docker " : "docker ") + string.Join(' ', dockerArguments);
 
-        using var sshClient = new SshClient(_options.Host, _options.Port, _options.User,
-            new PrivateKeyFile(_options.KeyPath));
+        string? seenHostKey = null;
+        using SshClient sshClient = SandboxSsh.CreateClient(_options, fingerprint => seenHostKey = fingerprint);
 
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutSource.CancelAfter(_options.ExecutionTimeout);
@@ -205,6 +205,12 @@ internal sealed class DockerSandboxExecutor
             await KillRemoteContainerAsync(containerName, cancellationToken);
             return new SandboxExecutionResult(false, string.Empty, null, true,
                 $"Execution exceeded the {_options.ExecutionTimeout.TotalSeconds}s sandbox timeout and was killed.");
+        }
+        catch (SshConnectionException) when (_options.HostKey is not null && seenHostKey is not null && seenHostKey != _options.HostKey)
+        {
+            _logger.LogError("Sandbox machine {Host} answered with host key {Seen}, not the remembered {Expected}; refused.",
+                _options.Host, seenHostKey, _options.HostKey);
+            return new SandboxExecutionResult(false, string.Empty, null, false, SandboxSsh.HostKeyChanged);
         }
         catch (Exception exception) when (exception is SshException or SocketException)
         {
@@ -266,8 +272,7 @@ internal sealed class DockerSandboxExecutor
     {
         try
         {
-            using var killClient = new SshClient(_options.Host, _options.Port, _options.User,
-                new PrivateKeyFile(_options.KeyPath));
+            using SshClient killClient = SandboxSsh.CreateClient(_options);
             await Task.Run(killClient.Connect, cancellationToken);
             string sudo = _options.UseSudo ? "sudo " : string.Empty;
             using SshCommand killCommand = killClient.CreateCommand($"{sudo}docker kill {containerName}");

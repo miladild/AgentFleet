@@ -18,15 +18,17 @@ The setup script installs .NET 9, Node.js and Ollama with winget if they are mis
 If you only want to use the fleet, not change it, take the ready-built download from the
 [Releases page](https://github.com/miladild/AgentFleet/releases) and skip steps 1 and 2 below:
 
-1. Install [Ollama](https://ollama.com) and pull a coding model, for example `ollama pull qwen2.5-coder:7b`, and install
-   [Node.js 20 or newer](https://nodejs.org). No .NET, no build tools.
+1. Install [Node.js 20 or newer](https://nodejs.org), and [Ollama](https://ollama.com) if this computer will run a
+   model. No .NET, no build tools. (Forgot Ollama? The web UI tells you.)
 2. Unpack `AgentFleet-<version>-win-x64.zip` (or the `linux-x64.tar.gz`) somewhere it can stay.
-3. Run `.\scripts\Start-Fleet.ps1` (Linux: `bash scripts/start-fleet.sh`) in that folder, and open <http://localhost:3000>.
+3. Windows: double-click **Start Agent Fleet.cmd** in that folder. Linux or macOS: `bash scripts/start-fleet.sh`. Keep
+   the window open; the web UI opens in your browser when it is ready (<http://localhost:3000>).
+4. The first time, a **Welcome** box points to [the Setup tab](#the-setup-tab). It suggests a model that suits this
+   computer and downloads it with one button.
 
-The first start writes `backend\fleet.config.json` with this machine as the only node, using `qwen2.5-coder:7b`; pick
-another model under **Config**. `.\scripts\Install-Autostart.ps1` (Linux: `bash scripts/install-autostart.sh`) starts it
-at every logon from that folder. To update, stop it, unpack the new version over the old one and start it again: your
-settings and conversations are not in the download, so they are kept. Then continue with [step 3](#3-ask-something).
+`.\scripts\Install-Autostart.ps1` (Linux: `bash scripts/install-autostart.sh`) starts it at every logon from that folder
+instead. To update, stop it, unpack the new version over the old one and start it again: your settings and conversations
+are not in the download, so they are kept. Then continue with [step 3](#3-ask-something).
 
 ## Linux or macOS
 
@@ -74,6 +76,25 @@ This starts the backend on <http://localhost:8000> and the web UI on <http://loc
 on the left shows your machine with a green dot when it is ready.
 
 To have it start by itself when you log in, see [Run it all the time](#run-it-all-the-time).
+
+### The Setup tab
+
+**Config**, **Setup** is a checklist of everything the fleet needs, the same checks `Test-Fleet.ps1` runs, each with its
+fix. Where the fleet can do the fix itself there is a button:
+
+- **This computer**: its memory, graphics card and free disk space, and three models that suit it, with the recommended
+  one marked. **Download and use** downloads one (with a progress bar) and switches this computer's machine to it; a model
+  that is already downloaded has **Use it**.
+- **Machines and models**: whether Ollama runs here (with **Start Ollama** when it is installed but stopped), whether each
+  machine answers and has its model (**Download** when it does not), and the routing model when you have more than one
+  machine.
+- **Code sandbox**: whether `run_sandboxed_code` can run, and a link to its settings. See
+  [tools-and-mcp.md](tools-and-mcp.md#the-sandbox), which covers using Docker on another machine over SSH.
+- **Tools**: programs your tools need that are missing (git, Node.js for `npx` servers, `uv` for `uvx` servers), and MCP
+  servers that did not start.
+- **Network and security**: whether other computers can reach the fleet. There is no login, so this matters.
+
+Until the fleet can answer, a box above the chat list says what is missing and opens this tab.
 
 ## 3. Ask something
 

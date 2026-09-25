@@ -9,6 +9,7 @@ import { SessionPanel } from "@/components/SessionPanel";
 import { PlansPanel } from "@/components/PlansPanel";
 import { ContextPanel } from "@/components/ContextPanel";
 import { ConfigPanel } from "@/components/ConfigPanel";
+import { SetupBanner } from "@/components/SetupBanner";
 
 type FleetMode = "conservative" | "aggressive";
 
@@ -345,6 +346,8 @@ function StatusPanel() {
             : "Coding agents routed across your machines."}
         </p>
       </div>
+
+      <SetupBanner />
 
       <SessionPanel />
 

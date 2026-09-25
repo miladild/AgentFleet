@@ -110,8 +110,10 @@ function Get-SuggestedModel {
         if ($line) { $vramGb = [math]::Round([double]$line / 1024) }
     }
     $ramGb = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
-    if ($vramGb -ge 24) { return @('qwen3-coder:30b', "an NVIDIA GPU with ${vramGb} GB of memory") }
-    if ($vramGb -ge 8 -or $ramGb -ge 16) { return @('qwen2.5-coder:7b', $(if ($vramGb -gt 0) { "an NVIDIA GPU with ${vramGb} GB of memory" } else { "$ramGb GB of RAM" })) }
+    # The same ladder the web UI's Setup tab suggests from.
+    if ($vramGb -ge 22) { return @('qwen3-coder:30b', "an NVIDIA GPU with ${vramGb} GB of memory") }
+    if ($vramGb -ge 11) { return @('qwen2.5-coder:14b', "an NVIDIA GPU with ${vramGb} GB of memory") }
+    if ($vramGb -ge 6 -or $ramGb -ge 16) { return @('qwen2.5-coder:7b', $(if ($vramGb -gt 0) { "an NVIDIA GPU with ${vramGb} GB of memory" } else { "$ramGb GB of RAM" })) }
     return @('qwen2.5-coder:3b', "$ramGb GB of RAM and no large GPU")
 }
 if (-not $Model) {

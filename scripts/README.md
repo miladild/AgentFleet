@@ -16,7 +16,7 @@ dry-run option (`-DryRun` in PowerShell, `--dry-run` in shell scripts). Get Powe
 | `Install-VSCodeExtension.ps1` | on any machine with VS Code | Builds and installs `@fleet` into VS Code and Insiders |
 | `Install-Autostart.ps1` | on the hub | Builds, publishes and registers the fleet to start at logon (scheduled tasks) or boot (services) |
 | `Deploy-Fleet.ps1` | on the hub, after changing code | Rebuilds and restarts what `Install-Autostart.ps1` installed |
-| `Start-Fleet.ps1`, `start-fleet.sh` | in a release download | Starts the downloaded backend and web UI until Ctrl+C. `Install-Autostart` runs a download in place too |
+| `Start-Fleet.ps1`, `start-fleet.sh` | in a release download | Starts the downloaded backend and web UI until Ctrl+C and opens the web UI when it is ready (`-NoBrowser` / `--no-browser` to skip). `Start Agent Fleet.cmd` in a Windows download runs it with a double-click. `Install-Autostart` runs a download in place too |
 | `Build-Release.ps1` | when making a release (PowerShell 7) | Builds the downloads: the fleet for one platform, and the VS Code extension. The Release workflow runs it for each version tag |
 | `install-autostart.sh` | on a Linux or macOS hub, as yourself | Builds, publishes and registers the fleet as user services that start at login (systemd user units, launchd agents); run again to update, `--uninstall` to remove |
 | `FleetCommon.ps1` | not run directly | Helpers the other scripts share |

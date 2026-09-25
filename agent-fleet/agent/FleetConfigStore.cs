@@ -41,6 +41,9 @@ internal sealed class FleetConfigStore
 
     public FleetConfig Current => _current;
 
+    /// <summary>True when this start created the file: a first run, which the web UI greets with its setup checklist.</summary>
+    public bool Seeded { get; private set; }
+
     public FleetConfig Save(FleetConfig config)
     {
         FleetConfig prepared = Prepare(config);
@@ -123,6 +126,7 @@ internal sealed class FleetConfigStore
 
         FleetConfig prepared = Prepare(seeded);
         File.WriteAllText(_path, JsonSerializer.Serialize(prepared, SerializerOptions));
+        Seeded = true;
         return prepared;
     }
 

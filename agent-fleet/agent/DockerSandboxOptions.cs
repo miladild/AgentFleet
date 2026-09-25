@@ -30,8 +30,10 @@ internal sealed class DockerSandboxOptions
         string user,
         string keyPath,
         bool useSudo,
-        TimeSpan executionTimeout)
+        TimeSpan executionTimeout,
+        string? hostKey = null)
     {
+        HostKey = hostKey;
         Mode = mode;
         Summary = summary;
         Host = host;
@@ -58,6 +60,9 @@ internal sealed class DockerSandboxOptions
     public bool UseSudo { get; }
 
     public TimeSpan ExecutionTimeout { get; }
+
+    /// <summary>The ssh machine's remembered host key fingerprint; null accepts any (see FleetSandboxConfig.HostKey).</summary>
+    public string? HostKey { get; }
 
     /// <param name="dockerOnPath">Seam for tests; defaults to looking for a docker executable on PATH.</param>
     public static DockerSandboxOptions Resolve(
@@ -143,7 +148,7 @@ internal sealed class DockerSandboxOptions
         bool useSudo = config?.Sudo ?? bool.TryParse(configuration["SANDBOX_SSH_SUDO"], out bool parsed) && parsed;
 
         return new DockerSandboxOptions(
-            mode, $"Docker over ssh to {user}@{host}:{port} ({reason})", host, port, user, keyPath, useSudo, timeout);
+            mode, $"Docker over ssh to {user}@{host}:{port} ({reason})", host, port, user, keyPath, useSudo, timeout, Clean(config?.HostKey));
     }
 
     private static DockerSandboxOptions Off(string reason, TimeSpan timeout) =>
