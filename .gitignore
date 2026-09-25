@@ -20,6 +20,7 @@ obj/
 artifacts/
 *.tsbuildinfo
 out/
+dist/
 
 # ---- Node -----------------------------------------------------------------
 node_modules/

@@ -1,0 +1,80 @@
+name: Release
+
+# Push a version tag (git tag v0.1.0 && git push origin v0.1.0) to build the downloads and publish them as a
+# GitHub Release. Run it by hand (Actions > Release > Run workflow) to build them without publishing.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            runtime: win-x64
+            extension: true
+          - os: ubuntu-latest
+            runtime: linux-x64
+            extension: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Backend tests
+        if: matrix.runtime == 'win-x64'
+        working-directory: agent-fleet
+        run: dotnet test agent.Tests --nologo
+
+      - name: Build the downloads
+        shell: pwsh
+        run: >
+          ./scripts/Build-Release.ps1 -Runtime ${{ matrix.runtime }} -OutDir dist
+          ${{ matrix.extension && '-Extension' || '' }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.runtime }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/*.vsix
+            dist/SHA256SUMS-*.txt
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat dist/SHA256SUMS-*.txt > dist/SHA256SUMS.txt
+          rm dist/SHA256SUMS-*.txt
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Agent Fleet $GITHUB_REF_NAME" \
+            --generate-notes \
+            --notes "Downloads: AgentFleet-*-win-x64.zip (Windows) or AgentFleet-*-linux-x64.tar.gz (Linux) for the fleet, agent-fleet-chat-*.vsix for VS Code. See README.md inside the download to start it. Needs Node.js 20+ and Ollama; no .NET or build tools."

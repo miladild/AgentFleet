@@ -62,6 +62,15 @@ $backendTarget = Join-Path $InstallRoot 'backend'
 $exe = Join-Path $backendTarget 'AgentFleet.exe'
 $bind = if ($ListenOnLan) { '0.0.0.0' } else { 'localhost' }
 $urls = "http://${bind}:$BackendPort"
+# A release download (backend\ and web\server.js next to scripts\) is already built: it runs where it was
+# unpacked, and its web UI is Next.js's standalone server instead of `npm start` in a source checkout.
+$bundle = Test-Path (Join-Path $script:RepoRoot 'web\server.js')
+if ($bundle) {
+    $InstallRoot = $script:RepoRoot
+    $web = Join-Path $script:RepoRoot 'web'
+    $backendTarget = Join-Path $script:RepoRoot 'backend'
+    $exe = Join-Path $backendTarget 'AgentFleet.exe'
+}
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
 function Do-Step([string]$What, [scriptblock]$Block) {
@@ -71,6 +80,16 @@ function Do-Step([string]$What, [scriptblock]$Block) {
 
 if (($Mode -eq 'Service' -or $ListenOnLan -or $WebOnLan) -and -not $isAdmin -and -not $DryRun) {
     throw 'This needs an elevated PowerShell (Run as administrator): services and firewall rules cannot be changed otherwise. Or use the default -Mode Task without -ListenOnLan.'
+}
+
+# Stopping a scheduled task (or a service wrapper) ends the wrapper, not always the backend and web UI it started.
+# The backend is matched by its exact path; the web UI by its folder and its production command (server.js or
+# `next start`), so a `npm run dev` in the same checkout is left alone.
+function Stop-FleetProcesses {
+    Get-Process -Name AgentFleet -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe } | Stop-Process -Force -ErrorAction SilentlyContinue
+    Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine.Contains($web) -and ($_.CommandLine -match 'server\.js|next(\.js)?"?\s+start|serve\.mjs"?\s+start') } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 
 $existingService = Get-Service -Name $BackendName -ErrorAction SilentlyContinue
@@ -89,6 +108,7 @@ if ($Uninstall) {
             Write-Ok "Service $name removed"
         }
     }
+    Do-Step 'stop the backend and web UI if they are still running' { Stop-FleetProcesses }
     Write-Info "Files in $InstallRoot were left alone. Delete that folder yourself if you want it gone."
     return
 }
@@ -98,11 +118,16 @@ if ($Mode -eq 'Service' -and $existingTask) { throw "A scheduled task called $Ba
 
 # --- prerequisites ------------------------------------------------------------------------------
 Write-Step 'Checking prerequisites'
-foreach ($tool in 'dotnet', 'node', 'npm') { if (-not (Test-Command $tool)) { throw "$tool is missing. Run .\scripts\Setup-Hub.ps1 first." } }
-Write-Ok 'dotnet, node and npm are installed'
+if ($bundle) {
+    if (-not (Test-Command node)) { throw 'Node.js 20 or newer is needed for the web UI. Install it (winget install OpenJS.NodeJS.LTS) and run this again.' }
+    Write-Ok 'node is installed (a release download needs nothing else)'
+} else {
+    foreach ($tool in 'dotnet', 'node', 'npm') { if (-not (Test-Command $tool)) { throw "$tool is missing. Run .\scripts\Setup-Hub.ps1 first." } }
+    Write-Ok 'dotnet, node and npm are installed'
+}
 
 # --- build --------------------------------------------------------------------------------------
-if (-not $SkipFrontend) {
+if (-not $SkipFrontend -and -not $bundle) {
     Write-Step 'Building the web UI'
     Do-Step 'npm install and npm run build in agent-fleet' {
         Push-Location $web
@@ -120,27 +145,33 @@ function Stop-Fleet {
         $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
         if ($svc -and $svc.Status -ne 'Stopped') { Stop-Service -Name $name -Force; $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30)) }
     }
-    Get-Process -Name AgentFleet -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe } | Stop-Process -Force -ErrorAction SilentlyContinue
+    Stop-FleetProcesses
 }
 
-Write-Step "Publishing the backend to $backendTarget"
-Do-Step "stop the running fleet and dotnet publish to $backendTarget" {
-    Stop-Fleet
-    Push-Location $backendSource
-    try { dotnet publish -c Release -o $backendTarget -nologo -v q; if ($LASTEXITCODE) { throw 'dotnet publish failed.' } } finally { Pop-Location }
+if ($bundle) {
+    Write-Step "Running the download in place ($script:RepoRoot)"
+    Do-Step 'stop a copy that is already running' { Stop-Fleet }
+    Write-Ok 'Keep this folder where it is: the autostart runs the fleet from here'
+} else {
+    Write-Step "Publishing the backend to $backendTarget"
+    Do-Step "stop the running fleet and dotnet publish to $backendTarget" {
+        Stop-Fleet
+        Push-Location $backendSource
+        try { dotnet publish -c Release -o $backendTarget -nologo -v q; if ($LASTEXITCODE) { throw 'dotnet publish failed.' } } finally { Pop-Location }
+    }
+    Write-Ok 'Published'
 }
-Write-Ok 'Published'
 
 # The settings made by Setup-Hub.ps1 (or by hand) come along the first time only.
 $devConfig = Join-Path $web 'fleet.config.json'
 $installedConfig = Join-Path $backendTarget 'fleet.config.json'
-if ((Test-Path $devConfig) -and -not (Test-Path $installedConfig)) {
+if (-not $bundle -and (Test-Path $devConfig) -and -not (Test-Path $installedConfig)) {
     Do-Step "copy your fleet.config.json to $installedConfig" { Copy-Item $devConfig $installedConfig }
     Write-Ok 'Copied your fleet.config.json (from agent-fleet) into the install'
 } elseif (Test-Path $installedConfig) { Write-Ok 'The install already has its own fleet.config.json (left as it is)' }
 
 # The web UI finds the backend through AGENT_URL in .env.local.
-if ($BackendPort -ne 8000 -and -not $SkipFrontend) {
+if ($BackendPort -ne 8000 -and -not $SkipFrontend -and -not $bundle) {
     $envLocal = Join-Path $web '.env.local'
     Do-Step "set AGENT_URL=http://localhost:$BackendPort in agent-fleet\.env.local" {
         $lines = if (Test-Path $envLocal) { @(Get-Content $envLocal) } else { @() }
@@ -151,6 +182,8 @@ if ($BackendPort -ne 8000 -and -not $SkipFrontend) {
 
 # --- register -----------------------------------------------------------------------------------
 $npm = if (Test-Command npm.cmd) { (Get-Command npm.cmd).Source } else { 'npm' }
+$node = if (Test-Command node) { (Get-Command node).Source } else { 'node' }
+$serverJs = Join-Path $web 'server.js'
 $frontendLog = Join-Path $InstallRoot 'frontend.log'
 if (-not $DryRun -and -not (Test-Path $InstallRoot)) { $null = New-Item -ItemType Directory -Path $InstallRoot }
 
@@ -162,9 +195,14 @@ if ($Mode -eq 'Task') {
     $principal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive -RunLevel Limited
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $me
 
-    $backendCommand = "Set-Location -LiteralPath '$backendTarget'; & '$exe' --urls $urls"
+    # The backend checks plan diagrams in the web UI, so it needs the web UI's address when the port is not 3000.
+    $backendCommand = "Set-Location -LiteralPath '$backendTarget'; `$env:FLEET_FRONTEND_URL='http://localhost:$FrontendPort'; & '$exe' --urls $urls"
     $webHost = if ($WebOnLan) { '0.0.0.0' } else { '127.0.0.1' }
-    $frontendCommand = "Set-Location -LiteralPath '$web'; `$env:PORT='$FrontendPort'; `$env:FLEET_WEB_HOST='$webHost'; & '$npm' start *> '$frontendLog'"
+    $frontendCommand = if ($bundle) {
+        "Set-Location -LiteralPath '$web'; `$env:PORT='$FrontendPort'; `$env:HOSTNAME='$webHost'; `$env:AGENT_URL='http://localhost:$BackendPort'; & '$node' '$serverJs' *> '$frontendLog'"
+    } else {
+        "Set-Location -LiteralPath '$web'; `$env:PORT='$FrontendPort'; `$env:FLEET_WEB_HOST='$webHost'; & '$npm' start *> '$frontendLog'"
+    }
     $jobs = @(, @($BackendName, $backendCommand))
     if (-not $SkipFrontend) { $jobs += , @($FrontendName, $frontendCommand) }
     foreach ($job in $jobs) {
@@ -197,9 +235,15 @@ else {
         }
         Do-Step "create the service $FrontendName with NSSM" {
             & $nssm remove $FrontendName confirm 2>&1 | Out-Null
-            & $nssm install $FrontendName $npm start | Out-Null
+            $listen = if ($WebOnLan) { '0.0.0.0' } else { '127.0.0.1' }
+            if ($bundle) {
+                & $nssm install $FrontendName $node $serverJs | Out-Null
+                & $nssm set $FrontendName AppEnvironmentExtra "PORT=$FrontendPort" "HOSTNAME=$listen" "AGENT_URL=http://localhost:$BackendPort" | Out-Null
+            } else {
+                & $nssm install $FrontendName $npm start | Out-Null
+                & $nssm set $FrontendName AppEnvironmentExtra "PORT=$FrontendPort" "FLEET_WEB_HOST=$listen" | Out-Null
+            }
             & $nssm set $FrontendName AppDirectory $web | Out-Null
-            & $nssm set $FrontendName AppEnvironmentExtra "PORT=$FrontendPort" "FLEET_WEB_HOST=$(if ($WebOnLan) { '0.0.0.0' } else { '127.0.0.1' })" | Out-Null
             & $nssm set $FrontendName AppStdout $frontendLog | Out-Null
             & $nssm set $FrontendName AppStderr $frontendLog | Out-Null
             & $nssm set $FrontendName Start SERVICE_AUTO_START | Out-Null
@@ -238,4 +282,5 @@ if (-not $DryRun) {
 }
 
 Write-Host "`nDone. Web UI: http://localhost:$FrontendPort   Backend: http://localhost:$BackendPort" -ForegroundColor Green
-Write-Host 'Update later with .\scripts\Deploy-Fleet.ps1. Remove with .\scripts\Install-Autostart.ps1 -Uninstall.'
+if ($bundle) { Write-Host 'Update: stop it (-Uninstall), unpack a newer download over this folder, run this again. Remove with .\scripts\Install-Autostart.ps1 -Uninstall.' }
+else { Write-Host 'Update later with .\scripts\Deploy-Fleet.ps1. Remove with .\scripts\Install-Autostart.ps1 -Uninstall.' }

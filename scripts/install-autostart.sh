@@ -88,6 +88,15 @@ bind=localhost
 [ "$listen_on_lan" -eq 1 ] && bind=0.0.0.0
 urls="http://$bind:$backend_port"
 web_host=127.0.0.1
+# A release download (backend/ and web/server.js next to scripts/) is already built: it runs where it was
+# unpacked, with its self-contained backend and Next.js's standalone web server.
+bundle=0
+if [ -f "$repo_root/web/server.js" ]; then
+  bundle=1
+  install_root="$repo_root"
+  backend_target="$repo_root/backend"
+  web_dir="$repo_root/web"
+fi
 
 units_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 backend_unit=agent-fleet-backend.service
@@ -140,15 +149,34 @@ fi
 say 'Prerequisites'
 dotnet_path="$(command -v dotnet || true)"
 node_path="$(command -v node || true)"
-[ -n "$dotnet_path" ] || fail ".NET SDK is missing. Run bash scripts/setup-hub.sh first."
-[ -n "$node_path" ] || fail "Node.js is missing. Run bash scripts/setup-hub.sh first."
-command -v npm >/dev/null 2>&1 || fail "npm is missing. Run bash scripts/setup-hub.sh first."
+[ -n "$node_path" ] || fail "Node.js 20 or newer is missing (https://nodejs.org). It runs the web UI."
+if [ "$bundle" -eq 0 ]; then
+  [ -n "$dotnet_path" ] || fail ".NET SDK is missing. Run bash scripts/setup-hub.sh first."
+  command -v npm >/dev/null 2>&1 || fail "npm is missing. Run bash scripts/setup-hub.sh first."
+fi
 # Autostart runs with a bare environment, so it gets absolute paths. readlink -f resolves the symlinks
 # package managers put on PATH; macOS before 12.3 has no -f, and the path as found works there too.
-dotnet_path="$(readlink -f "$dotnet_path" 2>/dev/null || printf '%s' "$dotnet_path")"
 node_path="$(readlink -f "$node_path" 2>/dev/null || printf '%s' "$node_path")"
-dotnet_root="$(dirname "$dotnet_path")"
-ok "dotnet ($dotnet_path), node ($node_path) and npm"
+if [ "$bundle" -eq 1 ]; then
+  dotnet_root="$backend_target"
+  ok "node ($node_path); a release download needs nothing else"
+else
+  dotnet_path="$(readlink -f "$dotnet_path" 2>/dev/null || printf '%s' "$dotnet_path")"
+  dotnet_root="$(dirname "$dotnet_path")"
+  ok "dotnet ($dotnet_path), node ($node_path) and npm"
+fi
+
+# What runs: a source install runs the published DLL with dotnet and the web UI through serve.mjs; a release
+# download runs its self-contained backend and Next.js's standalone server (which reads HOSTNAME).
+if [ "$bundle" -eq 1 ]; then
+  backend_cmd=("$backend_target/AgentFleet" --urls "$urls")
+  web_cmd=("$node_path" "$web_dir/server.js")
+  host_var=HOSTNAME
+else
+  backend_cmd=("$dotnet_path" "$backend_target/AgentFleet.dll" --urls "$urls")
+  web_cmd=("$node_path" scripts/serve.mjs start)
+  host_var=FLEET_WEB_HOST
+fi
 
 if [ "$os" = Linux ]; then
   command -v systemctl >/dev/null 2>&1 || fail "systemctl is missing: this needs a Linux with systemd."
@@ -164,7 +192,7 @@ if [ "$os" = Linux ]; then
 fi
 
 # --- build --------------------------------------------------------------------------------------
-if [ "$skip_frontend" -eq 0 ]; then
+if [ "$skip_frontend" -eq 0 ] && [ "$bundle" -eq 0 ]; then
   say 'Building the web UI'
   if [ "$dry_run" -eq 1 ]; then
     info "would run: (cd '$web_dir' && npm install --no-audit --no-fund && npm run build)"
@@ -174,6 +202,11 @@ if [ "$skip_frontend" -eq 0 ]; then
   fi
 fi
 
+if [ "$bundle" -eq 1 ]; then
+  say "Running the download in place ($repo_root)"
+  stop_all
+  ok 'Keep this folder where it is: the autostart runs the fleet from here'
+else
 say "Publishing the backend to $backend_target"
 stop_all
 if [ "$dry_run" -eq 1 ]; then
@@ -184,11 +217,14 @@ else
   (cd "$backend_source" && dotnet publish -c Release -o "$backend_target" -nologo -v q)
   ok 'Published'
 fi
+fi
 
 # The settings made by setup-hub.sh (or by hand) come along the first time only.
 dev_config="$web_dir/fleet.config.json"
 installed_config="$backend_target/fleet.config.json"
-if [ -e "$installed_config" ]; then
+if [ "$bundle" -eq 1 ]; then
+  info 'The backend keeps its settings in backend/fleet.config.json (written on its first start).'
+elif [ -e "$installed_config" ]; then
   ok 'The install already has its own fleet.config.json (left as it is)'
 elif [ -e "$dev_config" ]; then
   run cp "$dev_config" "$installed_config"
@@ -201,6 +237,8 @@ fi
 # --- register -----------------------------------------------------------------------------------
 # systemd expands % specifiers, so a literal % in a value is written %%.
 systemd_value() { printf '%s' "${1//%/%%}"; }
+# One ExecStart value from a command's words, each quoted for systemd.
+exec_line() { local out="" word; for word in "$@"; do out+="\"$(systemd_value "$word")\" "; done; printf '%s' "${out% }"; }
 xml_escape() { local s="${1//&/&amp;}"; s="${s//</&lt;}"; printf '%s' "${s//>/&gt;}"; }
 
 write_file() {
@@ -226,7 +264,7 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=$(systemd_value "$backend_target")
-ExecStart="$(systemd_value "$dotnet_path")" "$(systemd_value "$backend_target/AgentFleet.dll")" --urls $urls
+ExecStart=$(exec_line "${backend_cmd[@]}")
 Environment="DOTNET_ROOT=$(systemd_value "$dotnet_root")"
 Environment="PATH=$run_path"
 Restart=on-failure
@@ -246,8 +284,8 @@ After=$backend_unit
 [Service]
 Type=simple
 WorkingDirectory=$(systemd_value "$web_dir")
-ExecStart="$(systemd_value "$node_path")" scripts/serve.mjs start
-Environment="PORT=$frontend_port" "FLEET_WEB_HOST=$web_host" "AGENT_URL=http://localhost:$backend_port"
+ExecStart=$(exec_line "${web_cmd[@]}")
+Environment="PORT=$frontend_port" "$host_var=$web_host" "AGENT_URL=http://localhost:$backend_port"
 Environment="PATH=$run_path"
 Restart=on-failure
 RestartSec=5
@@ -296,13 +334,13 @@ else
 
   plist "$backend_label" "$backend_target" "$install_root/backend.log" \
     "$(env_pair DOTNET_ROOT "$dotnet_root")$(env_pair PATH "$PATH")" \
-    "$dotnet_path" "$backend_target/AgentFleet.dll" --urls "$urls" | write_file "$agents_dir/$backend_label.plist"
+    "${backend_cmd[@]}" | write_file "$agents_dir/$backend_label.plist"
   ok "$backend_label"
   labels=("$backend_label")
   if [ "$skip_frontend" -eq 0 ]; then
     plist "$frontend_label" "$web_dir" "$install_root/frontend.log" \
-      "$(env_pair PORT "$frontend_port")$(env_pair FLEET_WEB_HOST "$web_host")$(env_pair AGENT_URL "http://localhost:$backend_port")$(env_pair PATH "$PATH")" \
-      "$node_path" scripts/serve.mjs start | write_file "$agents_dir/$frontend_label.plist"
+      "$(env_pair PORT "$frontend_port")$(env_pair "$host_var" "$web_host")$(env_pair AGENT_URL "http://localhost:$backend_port")$(env_pair PATH "$PATH")" \
+      "${web_cmd[@]}" | write_file "$agents_dir/$frontend_label.plist"
     ok "$frontend_label"
     labels+=("$frontend_label")
   fi
