@@ -29,6 +29,10 @@ Open <http://localhost:3000>. The first start writes `backend/fleet.config.json`
 If PowerShell says running scripts is disabled: `powershell -ExecutionPolicy Bypass -File .\scripts\Start-Fleet.ps1`.
 A downloaded zip may be marked as blocked; `Get-ChildItem -Recurse | Unblock-File` in this folder clears that.
 
+The very first start of a new download can be slow: the web UI is about 11,000 small files, and antivirus software
+may scan each one before it runs. If <http://localhost:3000> does not answer after a minute, give it another minute;
+the next starts take a few seconds. `docs/troubleshooting.md` ("Antivirus") explains how to add an exclusion.
+
 ## Keep it running
 
 ```powershell
