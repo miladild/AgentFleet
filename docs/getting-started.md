@@ -13,6 +13,21 @@ separate step ([adding-machines.md](adding-machines.md)) and can wait.
 
 The setup script installs .NET 9, Node.js and Ollama with winget if they are missing.
 
+## The quickest way: a download
+
+If you only want to use the fleet, not change it, take the ready-built download from the
+[Releases page](https://github.com/miladild/AgentFleet/releases) and skip steps 1 and 2 below:
+
+1. Install [Ollama](https://ollama.com) and pull a coding model, for example `ollama pull qwen2.5-coder:7b`, and install
+   [Node.js 20 or newer](https://nodejs.org). No .NET, no build tools.
+2. Unpack `AgentFleet-<version>-win-x64.zip` (or the `linux-x64.tar.gz`) somewhere it can stay.
+3. Run `.\scripts\Start-Fleet.ps1` (Linux: `bash scripts/start-fleet.sh`) in that folder, and open <http://localhost:3000>.
+
+The first start writes `backend\fleet.config.json` with this machine as the only node, using `qwen2.5-coder:7b`; pick
+another model under **Config**. `.\scripts\Install-Autostart.ps1` (Linux: `bash scripts/install-autostart.sh`) starts it
+at every logon from that folder. To update, stop it, unpack the new version over the old one and start it again: your
+settings and conversations are not in the download, so they are kept. Then continue with [step 3](#3-ask-something).
+
 ## Linux or macOS
 
 This guide's steps below use Windows PowerShell. On Linux or macOS, install the .NET 9 SDK, Node.js 20 or newer (including

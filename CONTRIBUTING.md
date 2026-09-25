@@ -46,6 +46,28 @@ node agent-fleet\scripts\serve.mjs dev
 `agent-fleet/tsconfig.json` and `agent-fleet/next-env.d.ts` to mention that folder when you build or run with it: put those two
 files back (`git checkout` them) before committing, or `npm run typecheck` will look for a folder that no longer exists.
 
+## Making a release
+
+Push a version tag. The **Release** workflow (`.github/workflows/release.yml`) runs the backend tests, builds the
+Windows and Linux downloads and the extension on their own platforms, and publishes them with checksums as a GitHub
+Release:
+
+```powershell
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+Bump `version` in `vscode-fleet/package.json` first when the extension changed. To build the same files locally (into
+`dist/`, which is ignored), with PowerShell 7:
+
+```powershell
+pwsh scripts/Build-Release.ps1 -Runtime win-x64 -Extension
+```
+
+`Build-Release.ps1` copies only files git tracks and refuses to package a `fleet.config.json`, `.env` file, database or
+log, so nothing from your own setup can end up in a download. It builds the web UI into `.next-release`, so a running
+web UI is not disturbed, and puts `tsconfig.json` and `next-env.d.ts` back afterwards.
+
 ## Guidelines
 
 - **Nothing machine-specific in code or docs.** No addresses, host names, user names or paths from your own setup. Use

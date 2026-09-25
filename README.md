@@ -44,11 +44,28 @@ flowchart LR
 - Any number of other machines running Windows or Linux with [Ollama](https://ollama.com/download).
 - On the hub, a graphics card with 8 GB of memory or more is best. Without one, 16 GB of RAM runs the smaller models,
   more slowly.
-- The hub needs the [.NET 9 SDK](https://dotnet.microsoft.com/download), [Node.js 20+](https://nodejs.org), npm, and
-  [Ollama](https://ollama.com/download). On Windows, `Setup-Hub.ps1` offers winget installs; on Linux and macOS, install
-  them before running `setup-hub.sh`.
+- The hub needs [Node.js 20+](https://nodejs.org) and [Ollama](https://ollama.com/download). Running from source also
+  needs the [.NET 9 SDK](https://dotnet.microsoft.com/download) and npm; a [download](#download) does not. On Windows,
+  `Setup-Hub.ps1` offers winget installs; on Linux and macOS, install them before running `setup-hub.sh`.
 
-## Quick start (one machine, about 15 minutes, most of it downloading a model)
+## Download
+
+Ready-to-run builds are on the [Releases page](https://github.com/miladild/AgentFleet/releases):
+
+| File | What | You need |
+|---|---|---|
+| `AgentFleet-<version>-win-x64.zip` | The fleet for Windows: backend and web UI, already built | [Node.js 20+](https://nodejs.org) and [Ollama](https://ollama.com) |
+| `AgentFleet-<version>-linux-x64.tar.gz` | The same for Linux | Node.js 20+ and Ollama |
+| `agent-fleet-chat-<version>.vsix` | The VS Code extension (`@fleet` and Fleet Router) | VS Code with GitHub Copilot Chat |
+
+Unpack the fleet, then run `.\scripts\Start-Fleet.ps1` (Windows) or `bash scripts/start-fleet.sh` (Linux) and open
+<http://localhost:3000>. The backend brings its own .NET runtime; nothing is built on your machine. `README.md` inside
+the download has the details, including starting it at logon. Install the extension from VS Code: Extensions, the
+`...` menu, **Install from VSIX**. `SHA256SUMS.txt` lists the checksums.
+
+To change the code, or on macOS, use the source instead:
+
+## Quick start from source (one machine, about 15 minutes, most of it downloading a model)
 
 ### Windows
 

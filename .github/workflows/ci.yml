@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # Windows, like most hubs: the backend's shell and service code has Windows paths.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Backend tests
+        working-directory: agent-fleet
+        run: dotnet test agent.Tests --nologo
+
+      - name: Web UI typecheck
+        working-directory: agent-fleet
+        env:
+          COPILOTKIT_TELEMETRY_DISABLED: "true"
+        run: |
+          npm ci --no-audit --no-fund
+          npm run typecheck
+
+      - name: VS Code extension tests
+        working-directory: vscode-fleet
+        run: |
+          npm ci --no-audit --no-fund
+          npm test

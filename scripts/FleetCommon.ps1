@@ -54,6 +54,8 @@ function Find-FleetConfig([string]$Path, [string]$InstallRoot) {
     if ($Path) { $candidates += $Path }
     if ($env:FLEET_CONFIG_PATH) { $candidates += $env:FLEET_CONFIG_PATH }
     $candidates += (Join-Path $script:RepoRoot 'agent-fleet\fleet.config.json')
+    # A release download keeps its config next to its own backend.
+    $candidates += (Join-Path $script:RepoRoot 'backend\fleet.config.json')
     $candidates += (Join-Path $InstallRoot 'backend\fleet.config.json')
     foreach ($candidate in $candidates) {
         if ($candidate -and (Test-Path -LiteralPath $candidate)) { return (Resolve-Path -LiteralPath $candidate).Path }
@@ -119,13 +121,13 @@ function Invoke-OllamaPull([string]$NodeUrl, [string]$Model) {
     while (-not $reader.EndOfStream) {
         $line = $reader.ReadLine()
         if (-not $line) { continue }
-        $event = $line | ConvertFrom-Json
-        if ($event.error) { $reader.Close(); throw "Ollama said: $($event.error)" }
-        if ($event.total -and $event.completed) {
-            $percent = [int](100 * $event.completed / $event.total)
-            if ($percent -ge $lastPercent + 10) { Write-Info "$($event.status): $percent%"; $lastPercent = $percent }
-        } elseif ($event.status -and $event.status -ne $lastStatus) {
-            Write-Info $event.status; $lastStatus = $event.status; $lastPercent = -10
+        $update = $line | ConvertFrom-Json
+        if ($update.error) { $reader.Close(); throw "Ollama said: $($update.error)" }
+        if ($update.total -and $update.completed) {
+            $percent = [int](100 * $update.completed / $update.total)
+            if ($percent -ge $lastPercent + 10) { Write-Info "$($update.status): $percent%"; $lastPercent = $percent }
+        } elseif ($update.status -and $update.status -ne $lastStatus) {
+            Write-Info $update.status; $lastStatus = $update.status; $lastPercent = -10
         }
     }
     $reader.Close()

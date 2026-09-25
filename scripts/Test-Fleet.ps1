@@ -36,7 +36,9 @@ function Bad($t)  { $script:failures++; Write-Bad $t }
 function Warn($t) { $script:warnings++; Write-Warn $t }
 
 Write-Step 'Tools on this machine'
-if (Test-Command dotnet) {
+if (Test-Path (Join-Path $script:RepoRoot 'web\server.js')) {
+    Write-Ok 'Release download: the backend brings its own .NET runtime'
+} elseif (Test-Command dotnet) {
     $sdks = @(dotnet --list-sdks 2>$null)
     $major = ($sdks | ForEach-Object { [int](($_ -split '\.')[0]) } | Sort-Object -Descending | Select-Object -First 1)
     if ($major -ge 9) { Write-Ok ".NET SDK $major (need 9 or newer)" } else { Bad ".NET SDK 9 or newer is required (found: $($sdks -join ', ')). Install: winget install Microsoft.DotNet.SDK.9" }
