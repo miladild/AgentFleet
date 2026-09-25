@@ -59,6 +59,10 @@ requests, and setup steps that stalled. If the backend hangs or vanishes right a
 antivirus's history or quarantine first, restore it, and add an exclusion for the repository folder and for the install
 folder (`C:\AgentFleet`). Do the same for a worker's Ollama folder if a worker behaves oddly.
 
+A release download is new to your antivirus too, and its web UI is about 11,000 small files. On the very first start the
+scanner may look at each one before it runs, so the web UI can take a minute or more to answer; later starts take a few
+seconds. Add an exclusion for the folder you unpacked it to if that first start stalls.
+
 If it runs fine in a terminal but not as a Windows service, the service's account is different from yours: it has a different
 user profile, different environment variables and a different `PATH`. The scheduled-task install runs as you and avoids
 this.
