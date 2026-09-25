@@ -39,17 +39,49 @@ read-only file system, no Linux capabilities, a memory and CPU limit, and a shor
 container does have outbound network access, so package installs work; that also means it can reach other machines on
 your network.
 
-Where the container runs is the `sandbox` section of `fleet.config.json`:
+Set it up in the web UI: **Config**, **Sandbox**. Pick where the container runs, press **Test**, then **Save**. It applies
+at once, without a restart.
+
+- **Automatic** (default): Docker on the hub if it is installed, otherwise the tool is not offered.
+- **This computer**: Docker Desktop (Windows, macOS) or Docker Engine (Linux) on the hub.
+- **Another machine, over SSH**: Docker on a Linux machine, reached over SSH with a key. Handy when the hub has no Docker,
+  and it keeps model-written code off the hub entirely.
+- **Off**: no sandbox tool.
+
+**Test** checks each step and says what to do when one fails: it signs in, checks that Docker runs there and that the
+account may use it (with the exact `usermod` line when it may not), and checks whether the two container images are
+already downloaded. If not, **Download them now** fetches them (about 250 MB) and runs a real snippet, so the model's
+first call does not spend its time limit waiting for a download.
+
+#### SSH, step by step
+
+1. On the sandbox machine: an SSH server, Docker Engine (`curl -fsSL https://get.docker.com | sh`), and the account in the
+   `docker` group (`sudo usermod -aG docker <account>`, then sign out and in).
+2. In **Config**, **Sandbox**: choose **Another machine, over SSH**, type its address and the account.
+3. **Create a key for the fleet**. The fleet makes its own key pair (`~/.ssh/agent-fleet_rsa` for the account the backend
+   runs as, readable by that account only). The private half never leaves the hub, and an existing key file is never
+   overwritten.
+4. **Add the key to that machine**: type that account's password once and the fleet adds its public key to
+   `~/.ssh/authorized_keys` there. The password is used for that one sign-in and is not saved or logged. On a machine that
+   only accepts keys, or a Windows one, **Or do it by hand** shows the line to run there instead.
+5. **Test**, then **Save**.
+
+The first successful test shows the machine's identity (its SSH host key fingerprint), and **Save** remembers it. From
+then on the fleet refuses to run code on a machine that answers with a different key, so something else taking over that
+address cannot receive your code. If you reinstall the sandbox machine, press **Test** and **Save** again to remember its
+new key.
+
+The same settings are the `sandbox` section of `fleet.config.json`, if you would rather edit the file (a hand edit applies
+at the next start):
 
 ```json
-"sandbox": { "mode": "auto" }
+"sandbox": { "mode": "ssh", "host": "192.168.1.30", "user": "builder", "keyPath": "C:\\Users\\me\\.ssh\\agent-fleet_rsa",
+             "hostKey": "SHA256:..." }
 ```
 
-- `auto` (default): Docker on the hub if it is installed, otherwise the tool is not offered.
-- `local`: Docker on the hub.
-- `ssh`: Docker on another machine, reached over SSH with a key: `"host"`, `"user"`, `"keyPath"`, optionally `"port"`
-  and `"sudo": true` if that account is not in the `docker` group.
-- `off`: no sandbox tool.
+`mode` is `auto`, `local`, `ssh` or `off`. For `ssh`: `host`, `user`, `keyPath`, optionally `port`, `"sudo": true` when
+the account may run `sudo docker` without a password instead of being in the `docker` group, and `hostKey` (without it,
+any host key is accepted). `timeoutSeconds` (1 to 120, default 20) is the time limit per run in every mode.
 
 ## MCP servers: add tools without writing code
 

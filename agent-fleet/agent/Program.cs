@@ -59,6 +59,7 @@ builder.Services.AddSingleton<FleetActivityLog>();
 builder.Services.AddSingleton<FleetContextStore>();
 builder.Services.AddSingleton<FleetRequestContext>();
 builder.Services.AddSingleton<ContextRetentionService>();
+builder.Services.AddSingleton<ModelPullService>();
 builder.Services.AddHostedService(services => services.GetRequiredService<ContextRetentionService>());
 
 static IChatClient CreateOllamaChatClient(Uri baseUrl, string model, TimeSpan networkTimeout, Microsoft.Extensions.Logging.ILogger rescueLogger)
@@ -170,13 +171,12 @@ string RoutingFingerprint(FleetConfig config) =>
 var fleetClient = new SwappableChatClient(BuildRouter(fleetConfigStore.Current));
 string routedFingerprint = RoutingFingerprint(fleetConfigStore.Current);
 var routerLock = new object();
-// The sandbox needs Docker somewhere; with none available the tool is simply not offered.
-DockerSandboxOptions sandboxOptions = DockerSandboxOptions.Resolve(fleetConfigStore.Current.Sandbox, builder.Configuration);
+// The sandbox needs Docker somewhere; with none available the tool is simply not offered. Sandbox settings
+// saved in the web UI swap the executor in the holder, so they apply without a restart.
 Microsoft.Extensions.Logging.ILogger sandboxLogger = loggerFactory.CreateLogger("AgentFleet.Sandbox");
-sandboxLogger.LogInformation("Sandbox: {Summary}.", sandboxOptions.Summary);
-DockerSandboxExecutor? sandboxExecutor = sandboxOptions.Mode == SandboxMode.Off
-    ? null
-    : new DockerSandboxExecutor(sandboxOptions, sandboxLogger);
+var sandbox = new SandboxHolder(
+    DockerSandboxOptions.Resolve(fleetConfigStore.Current.Sandbox, builder.Configuration),
+    sandboxLogger);
 
 HubShellOptions shellOptions = HubShellOptions.Load(builder.Configuration);
 Microsoft.Extensions.Logging.ILogger shellLogger = loggerFactory.CreateLogger("AgentFleet.Shell");
@@ -190,11 +190,16 @@ Microsoft.Extensions.Logging.ILogger shellLogger = loggerFactory.CreateLogger("A
     It does have outbound network access, so package installs (pip/npm) work.
     """)]
 static async Task<string> RunSandboxedCodeAsync(
-    DockerSandboxExecutor executor,
+    SandboxHolder sandbox,
     [Description("One of: python, bash, javascript (or node, same as javascript).")] string language,
     [Description("The code to run. Sent to the interpreter's stdin, not a shell - no need to escape quotes.")] string code,
     CancellationToken cancellationToken)
 {
+    if (sandbox.Executor is not { } executor)
+    {
+        return "Error: the code sandbox is switched off. The user can set it up in the web UI under Config, Sandbox.";
+    }
+
     SandboxExecutionResult result = await executor.ExecuteAsync(language, code, cancellationToken);
     if (result.Error is not null)
     {
@@ -247,13 +252,11 @@ Dictionary<string, string> toolDescriptions = new(StringComparer.Ordinal)
         "- not raw markup. Use this to actually read a page found via web_search, or any URL you already have."
 };
 
-AITool? sandboxTool = sandboxExecutor is null
-    ? null
-    : AIFunctionFactory.Create(
-        (string language, string code, CancellationToken cancellationToken) =>
-            RunSandboxedCodeAsync(sandboxExecutor, language, code, cancellationToken),
-        name: "run_sandboxed_code",
-        description: toolDescriptions["run_sandboxed_code"]);
+AITool sandboxTool = AIFunctionFactory.Create(
+    (string language, string code, CancellationToken cancellationToken) =>
+        RunSandboxedCodeAsync(sandbox, language, code, cancellationToken),
+    name: "run_sandboxed_code",
+    description: toolDescriptions["run_sandboxed_code"]);
 
 var contextTools = new ContextTools(contextJournal);
 
@@ -369,10 +372,9 @@ AITool validateDiagramTool = AIFunctionFactory.Create(
 // connected, is decided per request by the tool registry (DynamicToolsChatClient), so a change saved in
 // the Config panel applies to the next message without a restart. A switched-off tool is removed from
 // the request itself, so the model cannot call it whatever the instructions say.
-(string Name, AITool Tool)[] sandboxEntry = sandboxTool is null ? [] : [("run_sandboxed_code", sandboxTool)];
 (string Name, AITool Tool)[] builtInTools =
 [
-    .. sandboxEntry,
+    ("run_sandboxed_code", sandboxTool),
     ("read_file", readFileTool),
     ("write_file", writeFileTool),
     ("edit_file", editFileTool),
@@ -397,7 +399,9 @@ var toolRegistry = new FleetToolRegistry(
     fleetConfigStore,
     builtInTools.Select(tool => tool.Name),
     readOnlyTools,
-    loggerFactory);
+    loggerFactory,
+    // The sandbox tool is only offered while a sandbox is set up.
+    available: name => name != "run_sandboxed_code" || sandbox.Executor is not null);
 await toolRegistry.ReloadAsync(app.Lifetime.ApplicationStopping);
 app.Lifetime.ApplicationStopping.Register(() => toolRegistry.DisposeAsync().AsTask().GetAwaiter().GetResult());
 
@@ -406,7 +410,7 @@ app.Lifetime.ApplicationStopping.Register(() => toolRegistry.DisposeAsync().AsTa
 // the config file was first written still shows up (IsToolEnabled defaults it to on).
 object ToolsPayload(FleetConfig config) =>
     toolDescriptions
-        .Where(pair => pair.Key != "run_sandboxed_code" || sandboxTool is not null)
+        .Where(pair => pair.Key != "run_sandboxed_code" || sandbox.Executor is not null)
         .Select(pair => (Name: pair.Key, Description: pair.Value, Source: "built-in"))
         .Concat(toolRegistry.Mcp.Tools.Select(entry => (
             Name: entry.Tool.Name,
@@ -1088,6 +1092,219 @@ app.MapGet("/api/contexts/{id}/export", (string id) =>
     });
 });
 
+// ---- Setup: the web UI's checklist, and the fixes it can make itself --------------------------------------
+// Downloading models, starting Ollama, and setting up the code sandbox (including over SSH) from the browser,
+// so a first-time user does not need a terminal. RequestGuard keeps other websites out, as for the rest.
+ModelPullService modelPulls = app.Services.GetRequiredService<ModelPullService>();
+modelPulls.Finished += _ => healthMonitor.Forget();
+var setupService = new FleetSetupService(fleetConfigStore, fleetOptions, healthMonitor, sandbox, httpClientFactory);
+
+IReadOnlyList<string> BackendUrls() =>
+    app.Services.GetRequiredService<Microsoft.AspNetCore.Hosting.Server.IServer>()
+        .Features.Get<Microsoft.AspNetCore.Hosting.Server.Features.IServerAddressesFeature>()?.Addresses.ToList() ?? [];
+
+app.MapGet("/api/setup", async (CancellationToken cancellationToken) =>
+    Results.Json(await setupService.BuildAsync(toolRegistry.Mcp.Statuses, BackendUrls(), cancellationToken)));
+
+app.MapGet("/api/setup/hub", () => Results.Json(FleetSetupService.Hub(BackendUrls())));
+
+app.MapPost("/api/setup/pull", (ModelPullRequest request) =>
+{
+    if (!OllamaAddress.TryGetRoot(request.Url, out Uri root))
+    {
+        return Results.BadRequest(new { error = "url must be the machine's address, for example http://192.168.1.20:11434." });
+    }
+
+    try
+    {
+        return Results.Json(modelPulls.Start(root, request.Model ?? string.Empty));
+    }
+    catch (ArgumentException exception)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
+app.MapGet("/api/setup/pulls", () => Results.Json(modelPulls.List()));
+
+app.MapPost("/api/setup/pulls/{id}/cancel", (string id) => modelPulls.Cancel(id) ? Results.Ok() : Results.NotFound());
+
+app.MapPost("/api/setup/start-ollama", async (CancellationToken cancellationToken) =>
+{
+    // A service runs in its own session and account: a program it opens would not be the user's Ollama.
+    if (Microsoft.Extensions.Hosting.WindowsServices.WindowsServiceHelpers.IsWindowsService())
+    {
+        return Results.BadRequest(new { error = "The fleet runs as a Windows service, which cannot open programs on your desktop. Start Ollama from the Start menu." });
+    }
+
+    string? ollamaApp = FleetSetupService.OllamaApp();
+    if (ollamaApp is null)
+    {
+        return Results.BadRequest(new { error = "Ollama's app was not found on this computer. Install it from https://ollama.com/download." });
+    }
+
+    try
+    {
+        using System.Diagnostics.Process? started = OperatingSystem.IsMacOS()
+            ? System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("open", ["-a", ollamaApp]) { UseShellExecute = false })
+            : System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(ollamaApp) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(ollamaApp)! });
+    }
+    catch (Exception exception) when (exception is System.ComponentModel.Win32Exception or InvalidOperationException)
+    {
+        return Results.BadRequest(new { error = $"Could not start Ollama: {exception.Message}" });
+    }
+
+    for (int attempt = 0; attempt < 30; attempt++)
+    {
+        if ((await setupService.LocalOllamaAsync(cancellationToken)).Up)
+        {
+            healthMonitor.Forget();
+            return Results.Json(new { started = true, message = "Ollama is running." });
+        }
+
+        await Task.Delay(500, cancellationToken);
+    }
+
+    return Results.Json(new { started = false, message = "Ollama was started but has not answered yet. Give it a few seconds and check again." });
+});
+
+// The sandbox settings: what is saved, what is in use, and the fleet's SSH key (only ever its public half).
+object SandboxPayload(string? message = null, string? keyPathAsked = null)
+{
+    FleetSandboxConfig saved = fleetConfigStore.Current.Sandbox ?? new FleetSandboxConfig();
+    DockerSandboxOptions active = sandbox.Options;
+    string keyPath = keyPathAsked ?? saved.KeyPath ?? (active.Mode == SandboxMode.Ssh ? active.KeyPath : SandboxSetup.DefaultKeyPath());
+    return new
+    {
+        saved,
+        active = new
+        {
+            mode = active.Mode.ToString().ToLowerInvariant(),
+            summary = active.Summary,
+            host = active.Host,
+            port = active.Port,
+            user = active.User,
+            keyPath = active.KeyPath,
+            sudo = active.UseSudo,
+            timeoutSeconds = (int)active.ExecutionTimeout.TotalSeconds,
+            hostKey = active.HostKey
+        },
+        key = SandboxSetup.ReadKey(keyPath),
+        defaultKeyPath = SandboxSetup.DefaultKeyPath(),
+        defaultUser = Environment.UserName,
+        dockerOnThisMachine = QuickProcess.FindOnPath("docker") is not null,
+        prepare = SandboxSetup.PrepareStatus,
+        message
+    };
+}
+
+FleetSandboxConfig CleanSandbox(FleetSandboxConfig request)
+{
+    static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    string? mode = Clean(request.Mode)?.ToLowerInvariant();
+    FleetSandboxConfig cleaned = request with
+    {
+        Mode = mode is "auto" ? null : mode,
+        Host = Clean(request.Host),
+        User = Clean(request.User),
+        KeyPath = Clean(request.KeyPath),
+        HostKey = Clean(request.HostKey)
+    };
+
+    // A remembered identity belongs to one machine: carried over to another host it would lock that one out.
+    FleetSandboxConfig? saved = fleetConfigStore.Current.Sandbox;
+    if (cleaned.HostKey is not null && saved?.HostKey == cleaned.HostKey &&
+        !string.Equals(saved.Host, cleaned.Host, StringComparison.OrdinalIgnoreCase))
+    {
+        cleaned = cleaned with { HostKey = null };
+    }
+
+    return cleaned;
+}
+
+(DockerSandboxOptions? Options, string? Error) ResolveSandbox(FleetSandboxConfig candidate)
+{
+    try
+    {
+        return (DockerSandboxOptions.Resolve(candidate, builder.Configuration), null);
+    }
+    catch (InvalidOperationException exception)
+    {
+        return (null, exception.Message);
+    }
+}
+
+// keyPath: describe that key instead (the settings form asks while someone types a path).
+app.MapGet("/api/setup/sandbox", (string? keyPath) =>
+    Results.Json(SandboxPayload(keyPathAsked: string.IsNullOrWhiteSpace(keyPath) ? null : keyPath.Trim())));
+
+app.MapPut("/api/setup/sandbox", (FleetSandboxConfig request) =>
+{
+    FleetSandboxConfig cleaned = CleanSandbox(request);
+    (DockerSandboxOptions? options, string? error) = ResolveSandbox(cleaned);
+    if (options is null)
+    {
+        return Results.BadRequest(new { error });
+    }
+
+    fleetConfigStore.Save(fleetConfigStore.Current with { Sandbox = cleaned });
+    sandbox.Apply(options);
+    return Results.Json(SandboxPayload($"Saved and applied: {options.Summary}."));
+});
+
+app.MapPost("/api/setup/sandbox/key", (SandboxKeyRequest request) =>
+{
+    try
+    {
+        return Results.Json(SandboxSetup.CreateKey(request.Path));
+    }
+    catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException or NotSupportedException)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
+app.MapPost("/api/setup/sandbox/test", async (FleetSandboxConfig request, CancellationToken cancellationToken) =>
+{
+    (DockerSandboxOptions? options, string? error) = ResolveSandbox(CleanSandbox(request));
+    return options is null
+        ? Results.BadRequest(new { error })
+        : Results.Json(await SandboxSetup.TestAsync(options, cancellationToken));
+});
+
+// The password is used for this one connection and is never stored or logged.
+app.MapPost("/api/setup/sandbox/install-key", async (SandboxKeyInstallRequest request, CancellationToken cancellationToken) =>
+{
+    if (string.IsNullOrWhiteSpace(request.Host) || string.IsNullOrWhiteSpace(request.User) || string.IsNullOrEmpty(request.Password))
+    {
+        return Results.BadRequest(new { error = "Enter the machine's address, the account and its password." });
+    }
+
+    int port = request.Port ?? 22;
+    if (port is < 1 or > 65535)
+    {
+        return Results.BadRequest(new { error = "The ssh port must be between 1 and 65535." });
+    }
+
+    return Results.Json(await SandboxSetup.InstallKeyAsync(
+        request.Host.Trim(), port, request.User.Trim(), request.Password,
+        string.IsNullOrWhiteSpace(request.KeyPath) ? SandboxSetup.DefaultKeyPath() : request.KeyPath.Trim(),
+        string.IsNullOrWhiteSpace(request.HostKey) ? null : request.HostKey.Trim(),
+        cancellationToken));
+});
+
+app.MapPost("/api/setup/sandbox/prepare", (FleetSandboxConfig request) =>
+{
+    (DockerSandboxOptions? options, string? error) = ResolveSandbox(CleanSandbox(request));
+    if (options is null || options.Mode == SandboxMode.Off)
+    {
+        return Results.BadRequest(new { error = error ?? "The sandbox is switched off: there is nothing to prepare." });
+    }
+
+    SandboxSetup.StartPrepare(options, sandboxLogger);
+    return Results.Json(SandboxSetup.PrepareStatus);
+});
+
 app.MapAGUIServer("/", fleetAgent);
 
 await app.RunAsync();
@@ -1103,6 +1320,12 @@ internal sealed record McpTestRequest(string? Name, FleetMcpServerConfig Server)
 internal sealed record ContextDecisionRequest(string Text, string? Reason = null, string? Category = null);
 
 internal sealed record ContextCleanupRequest(int OlderThanDays);
+
+internal sealed record ModelPullRequest(string Url, string? Model);
+
+internal sealed record SandboxKeyRequest(string? Path);
+
+internal sealed record SandboxKeyInstallRequest(string Host, int? Port, string User, string Password, string? KeyPath, string? HostKey);
 
 internal sealed record FleetConfigNodeUpdate(
     string Name,

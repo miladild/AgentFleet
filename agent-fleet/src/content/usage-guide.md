@@ -9,6 +9,12 @@ The panel at the top of the page shows each machine and whether it is up (green
 or red), and the **Config** button is where machines, models, tools and MCP
 servers are set up.
 
+New here, or something is red? **Config > Setup** lists what the fleet needs,
+with the fix for each item and a button for the ones it can do itself:
+downloading a model that suits this computer, starting Ollama, downloading a
+missing model onto another machine. **Config > Sandbox** sets up the code
+sandbox, including Docker on another machine over SSH.
+
 ## Two toggles (top right)
 
 - **Hub mode** - *Conservative* keeps the strongest machine for complex work

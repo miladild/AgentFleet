@@ -93,6 +93,13 @@ Practical limits:
   came from files or the web is labelled untrusted, but a model can still be steered by it, so the advice under
   "What the model can do to you" applies.
 - `fleet.config.json`, `contexts`, `sessions`, `plans`, `logs` and `.env.local` are listed in `.gitignore` so they are not committed.
+- The sandbox's SSH key (made by **Config > Sandbox**, `~/.ssh/agent-fleet_rsa` by default) is readable only by the account
+  the backend runs as, and only its public half is ever shown. Give it an account on the sandbox machine that can run
+  Docker and nothing more. **Add the key to that machine** takes that account's password for one sign-in; the password
+  goes from the browser to the backend on this computer, is used once, and is not saved or logged. After a test, **Save**
+  remembers the machine's host key and the fleet then refuses a machine that answers with a different one.
+- The Setup tab can download models onto any machine you name and start Ollama on this computer. Like the rest of the
+  API, it is only reachable from this computer unless you opened the backend to the network.
 
 ## Reporting a problem
 

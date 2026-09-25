@@ -58,10 +58,11 @@ Ready-to-run builds are on the [Releases page](https://github.com/miladild/Agent
 | `AgentFleet-<version>-linux-x64.tar.gz` | The same for Linux | Node.js 20+ and Ollama |
 | `agent-fleet-chat-<version>.vsix` | The VS Code extension (`@fleet` and Fleet Router) | VS Code with GitHub Copilot Chat |
 
-Unpack the fleet, then run `.\scripts\Start-Fleet.ps1` (Windows) or `bash scripts/start-fleet.sh` (Linux) and open
-<http://localhost:3000>. The backend brings its own .NET runtime; nothing is built on your machine. `README.md` inside
-the download has the details, including starting it at logon. Install the extension from VS Code: Extensions, the
-`...` menu, **Install from VSIX**. `SHA256SUMS.txt` lists the checksums.
+Unpack the fleet, then double-click **Start Agent Fleet.cmd** (Windows) or run `bash scripts/start-fleet.sh` (Linux). The
+web UI opens in your browser, and its **Setup** tab picks a model that suits your computer and downloads it with one
+button. The backend brings its own .NET runtime; nothing is built on your machine. `README.md` inside the download has
+the details, including starting it at logon. Install the extension from VS Code: Extensions, the `...` menu, **Install
+from VSIX**. `SHA256SUMS.txt` lists the checksums.
 
 To change the code, or on macOS, use the source instead:
 

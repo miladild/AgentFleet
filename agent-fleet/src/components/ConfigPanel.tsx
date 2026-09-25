@@ -3,7 +3,10 @@
 import { useCallback, useEffect, useState } from "react";
 import type { McpServerConfig } from "./mcpCatalog";
 import { HistorySettings } from "./HistorySettings";
+import { SandboxSettings } from "./SandboxSettings";
+import { SetupSettings } from "./SetupSettings";
 import { ToolsSettings, type McpStatus, type ToolConfig } from "./ToolsSettings";
+import { CopyCommand, DownloadButton, announceFleetChanged, type HubInfo } from "./setupApi";
 
 type FleetConfigNode = {
   name: string;
@@ -106,6 +109,56 @@ function ModelChips({ models, current, onPick }: { models: FetchedModel[]; curre
 const unreachableHint =
   "Check that Ollama is running on that machine and listening on the network (OLLAMA_HOST=0.0.0.0), and that its firewall lets this machine in. scripts/Setup-Worker.ps1 (Windows) or scripts/setup-worker.sh (Linux) set both up.";
 
+/** How to get another computer ready: the worker scripts with this hub's address filled in, or the same by hand. */
+function PrepareComputer() {
+  const [open, setOpen] = useState(false);
+  const [hub, setHub] = useState<HubInfo | null>(null);
+
+  useEffect(() => {
+    if (open && !hub) {
+      fetch("/api/setup/hub")
+        .then((res) => res.json())
+        .then(setHub)
+        .catch(() => {});
+    }
+  }, [open, hub]);
+
+  const address = hub?.addresses[0] ?? "THIS-COMPUTERS-IP";
+  return (
+    <details className="text-[11px] text-neutral-400" open={open} onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
+      <summary className="cursor-pointer text-sky-400">How do I get another computer ready?</summary>
+      <div className="mt-2 space-y-2">
+        <p>
+          The other computer needs Ollama, listening on the network, with its firewall letting only this computer in. Copy Agent Fleet to it
+          (the same download, or a clone; only the scripts folder is used), then run the line for its system in that folder.
+          {hub && hub.addresses.length > 1 && ` This computer has several addresses (${hub.addresses.join(", ")}); use the one on the same network as that computer.`}
+        </p>
+        <p className="text-neutral-300">Windows, in PowerShell as administrator:</p>
+        <CopyCommand command={`.\\scripts\\Setup-Worker.ps1 -AllowFrom ${address} -KeepAwake`} />
+        <p className="text-neutral-300">Linux:</p>
+        <CopyCommand command={`sudo bash scripts/setup-worker.sh --allow-from ${address}`} />
+        <details>
+          <summary className="cursor-pointer text-neutral-400">Without Agent Fleet on that computer (Windows, by hand)</summary>
+          <div className="mt-1 space-y-1">
+            <p>Install Ollama from ollama.com, then in PowerShell as administrator:</p>
+            <CopyCommand
+              command={`[Environment]::SetEnvironmentVariable('OLLAMA_HOST', '0.0.0.0', 'Machine')\nNew-NetFirewallRule -DisplayName 'Ollama from the Agent Fleet hub' -Direction Inbound -Protocol TCP -LocalPort 11434 -RemoteAddress ${address} -Action Allow`}
+            />
+            <p>
+              Then quit Ollama from the notification area and start it again. Ollama&apos;s installer may also have added its own rule that lets every
+              computer in; the script narrows that one too.
+            </p>
+          </div>
+        </details>
+        <p>
+          Then type that computer&apos;s address above and press Connect. Models can be downloaded onto it from here: nothing else needs doing
+          on it. Ollama has no password, so never forward its port on your router.
+        </p>
+      </div>
+    </details>
+  );
+}
+
 function AddMachine({ nodes, onAdd, saving }: { nodes: FleetConfigNode[]; onAdd: (node: FleetConfigNode) => Promise<boolean>; saving: boolean }) {
   const [address, setAddress] = useState("");
   const [connecting, setConnecting] = useState(false);
@@ -114,6 +167,7 @@ function AddMachine({ nodes, onAdd, saving }: { nodes: FleetConfigNode[]; onAdd:
   const [model, setModel] = useState("");
   const [role, setRole] = useState("standard");
   const [name, setName] = useState("");
+  const [wanted, setWanted] = useState("qwen2.5-coder:7b");
 
   const url = normalizeNodeAddress(address);
 
@@ -189,8 +243,31 @@ function AddMachine({ nodes, onAdd, saving }: { nodes: FleetConfigNode[]; onAdd:
 
       {models && (
         <div className="space-y-2">
-          <p className="text-[11px] text-emerald-400">Connected. Pick the model this machine should serve:</p>
-          <ModelChips models={models} current={model} onPick={setModel} />
+          <p className="text-[11px] text-emerald-400">
+            Connected. {models.length > 0 ? "Pick the model this machine should serve, or download another:" : "It has no models yet. Download one onto it:"}
+          </p>
+          {models.length > 0 && <ModelChips models={models} current={model} onPick={setModel} />}
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              value={wanted}
+              onChange={(e) => setWanted(e.target.value.trim())}
+              className="w-48 text-xs px-2 py-1 rounded bg-neutral-950 border border-neutral-700 text-neutral-200 font-mono"
+              title="Any model from ollama.com/library"
+            />
+            <DownloadButton
+              compact
+              url={url}
+              model={wanted}
+              label="Download onto it"
+              onDone={async () => {
+                const result = await fetchModels(url);
+                if (!("error" in result)) {
+                  setModels(result.models);
+                  setModel(result.models.find((m) => m.name === wanted || m.name === `${wanted}:latest`)?.name ?? wanted);
+                }
+              }}
+            />
+          </div>
           <div className="flex flex-wrap gap-3 items-end">
             <div>
               <label className="block text-[10px] uppercase tracking-wide text-neutral-500 mb-0.5">Name</label>
@@ -231,6 +308,7 @@ function AddMachine({ nodes, onAdd, saving }: { nodes: FleetConfigNode[]; onAdd:
           {models === null && !error.startsWith("Name") && <p className="text-neutral-500">{unreachableHint}</p>}
         </div>
       )}
+      <PrepareComputer />
     </div>
   );
 }
@@ -321,11 +399,12 @@ function MachineCard({
         </button>
       </div>
       {status && !status.ready && (
-        <p className="text-[11px] text-amber-300">
-          {status.reachable
-            ? `Reachable, but ${node.model} is not installed there. Pick an installed model under Edit, or run ollama pull ${node.model} on it.`
-            : unreachableHint}
-        </p>
+        <div className="space-y-1">
+          <p className="text-[11px] text-amber-300">
+            {status.reachable ? `Reachable, but ${node.model} is not downloaded there yet. Download it, or pick an installed model under Edit.` : unreachableHint}
+          </p>
+          {status.reachable && <DownloadButton compact url={node.url} model={node.model} />}
+        </div>
       )}
       {open && (
         <div className="space-y-2 pt-1">
@@ -376,12 +455,12 @@ function MachineCard({
   );
 }
 
-type Tab = "machines" | "tools" | "routing" | "history";
+type Tab = "setup" | "machines" | "tools" | "sandbox" | "routing" | "history";
 
 /** Fleet configuration: machines, tools and routing. Everything applies when saved; nothing needs a restart. */
 export function ConfigPanel() {
   const [open, setOpen] = useState(false);
-  const [tab, setTab] = useState<Tab>("machines");
+  const [tab, setTab] = useState<Tab>("setup");
   const [draft, setDraft] = useState<FleetConfigData | null>(null);
   const [saved, setSaved] = useState<string>("");
   const [saving, setSaving] = useState(false);
@@ -390,6 +469,18 @@ export function ConfigPanel() {
   const [triageModels, setTriageModels] = useState<FetchedModel[] | null>(null);
 
   const snapshot = (data: FleetConfigData) => JSON.stringify({ nodes: data.nodes, triageModel: data.triageModel });
+
+  // Anything on the page can open the panel on a tab (the first-run banner, a check's button).
+  useEffect(() => {
+    function onOpen(event: Event) {
+      const wantedTab = (event as CustomEvent<{ tab?: Tab }>).detail?.tab;
+      setOpen(true);
+      if (wantedTab) setTab(wantedTab);
+      setDraft(null);
+    }
+    window.addEventListener("fleet:open-config", onOpen);
+    return () => window.removeEventListener("fleet:open-config", onOpen);
+  }, []);
 
   useEffect(() => {
     if (open && draft === null) {
@@ -448,6 +539,7 @@ export function ConfigPanel() {
       setSaved(snapshot(merged));
       setMessage({ text: data.message ?? "Saved.", error: false });
       setTimeout(loadStatus, 1500);
+      announceFleetChanged();
       return true;
     } catch {
       setMessage({ text: "Could not reach the backend.", error: true });
@@ -483,8 +575,10 @@ export function ConfigPanel() {
               <h2 className="text-sm font-medium text-neutral-300 pb-3">Fleet configuration</h2>
               <div className="flex text-xs">
                 {([
+                  ["setup", "Setup"],
                   ["machines", `Machines${draft ? ` (${draft.nodes.length})` : ""}`],
                   ["tools", "Tools"],
+                  ["sandbox", "Sandbox"],
                   ["routing", "Routing"],
                   ["history", "History"],
                 ] as const).map(([key, label]) => (
@@ -504,8 +598,18 @@ export function ConfigPanel() {
             </div>
 
             <div className="flex-1 overflow-y-auto px-6 py-4">
-              {draft === null ? (
+              {tab === "sandbox" ? (
+                <SandboxSettings />
+              ) : draft === null ? (
                 <p className="text-sm text-neutral-500">{message?.text ?? "Loading..."}</p>
+              ) : tab === "setup" ? (
+                <SetupSettings
+                  nodes={draft.nodes}
+                  onOpenTab={(next) => setTab(next as Tab)}
+                  onUseModel={(nodeName, model) =>
+                    save({ ...draft, nodes: draft.nodes.map((node) => (node.name === nodeName ? { ...node, model } : node)) })
+                  }
+                />
               ) : tab === "machines" ? (
                 <div className="space-y-3">
                   <p className="text-xs text-neutral-500">
@@ -576,6 +680,11 @@ export function ConfigPanel() {
                       </div>
                     )}
                     <p className="text-[11px] text-neutral-600 mt-2">A 1B to 3B model is plenty, for example llama3.2:3b or qwen2.5:1.5b.</p>
+                    {fallback && draft.triageModel.trim() && (
+                      <div className="mt-2">
+                        <DownloadButton compact url={fallback.url} model={draft.triageModel.trim()} label={`Download ${draft.triageModel.trim()} onto ${fallback.name}`} />
+                      </div>
+                    )}
                   </div>
                   <p className="text-xs text-neutral-500">
                     <strong className="text-neutral-400">Hub mode</strong> (top right) decides how freely the heavy machine is used,
@@ -601,7 +710,7 @@ export function ConfigPanel() {
               ) : (
                 <span className="text-xs text-neutral-600">Everything here applies as soon as it is saved. No restart.</span>
               )}
-              {dirty && (tab === "tools" || tab === "history") && <span className="ml-auto text-[11px] text-amber-300">Unsaved machine changes: see the Machines tab.</span>}
+              {dirty && !(tab === "machines" || tab === "routing") && <span className="ml-auto text-[11px] text-amber-300">Unsaved machine changes: see the Machines tab.</span>}
             </div>
           </div>
         </div>

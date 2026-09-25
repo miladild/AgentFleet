@@ -57,16 +57,23 @@ internal sealed class FleetToolRegistry : IAsyncDisposable
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger _logger;
     private readonly SemaphoreSlim _reloadGate = new(1, 1);
+    private readonly Func<string, bool> _available;
     private McpToolProvider _mcp = McpToolProvider.Empty;
     private string _connectedFingerprint = string.Empty;
 
+    /// <param name="available">
+    /// Whether a built-in tool can work right now (the sandbox tool needs a sandbox). A tool that cannot is
+    /// left out of the request whatever the config says. Missing means every built-in is available.
+    /// </param>
     public FleetToolRegistry(
         FleetConfigStore config,
         IEnumerable<string> builtInNames,
         SwappableNameSet readOnly,
-        ILoggerFactory loggerFactory)
+        ILoggerFactory loggerFactory,
+        Func<string, bool>? available = null)
     {
         _config = config;
+        _available = available ?? (_ => true);
         BuiltInNames = builtInNames.ToHashSet(StringComparer.Ordinal);
         // What is read-only among the built-ins is fixed; MCP tools are added to this on each reload.
         _builtInReadOnly = readOnly.ToHashSet(StringComparer.Ordinal);
@@ -139,7 +146,7 @@ internal sealed class FleetToolRegistry : IAsyncDisposable
         var names = new HashSet<string>(StringComparer.Ordinal);
         foreach (AITool tool in requested ?? [])
         {
-            if (BuiltInNames.Contains(tool.Name) && !config.IsToolEnabled(tool.Name))
+            if (BuiltInNames.Contains(tool.Name) && (!config.IsToolEnabled(tool.Name) || !_available(tool.Name)))
             {
                 continue;
             }

@@ -128,13 +128,17 @@ if [ -z "$model" ]; then
   fi
 
   if [ "$os" = Darwin ]; then
-    if [ "$ram_gb" -ge 48 ]; then model='qwen3-coder:30b'
+    # macOS lets the graphics side use about two thirds of the shared memory (same rule as the web UI).
+    shared_gb=$((ram_gb * 66 / 100))
+    if [ "$shared_gb" -ge 22 ]; then model='qwen3-coder:30b'
+    elif [ "$shared_gb" -ge 11 ]; then model='qwen2.5-coder:14b'
     elif [ "$ram_gb" -ge 16 ]; then model='qwen2.5-coder:7b'
     else model='qwen2.5-coder:3b'; fi
     info "Chose $model for $ram_gb GB unified memory; override with --model."
   else
-    if [ "$vram_gb" -ge 24 ]; then model='qwen3-coder:30b'
-    elif [ "$vram_gb" -ge 8 ] || [ "$ram_gb" -ge 16 ]; then model='qwen2.5-coder:7b'
+    if [ "$vram_gb" -ge 22 ]; then model='qwen3-coder:30b'
+    elif [ "$vram_gb" -ge 11 ]; then model='qwen2.5-coder:14b'
+    elif [ "$vram_gb" -ge 6 ] || [ "$ram_gb" -ge 16 ]; then model='qwen2.5-coder:7b'
     else model='qwen2.5-coder:3b'; fi
     info "Chose $model for $ram_gb GB RAM and $vram_gb GB NVIDIA memory; override with --model."
   fi

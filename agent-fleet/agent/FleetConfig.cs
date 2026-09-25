@@ -63,6 +63,10 @@ internal sealed record FleetMcpServerConfig(
 /// otherwise local if Docker is installed, otherwise off.
 /// </param>
 /// <param name="Sudo">Prefix the remote docker command with sudo (ssh mode, when the account is not in the docker group).</param>
+/// <param name="HostKey">
+/// The ssh machine's host key fingerprint ("SHA256:..."), remembered when the sandbox is tested and saved in
+/// the web UI. When set, a machine answering with a different key is refused. Missing means any key is accepted.
+/// </param>
 internal sealed record FleetSandboxConfig(
     string? Mode = null,
     string? Host = null,
@@ -70,7 +74,8 @@ internal sealed record FleetSandboxConfig(
     string? User = null,
     string? KeyPath = null,
     bool? Sudo = null,
-    int? TimeoutSeconds = null);
+    int? TimeoutSeconds = null,
+    string? HostKey = null);
 
 /// <summary>
 /// How long the durable record keeps chats. The record holds everything the assistant saw,
@@ -88,7 +93,7 @@ internal sealed record FleetHistoryConfig(int? DeleteAfterDays = null);
 /// hardcoded C#. Backed by a JSON file (see FleetConfigStore) so it can be edited by
 /// hand or from the web UI without a rebuild. A save through PUT /api/fleet-config
 /// applies at once (the router and the tool registry are rebuilt, the rest is read per
-/// request or per cleanup); a hand edit to the file, and the sandbox, apply at startup.
+/// request or per cleanup, and the sandbox is swapped); a hand edit to the file applies at startup.
 /// </summary>
 internal sealed record FleetConfig(
     string TriageModel,

@@ -31,6 +31,9 @@ requests too, which suits the night, when you are not using the machine.
 
 ## Set up a worker
 
+The web UI shows the command for each system with this computer's address already filled in: **Config**, **Machines**,
+**Add a machine**, then **How do I get another computer ready?**. The sections below explain what the commands do.
+
 ### Windows worker
 
 On the worker, in an elevated PowerShell (Run as administrator), from a clone of this repository or with the `scripts`
@@ -91,10 +94,15 @@ machine when it starts.)
 ### Or from the web UI
 
 **Config**, **Machines** tab, **Add a machine**: type the address (an IP or a name is enough), press **Connect**, click
-one of the models it lists, choose a role, and **Add and save**. If nothing answers, the panel says what to check. Every
-machine card has a status dot (green ready, amber reachable but the model is missing, red unreachable), and **Edit** opens
-its address, model and a **Check and list models** button. Changing a machine's role, model or address, removing one, or
-changing the fallback all apply when saved, with no restart.
+one of the models it lists, choose a role, and **Add and save**. A machine with no models yet (or without the one you
+want) gets one from there too: type the model name and press **Download onto it**; a progress bar follows the download,
+which carries on if you close the panel. If nothing answers, the panel says what to check. Every machine card has a
+status dot (green ready, amber reachable but the model is missing, red unreachable); an amber card has a **Download**
+button for its missing model, and **Edit** opens its address, model and a **Check and list models** button. Changing a
+machine's role, model or address, removing one, or changing the fallback all apply when saved, with no restart.
+
+With two or more machines, the **Routing** tab offers to download the small routing model onto the fallback machine, and
+the **Setup** tab lists anything still missing on any machine.
 
 ## Check it
 
