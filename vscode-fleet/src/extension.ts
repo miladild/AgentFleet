@@ -2,8 +2,10 @@ import * as vscode from "vscode";
 import { randomUUID } from "node:crypto";
 import {
   INSTRUCTIONS_PREFIX,
+  asksToRunPlan,
   continuedMessages,
   describeSession,
+  otherChatTurns,
   pickerMessageId,
   routePickerRequest,
   workspaceContext,
@@ -213,23 +215,20 @@ function pickPlan(plans: PlanSummaryWire[]): PlanSummaryWire | undefined {
 
 // "@fleet /status": the run report in the chat, with the buttons that fit the plan's state.
 async function showStatusInChat(stream: vscode.ChatResponseStream): Promise<void> {
-  let plans: PlanSummaryWire[];
+  let found: Awaited<ReturnType<typeof planReport>>;
   try {
-    const res = await fetch(plansUrl());
-    plans = (await res.json()) as PlanSummaryWire[];
+    found = await planReport();
   } catch (error) {
     stream.markdown(`Could not reach the fleet backend at ${backendBase()}: ${error}`);
     return;
   }
 
-  const plan = pickPlan(plans);
+  const { plan, report, others } = found;
   if (!plan) {
     stream.markdown("There are no plans yet. Start one with `@fleet /plan` and what you want done, for example `@fleet /plan add input validation to the signup form`.");
     return;
   }
 
-  const res = await fetch(`${plansUrl()}/${plan.id}/report`);
-  const report = res.ok ? (await res.text()).replace(new RegExp(PLAN_MARKER.source, "g"), "").trim() : `# ${plan.title}\n\nStatus: ${plan.status}.`;
   stream.markdown(report + "\n\n");
   if (plan.status === "running" || plan.status === "approved") {
     stream.button({ command: "agentFleet.stopPlan", title: "Stop it", arguments: [plan.id] });
@@ -241,7 +240,6 @@ async function showStatusInChat(stream: vscode.ChatResponseStream): Promise<void
   }
   stream.button({ command: "agentFleet.showPlan", title: "Open the report", arguments: [plan.id] });
 
-  const others = plans.filter((other) => other.id !== plan.id && ["running", "approved", "awaiting-approval", "blocked"].includes(other.status));
   if (others.length > 0) {
     stream.markdown(
       "\n\nAlso: " + others.map((other) => `${other.title} (${other.status.replace("-", " ")}, ${other.stepsDone} of ${other.stepsTotal} steps)`).join("; ") + ".",
@@ -264,6 +262,193 @@ async function showPlanStatus(planId: string): Promise<void> {
   }
 }
 
+// Tools for Copilot (and any other chat model in VS Code): hand a finished plan to the fleet, and ask how it is going.
+// A plan written with a strong model then runs overnight on the user's own machines, each step checked by the fleet.
+const RUN_PLAN_TOOL = "agentFleet_runPlan";
+const PLAN_STATUS_TOOL = "agentFleet_planStatus";
+const OWN_TOOLS = new Set([RUN_PLAN_TOOL, PLAN_STATUS_TOOL]);
+
+interface PlanToolStep {
+  title?: string;
+  detail?: string;
+  files?: string[];
+  verify?: string;
+  tier?: string;
+  parallelGroup?: string;
+}
+
+interface PlanToolInput {
+  title?: string;
+  goal?: string;
+  workingDirectory?: string;
+  steps?: PlanToolStep[];
+  assumptions?: string[];
+  risks?: string[];
+}
+
+interface PlanSubmitResult {
+  id?: string;
+  status?: string;
+  title?: string;
+  error?: string;
+  problems?: string[];
+  machines?: string;
+}
+
+function planPayload(input: PlanToolInput) {
+  // The fleet works on the hub's disk: the workspace folder is the right default only when VS Code runs there too.
+  const folder = vscode.workspace.workspaceFolders?.find((candidate) => candidate.uri.scheme === "file");
+  const workingDirectory = input.workingDirectory?.trim() || (backendIsOnThisMachine() && folder ? folder.uri.fsPath : undefined);
+  return {
+    title: input.title,
+    goal: input.goal,
+    workingDirectory,
+    steps: input.steps,
+    assumptions: input.assumptions,
+    risks: input.risks,
+    source: "GitHub Copilot in VS Code",
+  };
+}
+
+async function submitPlan(
+  payload: ReturnType<typeof planPayload>,
+  mode: { dryRun?: boolean; approve?: boolean },
+  signal?: AbortSignal,
+): Promise<{ ok: boolean; body: PlanSubmitResult }> {
+  const res = await fetch(plansUrl(), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...payload, ...mode }),
+    signal,
+  });
+  const body = (await res.json().catch(() => ({ error: `Fleet backend returned HTTP ${res.status}.` }))) as PlanSubmitResult;
+  return { ok: res.ok, body };
+}
+
+function inlineCode(text: string): string {
+  const fence = "`".repeat(Math.max(0, ...Array.from(text.matchAll(/`+/g), (match) => match[0].length)) + 1);
+  return `${fence} ${text.replace(/\s+/g, " ")} ${fence}`;
+}
+
+function planConfirmation(payload: ReturnType<typeof planPayload>, machines?: string): vscode.MarkdownString {
+  const lines: string[] = [];
+  if (payload.goal) lines.push(escapeMarkdown(payload.goal), "");
+  if (payload.workingDirectory) lines.push(`In ${inlineCode(payload.workingDirectory)}`, "");
+  (Array.isArray(payload.steps) ? payload.steps : []).forEach((step, index) => {
+    const where = [step.tier || "standard", step.parallelGroup ? `at the same time as the other "${step.parallelGroup}" steps` : ""].filter(Boolean).join(", ");
+    lines.push(`${index + 1}. ${escapeMarkdown(step.title ?? "Step")} (${where})${step.verify ? `, checked with ${inlineCode(step.verify)}` : ""}`);
+  });
+  if (machines) lines.push("", `Your machines by tier: ${escapeMarkdown(machines)}.`);
+  lines.push(
+    "",
+    "It starts now and runs in the background on your machines, each step checked with its command before the next begins. " +
+      "A failed step is retried, then given to the strongest machine; if it still fails the plan stops and says why. `@fleet /status` shows how it is going.",
+  );
+  return new vscode.MarkdownString(lines.join("\n"));
+}
+
+// Plans the user was shown and allowed to start. A plan the dialog never showed (the backend was down while VS Code
+// prepared the call, or the plan had problems) is at most saved to wait for approval, never started.
+const confirmedPlans = new Set<string>();
+
+class RunPlanTool implements vscode.LanguageModelTool<PlanToolInput> {
+  async prepareInvocation(
+    options: vscode.LanguageModelToolInvocationPrepareOptions<PlanToolInput>,
+  ): Promise<vscode.PreparedToolInvocation> {
+    const payload = planPayload(options.input);
+    let machines: string | undefined;
+    try {
+      const review = await submitPlan(payload, { dryRun: true });
+      if (!review.ok) return { invocationMessage: "Checking the plan with Agent Fleet" };
+      machines = review.body.machines;
+    } catch {
+      return { invocationMessage: "Sending the plan to Agent Fleet" };
+    }
+
+    confirmedPlans.add(canonicalJson(options.input));
+    return {
+      invocationMessage: `Starting "${payload.title ?? "the plan"}" on Agent Fleet`,
+      confirmationMessages: { title: `Run "${payload.title ?? "this plan"}" on your Agent Fleet?`, message: planConfirmation(payload, machines) },
+    };
+  }
+
+  async invoke(
+    options: vscode.LanguageModelToolInvocationOptions<PlanToolInput>,
+    token: vscode.CancellationToken,
+  ): Promise<vscode.LanguageModelToolResult> {
+    const approve = confirmedPlans.delete(canonicalJson(options.input));
+    const payload = planPayload(options.input);
+    const controller = new AbortController();
+    const cancellation = token.onCancellationRequested(() => controller.abort());
+    let text: string;
+    try {
+      const { ok, body } = await submitPlan(payload, { approve }, controller.signal);
+      if (!ok || !body.id) {
+        const problems = body.problems?.length ? body.problems : [body.error ?? "The fleet did not accept the plan."];
+        text =
+          "Agent Fleet did not accept the plan, because it would fail when it runs:\n" +
+          problems.map((problem) => `- ${problem}`).join("\n") +
+          (body.machines ? `\n\nThe user's machines by tier: ${body.machines}.` : "") +
+          `\n\nFix these and call ${RUN_PLAN_TOOL} again with the whole plan.`;
+      } else if (body.status === "approved" || body.status === "running") {
+        text =
+          `Agent Fleet accepted the plan "${body.title}" (id ${body.id}) and started it. It runs in the background on the user's ` +
+          "machines, each step on a machine of its tier and checked with its verify command before the next begins; a failed " +
+          "step is retried and then given to the strongest machine, and a step that still fails stops the plan as blocked " +
+          "without undoing anything. Tell the user in a sentence or two that it is running and that `@fleet /status` shows " +
+          "how it is going. Do not carry out the steps yourself.";
+      } else {
+        text =
+          `Agent Fleet saved the plan "${body.title}" (id ${body.id}); it waits for the user's approval. Tell the user to ` +
+          "approve it with `@fleet /status` (Approve and run) or in the fleet's Plans panel. Do not carry out the steps yourself.";
+      }
+    } catch (error) {
+      text =
+        `Could not reach the Agent Fleet backend at ${backendBase()}: ${error}. Tell the user to start Agent Fleet ` +
+        "(Start Agent Fleet) or to check the agentFleet.backendUrl setting.";
+    } finally {
+      cancellation.dispose();
+    }
+
+    return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(text)]);
+  }
+}
+
+// The run report of the plan that matters now (or of a given plan), as text.
+async function planReport(planId?: string): Promise<{ plan?: PlanSummaryWire; report: string; others: PlanSummaryWire[] }> {
+  const res = await fetch(plansUrl());
+  const plans = (await res.json()) as PlanSummaryWire[];
+  const plan = planId ? plans.find((candidate) => candidate.id === planId.trim()) : pickPlan(plans);
+  if (!plan) return { report: "There are no plans yet.", others: [] };
+  const reportRes = await fetch(`${plansUrl()}/${plan.id}/report`);
+  const report = reportRes.ok
+    ? (await reportRes.text()).replace(new RegExp(PLAN_MARKER.source, "g"), "").trim()
+    : `# ${plan.title}\n\nStatus: ${plan.status}.`;
+  const others = plans.filter((other) => other.id !== plan.id && ["running", "approved", "awaiting-approval", "blocked"].includes(other.status));
+  return { plan, report, others };
+}
+
+class PlanStatusTool implements vscode.LanguageModelTool<{ planId?: string }> {
+  prepareInvocation(): vscode.PreparedToolInvocation {
+    return { invocationMessage: "Asking Agent Fleet how the plan is going" };
+  }
+
+  async invoke(options: vscode.LanguageModelToolInvocationOptions<{ planId?: string }>): Promise<vscode.LanguageModelToolResult> {
+    let text: string;
+    try {
+      const { report, others } = await planReport(options.input.planId);
+      text =
+        report +
+        (others.length > 0
+          ? "\n\nOther plans: " + others.map((other) => `${other.title} (${other.status.replace("-", " ")}, ${other.stepsDone} of ${other.stepsTotal} steps, id ${other.id})`).join("; ")
+          : "");
+    } catch (error) {
+      text = `Could not reach the Agent Fleet backend at ${backendBase()}: ${error}.`;
+    }
+    return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(text)]);
+  }
+}
+
 interface FleetMessage {
   id: string;
   role: "user" | "assistant" | "system" | "tool";
@@ -275,8 +460,23 @@ function randomId(): string {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
-// chatContext.history holds every prior turn in this chat session, not just
-// ones directed at @fleet - VS Code's chat API doesn't filter that for you.
+function responseText(turn: vscode.ChatResponseTurn): string {
+  return turn.response
+    .map((part) => {
+      const value = (part as { value?: unknown }).value;
+      if (typeof value === "string") {
+        return value;
+      }
+      if (value && typeof (value as { value?: unknown }).value === "string") {
+        return (value as { value: string }).value;
+      }
+      return "";
+    })
+    .join("");
+}
+
+// chatContext.history holds only @fleet's own earlier turns: VS Code leaves out the turns with other participants
+// (checked in VS Code 1.138: only the default agent sees the whole chat). readWholeChat fetches the rest.
 function buildHistory(history: readonly (vscode.ChatRequestTurn | vscode.ChatResponseTurn)[]): FleetMessage[] {
   const messages: FleetMessage[] = [];
 
@@ -284,18 +484,7 @@ function buildHistory(history: readonly (vscode.ChatRequestTurn | vscode.ChatRes
     if (turn instanceof vscode.ChatRequestTurn) {
       messages.push({ id: randomId(), role: "user", content: turn.prompt });
     } else if (turn instanceof vscode.ChatResponseTurn) {
-      const text = turn.response
-        .map((part) => {
-          const value = (part as { value?: unknown }).value;
-          if (typeof value === "string") {
-            return value;
-          }
-          if (value && typeof (value as { value?: unknown }).value === "string") {
-            return (value as { value: string }).value;
-          }
-          return "";
-        })
-        .join("");
+      const text = responseText(turn);
       if (text) {
         messages.push({ id: randomId(), role: "assistant", content: text });
       }
@@ -303,6 +492,41 @@ function buildHistory(history: readonly (vscode.ChatRequestTurn | vscode.ChatRes
   }
 
   return messages;
+}
+
+// The whole chat as text, including the turns with GitHub Copilot that VS Code does not give @fleet, so "@fleet run the
+// plan above" can see the plan. There is no API for it: the chat view's own "Copy All" command (the chat's context menu)
+// copies the chat that last had focus, which is the one this request came from. The clipboard is put back afterwards;
+// only text can be put back, so an image on the clipboard is lost. agentFleet.readWholeChat turns this off.
+async function readWholeChat(): Promise<string | null> {
+  if (!vscode.workspace.getConfiguration("agentFleet").get<boolean>("readWholeChat", true)) return null;
+  let saved: string;
+  try {
+    saved = await vscode.env.clipboard.readText();
+  } catch {
+    return null;
+  }
+
+  const probe = `agent-fleet-${randomUUID()}`;
+  try {
+    await vscode.env.clipboard.writeText(probe);
+    await vscode.commands.executeCommand("workbench.action.chat.copyAll");
+    // The command does not wait for its clipboard write, so give it a moment to land.
+    for (let wait = 0; wait < 20; wait++) {
+      const text = await vscode.env.clipboard.readText();
+      if (text && text !== probe) return text;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return null;
+  } catch {
+    return null; // an older or newer VS Code without the command: @fleet sees only its own turns
+  } finally {
+    try {
+      await vscode.env.clipboard.writeText(saved);
+    } catch {
+      // nothing more to do
+    }
+  }
 }
 
 // Reads the workspace's custom instructions file, if any, so @fleet's model gets the same
@@ -897,7 +1121,8 @@ const handler: vscode.ChatRequestHandler = async (request, chatContext, stream, 
     contextId = randomUUID();
     continued = false;
   }
-  const chatResult: vscode.ChatResult = { metadata: { fleetContextId: contextId, fleetContinued: continued } };
+  const metadata: Record<string, unknown> = { fleetContextId: contextId, fleetContinued: continued };
+  const chatResult: vscode.ChatResult = { metadata };
   const idPrefix = contextId.slice(0, 8);
 
   if (request.command === "status") {
@@ -905,19 +1130,41 @@ const handler: vscode.ChatRequestHandler = async (request, chatContext, stream, 
     return chatResult;
   }
 
+  // The turns of this chat that @fleet was not part of, such as a plan worked out with GitHub Copilot. Read before
+  // anything is written to this response, so the copied chat ends with this request.
+  const fleetTurns = chatContext.history.map((turn) => (turn instanceof vscode.ChatRequestTurn ? turn.prompt : responseText(turn)));
+  const wholeChat = await readWholeChat();
+  const otherTurns = wholeChat ? otherChatTurns(wholeChat, request.prompt, fleetTurns) : null;
+
   // "/plan" turns plan mode on for this chat only (the web UI's switch stays as it is), and it stays on for the
-  // rest of the chat, so "change step 2" or "how is it going?" after the plan are still about the plan.
+  // rest of the chat, so "change step 2" or "how is it going?" after the plan are still about the plan. Asking
+  // @fleet to run a plan from earlier in the chat ("run the plan above") is the same as "/plan".
+  const handover = otherTurns !== null && (request.command === "plan" || asksToRunPlan(request.prompt));
   const planMode =
-    request.command === "plan" || chatContext.history.some((turn) => turn instanceof vscode.ChatRequestTurn && turn.command === "plan");
-  if (request.command === "plan" && !request.prompt.trim()) {
+    request.command === "plan" ||
+    handover ||
+    chatContext.history.some(
+      (turn) =>
+        (turn instanceof vscode.ChatRequestTurn && turn.command === "plan") ||
+        (turn instanceof vscode.ChatResponseTurn && (turn.result?.metadata as { fleetPlanMode?: unknown } | undefined)?.fleetPlanMode === true),
+    );
+  metadata.fleetPlanMode = planMode;
+  if (request.command === "plan" && !request.prompt.trim() && !otherTurns) {
     stream.markdown(
       "Say what to plan, for example `@fleet /plan add input validation to the signup form in C:\\projects\\shop`. " +
         "The strongest machine explores the code and proposes a plan; approve it and the fleet carries it out in the background, " +
-        "each step on a machine that suits it and checked before the next starts. `@fleet /status` shows how it is going.",
+        "each step on a machine that suits it and checked before the next starts. `@fleet /status` shows how it is going. " +
+        "If you worked out a plan with Copilot earlier in this chat, `@fleet /plan` alone hands that plan to the fleet.",
     );
     return chatResult;
   }
-  if (request.command === "plan") {
+  if (otherTurns) {
+    stream.progress(
+      handover
+        ? "Handing the plan from this chat to the fleet: the strongest machine checks it against the code and turns it into steps for your machines. Nothing is changed until you approve."
+        : "Read the rest of this chat too (the turns @fleet was not part of).",
+    );
+  } else if (request.command === "plan") {
     stream.progress("Planning: the strongest machine is reading the code. Nothing is changed until you approve the plan.");
   }
 
@@ -929,7 +1176,8 @@ const handler: vscode.ChatRequestHandler = async (request, chatContext, stream, 
   // and stops the run rather than trying to execute it itself, waiting for a
   // follow-up request with the result - confirmed directly against the running
   // backend before relying on it here.
-  const availableClientTools = vscode.lm.tools;
+  // This extension's own tools are for Copilot, to hand a plan to the fleet: the fleet has propose_plan itself.
+  const availableClientTools = vscode.lm.tools.filter((tool) => !OWN_TOOLS.has(tool.name));
   const duplicateTools = duplicateFleetMcpToolNames(availableClientTools, await loadFleetMcpTools());
   const clientTools = availableClientTools.filter((tool) => !duplicateTools.has(tool.name));
   const clientToolNames = new Set(clientTools.map((tool) => tool.name));
@@ -939,10 +1187,16 @@ const handler: vscode.ChatRequestHandler = async (request, chatContext, stream, 
     ? { id: `${idPrefix}-instructions`, role: "system", content: `${INSTRUCTIONS_PREFIX} (${instructions.path}):\n\n${instructions.text}` }
     : null;
   const editorContext = await buildEditorContext(request);
+  const prompt = request.prompt.trim() || "Carry out the plan worked out earlier in this chat.";
+  const otherTurnsFence = otherTurns ? toolOutputFence(otherTurns) : "";
+  const otherTurnsBlock = otherTurns
+    ? "Earlier in this VS Code chat, in turns @fleet was not part of (for example with GitHub Copilot). The user may be " +
+      `referring to it, for example to a plan worked out there:\n${otherTurnsFence}text\n${otherTurns}\n${otherTurnsFence}`
+    : null;
   const turn: WireMessage = {
     id: continued ? `${idPrefix}-${randomUUID().slice(0, 8)}` : randomId(),
     role: "user",
-    content: editorContext ? `${request.prompt}\n\n---\n${editorContext}` : request.prompt,
+    content: [prompt, otherTurnsBlock, editorContext].filter((part): part is string => !!part).join("\n\n---\n"),
   };
 
   // A continued chat replays the fleet's saved transcript, so turns made in the web UI are part of it and
@@ -1127,7 +1381,11 @@ const handler: vscode.ChatRequestHandler = async (request, chatContext, stream, 
 export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(vscode.lm.registerLanguageModelChatProvider("agent-fleet", new FleetLanguageModelProvider()));
   const participant = vscode.chat.createChatParticipant("agent-fleet.fleet", handler);
-  context.subscriptions.push(participant);
+  context.subscriptions.push(
+    participant,
+    vscode.lm.registerTool(RUN_PLAN_TOOL, new RunPlanTool()),
+    vscode.lm.registerTool(PLAN_STATUS_TOOL, new PlanStatusTool()),
+  );
 
   workspaceState = context.workspaceState;
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 90);

@@ -2,7 +2,7 @@
   "name": "agent-fleet-chat",
   "displayName": "Agent Fleet",
   "description": "Chat with your local Agent Fleet from inside VS Code - runs entirely on your own machines, never uses a Copilot token.",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -49,6 +49,72 @@
         "category": "Agent Fleet"
       }
     ],
+    "languageModelTools": [
+      {
+        "name": "agentFleet_runPlan",
+        "displayName": "Run a plan on Agent Fleet",
+        "toolReferenceName": "fleetPlan",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(server-process)",
+        "tags": ["agent-fleet"],
+        "userDescription": "Hand a finished plan to your local Agent Fleet. It runs in the background across your machines, each step checked with a real command before the next.",
+        "modelDescription": "Hands a finished implementation plan to the user's local Agent Fleet, which carries it out unattended in the background (for example overnight) on the user's own machines. Each step goes to a machine of the step's tier; the fleet then runs the step's verify command itself, and a step only counts as done when that command exits 0. A failed step is retried with the error, then given to the strongest machine; a step that still fails stops the plan. Use this when the user asks to hand the plan to the fleet, run it on their machines, or run it overnight. The user confirms before it starts. Write every step so a smaller model can do it alone, without this conversation: name the files, the functions, the behaviour and the edge cases, and put a piece of code and its test in the same step. Give every step a verify command, a real shell command run in workingDirectory (for example npm test, dotnet build, node --test test/slug.test.js, python -m pytest), never a sentence, a server or a watcher, and never relying on a file that a later step creates. If the fleet refuses the plan it says why: fix that and call this tool again with the whole plan.",
+        "inputSchema": {
+          "type": "object",
+          "required": ["title", "steps"],
+          "properties": {
+            "title": { "type": "string", "description": "Short title of the plan" },
+            "goal": { "type": "string", "description": "One or two sentences: what the plan achieves" },
+            "workingDirectory": {
+              "type": "string",
+              "description": "Full path of the project folder on the computer that runs the Agent Fleet backend. Leave it out to use the folder open in VS Code."
+            },
+            "steps": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 12,
+              "items": {
+                "type": "object",
+                "required": ["title", "detail", "verify", "tier"],
+                "properties": {
+                  "title": { "type": "string", "description": "Short imperative title, for example: Add the slugify helper" },
+                  "detail": { "type": "string", "description": "What to do, specific enough that a smaller model can carry it out alone" },
+                  "files": { "type": "array", "items": { "type": "string" }, "description": "Files this step creates or changes, relative to workingDirectory" },
+                  "verify": { "type": "string", "description": "A shell command that exits 0 only if this step worked" },
+                  "tier": {
+                    "type": "string",
+                    "enum": ["heavy", "standard", "light"],
+                    "description": "heavy for hard or risky work (the strongest machine), standard for ordinary work, light for small edits"
+                  },
+                  "parallelGroup": {
+                    "type": "string",
+                    "description": "Optional: the same label on consecutive independent steps with separate files, so they run at the same time on different machines. Give them different tiers."
+                  }
+                }
+              }
+            },
+            "assumptions": { "type": "array", "items": { "type": "string" } },
+            "risks": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      },
+      {
+        "name": "agentFleet_planStatus",
+        "displayName": "Agent Fleet plan status",
+        "toolReferenceName": "fleetStatus",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(pulse)",
+        "tags": ["agent-fleet"],
+        "userDescription": "How the fleet's current plan is going: steps, attempts, which machine did what.",
+        "modelDescription": "Returns the run report of the user's Agent Fleet plan: its status, each step's attempts and checks, which machine did what, and the files changed. Without planId it reports the plan that matters now (running, then waiting, then blocked, then the latest). Use it when the user asks how the fleet or a plan handed to it is going.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "planId": { "type": "string", "description": "A plan id, to ask about a plan other than the current one" }
+          }
+        }
+      }
+    ],
     "languageModelChatProviders": [
       {
         "vendor": "agent-fleet",
@@ -68,6 +134,11 @@
           "items": { "type": "string" },
           "default": [".github/copilot-instructions.md"],
           "description": "Custom instruction files @fleet sends with every turn, relative to the workspace folder. The first one that exists is used. The default is Copilot's own location."
+        },
+        "agentFleet.readWholeChat": {
+          "type": "boolean",
+          "default": true,
+          "description": "Let @fleet read the turns of the chat it was not part of, such as a plan worked out with Copilot, so \"@fleet run the plan above\" works. VS Code gives @fleet only its own turns, so this uses the chat's Copy All command and then puts your clipboard text back (an image on the clipboard is lost)."
         },
         "agentFleet.backendUrl": {
           "type": "string",

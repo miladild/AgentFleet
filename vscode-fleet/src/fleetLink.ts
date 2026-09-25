@@ -140,3 +140,42 @@ export function workspaceContext(backendUrl: string, folders: ReadonlyArray<{ sc
     },
   ];
 }
+
+const MAX_OTHER_TURNS_CHARS = 16000;
+const MIN_OTHER_TURNS_CHARS = 200;
+
+/**
+ * What the rest of the chat said, from the chat view's "Copy All" text. VS Code gives a chat participant only its own
+ * earlier turns, so a plan worked out with GitHub Copilot earlier in the same chat would never reach the fleet. The
+ * current request (and anything after it) is cut off and the fleet's own earlier prompts and answers are taken out.
+ * Null when nothing of substance is left. A long chat keeps its end, where the plan usually is.
+ */
+export function otherChatTurns(transcript: string, prompt: string, fleetTurns: readonly string[]): string | null {
+  let text = transcript.replace(/\r\n/g, "\n");
+  // The current request is the last one, typed as "@fleet ..." (a bare "@fleet /plan" has no prompt of its own).
+  const current = prompt.replace(/\r\n/g, "\n").trim() || "@fleet";
+  const at = text.lastIndexOf(current);
+  if (at >= 0) {
+    const lineStart = text.lastIndexOf("\n", at);
+    text = lineStart >= 0 ? text.slice(0, lineStart) : "";
+  }
+
+  for (const turn of fleetTurns) {
+    const known = turn.replace(/\r\n/g, "\n").trim();
+    if (known.length >= 20) text = text.split(known).join("");
+  }
+
+  text = text.replace(/\n{3,}/g, "\n\n").trim();
+  if (text.replace(/\s+/g, "").length < MIN_OTHER_TURNS_CHARS) return null;
+  return text.length <= MAX_OTHER_TURNS_CHARS ? text : `(the start of the chat is cut)\n${text.slice(-MAX_OTHER_TURNS_CHARS)}`;
+}
+
+/** Whether a message hands a plan over to be carried out: "run the plan above", "dispatch this plan overnight". */
+export function asksToRunPlan(prompt: string): boolean {
+  return (
+    /\bplan\b/i.test(prompt) &&
+    /\b(run|execute|implement|carry|dispatch|start|kick|build|split|spread|distribute|assign|hand|send|go ahead|work on|overnight|tonight|do (it|this|that|the))\b/i.test(
+      prompt,
+    )
+  );
+}

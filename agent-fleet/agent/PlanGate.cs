@@ -174,6 +174,10 @@ internal static partial class PlanGate
         only read-only tools are available to you until the user approves a plan. Do not write files, run commands
         or edit code in this phase, not even as an example: describe the work in the plan instead.
 
+        If the conversation already holds a plan the user worked out (for example with GitHub Copilot earlier in the
+        chat), do not design a new one: keep its steps, their order and its decisions, read the files it names to
+        confirm them, and turn it into propose_plan steps with real checks and tiers.
+
         Work in this order:
         1. Explore. Use read_file, list_directory, find_files and search_files (and web_search or documentation
            tools when you need facts) to understand the code this task touches. Use validate_diagram to check Mermaid

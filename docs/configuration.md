@@ -177,6 +177,7 @@ The backend answers these on port 8000. They are what the web UI and the VS Code
 | `GET`, `POST /api/fleet-mode`, `/api/plan-mode` | The two switches |
 | `GET /api/plans`, `/api/plans/{id}`, `/api/plans/{id}/markdown`, `/api/plans/{id}/report` | Plans, a readable copy, and the run report |
 | `POST /api/plans/{id}/approve`, `/reject`, `/stop` | Act on a plan |
+| `POST /api/plans` | Save a plan written elsewhere (the VS Code extension's Copilot tool uses it): `title`, `goal`, `workingDirectory` and `steps` as in `propose_plan`; `dryRun` only reviews it, `approve` starts it. A plan that would fail is refused with its `problems` |
 | `GET`, `PUT`, `DELETE /api/sessions[/{id}]` | Saved conversations (the visible chats of the durable record) |
 | `GET /api/contexts[/{id}[/events|deliveries|artifacts|export]]`, `POST .../decisions|compact` | The durable record. See [context.md](context.md) |
 | `GET /api/contexts/storage?olderThanDays=`, `POST /api/contexts/cleanup` | The record's size and a preview of a cleanup; deleting chats not used for a number of days |

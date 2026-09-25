@@ -1,7 +1,7 @@
 // Run with: npm test (compiles first). Covers the parts of joining a fleet conversation that do not need VS Code.
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { continuedMessages, describeSession, pickerMessageId, routePickerRequest, workspaceContext, INSTRUCTIONS_PREFIX } = require("../out/fleetLink.js");
+const { asksToRunPlan, continuedMessages, describeSession, otherChatTurns, pickerMessageId, routePickerRequest, workspaceContext, INSTRUCTIONS_PREFIX } = require("../out/fleetLink.js");
 
 const GUID = "1b10662d-23b2-4733-b2af-206e5f1d1ca1";
 const OTHER = "bc57f560-e59a-4d0e-907f-eb3579c80673";
@@ -110,4 +110,50 @@ test("workspace context rejects control characters and keeps only complete paths
   assert.equal(context.length, 1);
   assert.equal(context[0].value, `${first}; ${last}`);
   assert.ok(context[0].value.length <= 2000);
+});
+
+test("the rest of the chat is what @fleet has not seen, without this request or the fleet's own turns", () => {
+  const plan = "1. Add src/slug.js with slugify(text).\n2. Add test/slug.test.js and run node --test.\n" + "Details. ".repeat(40);
+  const transcript = [
+    "milad: plan a slug helper for the text-tools project",
+    `GitHub Copilot: Here is the plan:\n${plan}`,
+    "milad: @fleet what is the time on the hub please",
+    "Agent Fleet: It is 21:00 on the hub, and all machines are ready for work.",
+    "milad: @fleet run the plan above overnight",
+    "Agent Fleet: ",
+  ].join("\n\n");
+
+  const other = otherChatTurns(transcript, "run the plan above overnight", [
+    "what is the time on the hub please",
+    "It is 21:00 on the hub, and all machines are ready for work.",
+  ]);
+
+  assert.ok(other);
+  assert.ok(other.includes("plan a slug helper"));
+  assert.ok(other.includes("Add test/slug.test.js"));
+  assert.ok(!other.includes("run the plan above overnight"), "the current request is cut off");
+  assert.ok(!other.includes("all machines are ready"), "the fleet's own answer is left out");
+});
+
+test("a chat with only @fleet in it has nothing else to add", () => {
+  const transcript = "milad: @fleet list the files in the project folder\n\nAgent Fleet: There are three files: a.js, b.js and c.js, all small.\n\nmilad: @fleet and now?";
+  assert.equal(otherChatTurns(transcript, "and now?", ["list the files in the project folder", "There are three files: a.js, b.js and c.js, all small."]), null);
+  assert.equal(otherChatTurns("milad: @fleet /plan", "", []), null);
+});
+
+test("a bare /plan is cut at its @fleet, and a long chat keeps its end", () => {
+  const transcript = `milad: plan it\n\nGitHub Copilot: ${"x".repeat(20000)} THE END\n\nmilad: @fleet /plan\n\nAgent Fleet: `;
+  const other = otherChatTurns(transcript, "", []);
+  assert.ok(other.endsWith("THE END"));
+  assert.ok(other.startsWith("(the start of the chat is cut)"));
+  assert.ok(other.length < 16100);
+});
+
+test("asking to run a plan hands it over, asking about a plan does not", () => {
+  for (const prompt of ["run the plan above", "dispatch this plan to the machines", "carry out the plan overnight", "do the plan", "go ahead with the plan"]) {
+    assert.equal(asksToRunPlan(prompt), true, prompt);
+  }
+  for (const prompt of ["what do you think of this plan?", "is the plan any good", "run the tests"]) {
+    assert.equal(asksToRunPlan(prompt), false, prompt);
+  }
 });

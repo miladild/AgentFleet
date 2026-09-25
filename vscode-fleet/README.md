@@ -84,6 +84,23 @@ which machine did what, the files changed) with **Stop it**, or **Approve and
 resume** when it is blocked. The web UI's **Plans** button shows the same.
 Typing `approve` in the chat also approves the pending plan.
 
+## A plan made with Copilot
+
+Work the plan out with Copilot, then hand it over in one of two ways.
+
+- In agent mode, ask Copilot to send it to the fleet ("run this plan on my
+  machines overnight"), or mention `#fleetPlan`. Copilot calls the extension's
+  **Run a plan on Agent Fleet** tool with a check command and a tier for every
+  step. The fleet reviews the plan and tells Copilot what to fix; VS Code then
+  shows you the steps and asks before it starts. `#fleetStatus` lets Copilot
+  report how it is going.
+- In the same chat, send `@fleet /plan` or `@fleet run the plan above`. VS Code
+  gives `@fleet` only its own turns, so the extension reads the rest of the chat
+  with the chat's **Copy All** command and puts your clipboard text back (an
+  image on the clipboard is lost). The strongest machine turns the plan into a
+  fleet plan for you to approve. The `agentFleet.readWholeChat` setting turns
+  this off.
+
 ## Which tools does `@fleet` see?
 
 `@fleet` gets tools from three places, configured in different files. Only the
