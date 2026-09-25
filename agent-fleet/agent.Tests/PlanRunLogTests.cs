@@ -120,7 +120,7 @@ public sealed class PlanRunLogTests : PlanTestBase
         PlanRunEvent[] failures = events.Where(e => e.Kind == RunEventKind.CheckFailed).ToArray();
         Assert.Equal(2, failures.Length);
         Assert.All(failures, e => Assert.Contains("expected 3 got 2", e.Detail));
-        Assert.Equal(["standard", "standard", "heavy"], events.Where(e => e.Kind == RunEventKind.AttemptStarted).Select(e => e.Tier));
+        Assert.Equal(["standard", "heavy", "heavy"], events.Where(e => e.Kind == RunEventKind.AttemptStarted).Select(e => e.Tier));
     }
 
     [Fact]

@@ -663,7 +663,8 @@ var planRunner = new PlanRunner(
     healthMonitor: healthMonitor,
     recorder: new PlanContextRecorder(contextStore, planStore, loggerFactory.CreateLogger("AgentFleet.PlanContext")),
     journal: contextJournal,
-    sleepGuard: new SystemSleepGuard(loggerFactory.CreateLogger("AgentFleet.Power")));
+    sleepGuard: new SystemSleepGuard(loggerFactory.CreateLogger("AgentFleet.Power")),
+    cheapAttempts: int.TryParse(builder.Configuration["FLEET_PLAN_CHEAP_ATTEMPTS"], out int cheapAttempts) ? cheapAttempts : 1);
 planStore.Approved += planRunner.Enqueue;
 app.Lifetime.ApplicationStarted.Register(() => planRunner.Start(app.Lifetime.ApplicationStopping));
 
