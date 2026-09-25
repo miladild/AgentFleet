@@ -12,6 +12,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- 0.0.6 or later: 0.0.5 (pulled in by the AG-UI hosting preview) hid every server tool call in a run once the chat had
+         used a web UI tool, so the chat drew no card for them. -->
+    <PackageReference Include="AGUI.Abstractions" Version="0.0.6" />
+    <PackageReference Include="AGUI.Server" Version="0.0.6" />
     <PackageReference Include="HtmlAgilityPack" Version="1.11.72" />
     <PackageReference Include="Microsoft.Agents.AI.Hosting.AGUI.AspNetCore" Version="1.19.0-preview.260822.1" />
     <PackageReference Include="Microsoft.Agents.AI.OpenAI" Version="1.19.0" />

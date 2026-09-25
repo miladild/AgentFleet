@@ -1195,6 +1195,31 @@ internal sealed class FleetContextStore : AgentSessionStore
         return events;
     }
 
+    /// <summary>Thumbs up and down given in the chats, counted per machine that answered, across every conversation.</summary>
+    public IReadOnlyList<FeedbackCount> FeedbackByNode()
+    {
+        using SqliteConnection connection = OpenConnection();
+        using SqliteCommand command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT COALESCE(node, ''), json_extract(payload_json, '$.rating'), COUNT(*)
+            FROM events WHERE kind=@kind
+            GROUP BY 1, 2;
+            """;
+        command.Parameters.AddWithValue("@kind", FleetContextEventKind.Feedback);
+        using SqliteDataReader reader = command.ExecuteReader();
+        var counts = new Dictionary<string, (int Up, int Down)>(StringComparer.Ordinal);
+        while (reader.Read())
+        {
+            string node = reader.GetString(0);
+            string? rating = reader.IsDBNull(1) ? null : reader.GetString(1);
+            int count = reader.GetInt32(2);
+            (int up, int down) = counts.GetValueOrDefault(node);
+            counts[node] = rating == "up" ? (up + count, down) : rating == "down" ? (up, down + count) : (up, down);
+        }
+
+        return counts.Select(pair => new FeedbackCount(pair.Key, pair.Value.Up, pair.Value.Down)).OrderBy(count => count.Node, StringComparer.Ordinal).ToList();
+    }
+
     /// <summary>Every event of a context, oldest first. For compaction and export, not for prompts.</summary>
     public IReadOnlyList<FleetContextEvent> AllEvents(string contextId, long afterEventId = 0, int limit = 20000)
     {
@@ -1488,3 +1513,5 @@ internal sealed class FleetContextStore : AgentSessionStore
         }
     }
 }
+
+internal sealed record FeedbackCount(string Node, int Up, int Down);

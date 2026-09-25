@@ -249,7 +249,15 @@ Dictionary<string, string> toolDescriptions = new(StringComparer.Ordinal)
         "instead of guessing a URL or answering from memory alone - use web_fetch on the most relevant result " +
         "afterward to actually read it.",
     ["web_fetch"] = "Fetches a URL and returns its readable text content (HTML tags, scripts, and styles stripped) " +
-        "- not raw markup. Use this to actually read a page found via web_search, or any URL you already have."
+        "- not raw markup. Use this to actually read a page found via web_search, or any URL you already have.",
+    ["project_overview"] = "Shows a project folder at a glance: its folders and files a few levels deep (dependency and build folders skipped), " +
+        "how to build and test it from its project files (package.json scripts, .csproj, pyproject.toml, Cargo.toml, go.mod, Makefile...), and the start of its README. " +
+        "Use it first on an unfamiliar project instead of listing folders one by one.",
+    ["move_file"] = "Moves or renames a file or folder on the hub. Creates the destination's parent folders. Refuses to replace an existing file unless overwrite is true.",
+    ["delete_file"] = "Deletes one file, or an empty folder, on the hub. It will not delete a folder that has contents.",
+    ["http_request"] = "Sends an HTTP request (GET, POST, PUT, PATCH, DELETE) to any URL, including a local server such as http://localhost:5000, and returns the status, " +
+        "main headers and the raw body (JSON pretty-printed). Use it to try an API; use web_fetch to read a web page. " +
+        "headers is optional, one \"Name: value\" per line; body is sent as JSON when it looks like JSON."
 };
 
 AITool sandboxTool = AIFunctionFactory.Create(
@@ -330,6 +338,28 @@ AITool webFetchTool = AIFunctionFactory.Create(
     name: "web_fetch",
     description: toolDescriptions["web_fetch"]);
 
+AITool projectOverviewTool = AIFunctionFactory.Create(
+    ([Description("The project's folder")] string path, [Description("How many folder levels to show, 1 to 6 (default 3)")] int? depth = null) =>
+        ProjectTools.ProjectOverview(path, depth),
+    name: "project_overview",
+    description: toolDescriptions["project_overview"]);
+
+AITool moveFileTool = AIFunctionFactory.Create(
+    (string source, string destination, bool? overwrite = null) => ProjectTools.MoveFile(source, destination, overwrite),
+    name: "move_file",
+    description: toolDescriptions["move_file"]);
+
+AITool deleteFileTool = AIFunctionFactory.Create(
+    (string path) => ProjectTools.DeleteFile(path),
+    name: "delete_file",
+    description: toolDescriptions["delete_file"]);
+
+AITool httpRequestTool = AIFunctionFactory.Create(
+    (string url, string? method = null, [Description("Optional, one \"Name: value\" per line")] string? headers = null, string? body = null, CancellationToken cancellationToken = default) =>
+        ProjectTools.HttpRequestAsync(url, method, headers, body, httpClientFactory, webLogger, cancellationToken),
+    name: "http_request",
+    description: toolDescriptions["http_request"]);
+
 // Plan tools. They are offered only in plan mode (PlanGate hides them otherwise), and the
 // rules that matter - approval before any step completes, steps in order, a step only done
 // when its own verify command passes - live in PlanTools, not in the prompt.
@@ -385,6 +415,10 @@ AITool validateDiagramTool = AIFunctionFactory.Create(
     ("run_command", runCommandTool),
     ("web_search", webSearchTool),
     ("web_fetch", webFetchTool),
+    ("project_overview", projectOverviewTool),
+    ("move_file", moveFileTool),
+    ("delete_file", deleteFileTool),
+    ("http_request", httpRequestTool),
     ("propose_plan", proposePlanTool),
     ("get_plan", getPlanTool),
     ("validate_diagram", validateDiagramTool),
@@ -405,24 +439,51 @@ var toolRegistry = new FleetToolRegistry(
 await toolRegistry.ReloadAsync(app.Lifetime.ApplicationStopping);
 app.Lifetime.ApplicationStopping.Register(() => toolRegistry.DisposeAsync().AsTask().GetAwaiter().GetResult());
 
-// Everything the Config panel can list: each tool's description and where it comes from.
+// A tool's parameters as the Config panel's "Try it" form needs them, read from the schema the model sees.
+static IReadOnlyList<object> ParametersOf(AITool? tool)
+{
+    if (tool is not AIFunction function || function.JsonSchema.ValueKind != System.Text.Json.JsonValueKind.Object ||
+        !function.JsonSchema.TryGetProperty("properties", out System.Text.Json.JsonElement properties) ||
+        properties.ValueKind != System.Text.Json.JsonValueKind.Object)
+    {
+        return [];
+    }
+
+    HashSet<string> required = function.JsonSchema.TryGetProperty("required", out System.Text.Json.JsonElement names) && names.ValueKind == System.Text.Json.JsonValueKind.Array
+        ? names.EnumerateArray().Select(name => name.GetString() ?? string.Empty).ToHashSet(StringComparer.Ordinal)
+        : [];
+    return properties.EnumerateObject().Select(property => (object)new
+    {
+        name = property.Name,
+        type = property.Value.TryGetProperty("type", out System.Text.Json.JsonElement type)
+            ? (type.ValueKind == System.Text.Json.JsonValueKind.Array ? type.EnumerateArray().Select(t => t.GetString()).FirstOrDefault(t => t != "null") : type.GetString()) ?? "string"
+            : "string",
+        description = property.Value.TryGetProperty("description", out System.Text.Json.JsonElement description) ? description.GetString() : null,
+        required = required.Contains(property.Name)
+    }).ToList();
+}
+
+// Everything the Config panel can list: each tool's description, parameters and where it comes from.
 // Built from the code's own tool list, not just the persisted file, so a tool added after
 // the config file was first written still shows up (IsToolEnabled defaults it to on).
 object ToolsPayload(FleetConfig config) =>
     toolDescriptions
         .Where(pair => pair.Key != "run_sandboxed_code" || sandbox.Executor is not null)
-        .Select(pair => (Name: pair.Key, Description: pair.Value, Source: "built-in"))
+        .Select(pair => (Name: pair.Key, Description: pair.Value, Source: "built-in", Tool: builtInTools.FirstOrDefault(tool => tool.Name == pair.Key).Tool))
         .Concat(toolRegistry.Mcp.Tools.Select(entry => (
             Name: entry.Tool.Name,
             Description: entry.Tool.Description ?? string.Empty,
-            Source: entry.Server)))
+            Source: entry.Server,
+            Tool: (AITool?)entry.Tool)))
+        .Where(entry => !config.CustomToolMap.ContainsKey(entry.Name))
         .ToDictionary(
             entry => entry.Name,
             entry => new
             {
                 enabled = config.IsToolEnabled(entry.Name),
                 description = entry.Description,
-                source = entry.Source
+                source = entry.Source,
+                parameters = ParametersOf(entry.Tool)
             },
             StringComparer.Ordinal);
 
@@ -530,14 +591,16 @@ var fleetAgent = new ChatClientAgent(
         - run_sandboxed_code: executes code in an isolated, throwaway Docker container
           with no access to the user's real files - use it for quick, self-contained
           snippets, not for anything touching a real project.
-        - read_file, write_file, edit_file, list_directory, find_files, search_files:
-          direct access to the hub machine's own local filesystem (the same machine
-          you're running on) - use these to look at and change files in the user's
-          actual projects. To change an existing file, read it and then use edit_file
-          with the exact old text; only use write_file for new files or a complete
-          rewrite. To locate something, use search_files (contents) or find_files
-          (names) instead of guessing paths. There is no path restriction, so confirm
-          the exact path with the user if it's ambiguous rather than guessing.
+        - read_file, write_file, edit_file, list_directory, find_files, search_files,
+          project_overview, move_file, delete_file: direct access to the hub machine's
+          own local filesystem (the same machine you're running on) - use these to look
+          at and change files in the user's actual projects. On an unfamiliar project,
+          start with project_overview: it shows the layout and how to build and test it.
+          To change an existing file, read it and then use edit_file with the exact old
+          text; only use write_file for new files or a complete rewrite. To locate
+          something, use search_files (contents) or find_files (names) instead of
+          guessing paths. There is no path restriction, so confirm the exact path with
+          the user if it's ambiguous rather than guessing, and ask before deleting.
         - run_git_command: runs git in a given repository directory on the hub - status,
           diff, add, commit, branch, log, etc.
         - run_command: runs any shell command directly on the hub, not limited to a
@@ -555,6 +618,12 @@ var fleetAgent = new ChatClientAgent(
         - web_fetch: fetches a URL and returns its readable text (not raw HTML). Use
           it on a web_search result, or any URL the user gives you, to actually read
           the page rather than guessing at its contents from the title/snippet alone.
+        - http_request: calls an HTTP API (any method, headers, body) and returns the
+          status and raw body - use it to try an API or a local server the user is
+          building, not to read web pages.
+        - Tools the user added (MCP servers and their own command tools, such as
+          run_tests) may also be offered: their descriptions say what they do. Prefer
+          one of those over run_command when it fits the job exactly.
         - validate_diagram: checks Mermaid source with the real parser and returns
           safe formatting fixes plus whether the result is valid or unchecked.
         - record_decision, search_context: the fleet keeps a durable record of this
@@ -677,7 +746,9 @@ app.MapGet("/api/fleet-config", () =>
         // What actually happened at the last startup, which can differ from the saved
         // config (edited since, or a server that failed to start).
         mcpStatus = toolRegistry.Mcp.Statuses,
-        history = new { deleteAfterDays = config.History?.DeleteAfterDays ?? 0 }
+        history = new { deleteAfterDays = config.History?.DeleteAfterDays ?? 0 },
+        customTools = config.CustomToolMap,
+        customStatus = toolRegistry.CustomStatuses
     });
 });
 
@@ -793,8 +864,17 @@ app.MapPut("/api/fleet-config", async (FleetConfigUpdateRequest request, Cancell
             McpServers = request.McpServers is not null
                 ? request.McpServers.ToDictionary(kv => kv.Key.Trim(), kv => kv.Value, StringComparer.Ordinal)
                 : current.McpServers,
-            History = request.History ?? current.History
+            History = request.History ?? current.History,
+            // Like MCP servers, an empty object is meaningful: it removes every command tool.
+            CustomTools = request.CustomTools is not null
+                ? request.CustomTools.ToDictionary(kv => kv.Key.Trim(), kv => kv.Value, StringComparer.Ordinal)
+                : current.CustomTools
         };
+
+        if (updated.CustomToolMap.Keys.FirstOrDefault(name => toolDescriptions.ContainsKey(name) || name == PlanGate.BlockedToolName) is { } clash)
+        {
+            return Results.BadRequest(new { error = $"{clash} is the name of a built-in tool. Give your tool another name." });
+        }
 
         FleetConfig saved = fleetConfigStore.Save(updated);
 
@@ -828,6 +908,8 @@ app.MapPut("/api/fleet-config", async (FleetConfigUpdateRequest request, Cancell
             mcpServers = saved.McpServerMap,
             mcpStatus = toolRegistry.Mcp.Statuses,
             history = new { deleteAfterDays = saved.History?.DeleteAfterDays ?? 0 },
+            customTools = saved.CustomToolMap,
+            customStatus = toolRegistry.CustomStatuses,
             restartRequired,
             message = machinesChanged
                 ? "Saved and applied. The machines are live now; their status updates within a few seconds."
@@ -1056,6 +1138,32 @@ app.MapPost("/api/contexts/{id}/decisions", (string id, ContextDecisionRequest r
     return Results.Json(new { eventId });
 });
 
+// A thumbs up or down on an answer in the chat, kept with the machine that gave it, so the Machines tab can show
+// which models answer well.
+app.MapPost("/api/contexts/{id}/feedback", (string id, ContextFeedbackRequest request) =>
+{
+    if (contextStore.GetContext(id) is null)
+    {
+        return Results.NotFound();
+    }
+
+    if (request.Rating is not ("up" or "down"))
+    {
+        return Results.BadRequest(new { error = "rating must be up or down." });
+    }
+
+    string? node = contextStore.EventsOfKinds(id, [FleetContextEventKind.Route], 1).LastOrDefault()?.Node;
+    long eventId = contextStore.AppendEvent(
+        id,
+        FleetContextEventKind.Feedback,
+        new { rating = request.Rating, messageId = ContextText.Clip(request.MessageId ?? string.Empty, 100), excerpt = ContextText.Clip(request.Excerpt ?? string.Empty, 300) },
+        actor: "user", agent: "web-ui", node: node);
+    app.Logger.LogInformation("Feedback {Rating} on an answer from {Node}.", request.Rating, node ?? "an unknown machine");
+    return Results.Json(new { eventId, node });
+});
+
+app.MapGet("/api/feedback", () => Results.Json(contextStore.FeedbackByNode()));
+
 app.MapPost("/api/contexts/{id}/events/{eventId:long}/pin", (string id, long eventId, bool? pinned) =>
     contextStore.PinEvent(id, eventId, pinned ?? true) ? Results.Ok() : Results.NotFound());
 
@@ -1090,6 +1198,118 @@ app.MapGet("/api/contexts/{id}/export", (string id) =>
         artifacts = contextStore.ListArtifacts(id, 500),
         summary = contextStore.LatestSummary(id)
     });
+});
+
+// ---- Tools: trying one out, command tools, and importing MCP servers from other apps -----------------------
+Dictionary<string, AITool> builtInByName = builtInTools.ToDictionary(tool => tool.Name, tool => tool.Tool, StringComparer.Ordinal);
+
+// These need a conversation or a plan around them, so they are not run on their own.
+HashSet<string> notRunnableAlone = new(StringComparer.Ordinal) { "propose_plan", "get_plan", "record_decision", "search_context" };
+
+static AIFunctionArguments ToArguments(System.Text.Json.JsonElement? arguments) =>
+    new(arguments is { ValueKind: System.Text.Json.JsonValueKind.Object } values
+        ? values.EnumerateObject().ToDictionary(property => property.Name, property => (object?)property.Value.Clone(), StringComparer.Ordinal)
+        : new Dictionary<string, object?>(StringComparer.Ordinal));
+
+// Which helper programs are on this computer, so the tool catalog can say what a server needs before it is added.
+app.MapGet("/api/tools/prerequisites", () => Results.Json(new
+{
+    npx = QuickProcess.FindOnPath("npx") is not null,
+    uvx = QuickProcess.FindOnPath("uvx") is not null,
+    docker = QuickProcess.FindOnPath("docker") is not null,
+    git = QuickProcess.FindOnPath("git") is not null,
+    os = HardwareProbe.OsFamily()
+}));
+
+// Runs one tool with the given arguments, as the model would, and returns what it would have seen.
+app.MapPost("/api/tools/run", async (ToolRunRequest request, CancellationToken cancellationToken) =>
+{
+    string name = request.Name?.Trim() ?? string.Empty;
+    if (notRunnableAlone.Contains(name))
+    {
+        return Results.BadRequest(new { error = $"{name} only works inside a conversation or a plan." });
+    }
+
+    AIFunction? function = builtInByName.TryGetValue(name, out AITool? builtIn)
+        ? builtIn as AIFunction
+        : toolRegistry.FindAdded(name);
+    if (function is null || (name == "run_sandboxed_code" && sandbox.Executor is null))
+    {
+        return Results.NotFound(new { error = $"There is no tool called {name} right now." });
+    }
+
+    var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+    app.Logger.LogInformation("Tool {Tool} run from the web UI.", name);
+    try
+    {
+        object? result = await function.InvokeAsync(ToArguments(request.Arguments), cancellationToken);
+        string text = result switch
+        {
+            null => string.Empty,
+            string plain => plain,
+            System.Text.Json.JsonElement element => element.ValueKind == System.Text.Json.JsonValueKind.String ? element.GetString() ?? string.Empty : element.ToString(),
+            _ => result.ToString() ?? string.Empty
+        };
+        return Results.Json(new { ok = !text.StartsWith("Error", StringComparison.Ordinal), output = text, milliseconds = stopwatch.ElapsedMilliseconds });
+    }
+    catch (Exception exception) when (exception is not OperationCanceledException)
+    {
+        return Results.Json(new { ok = false, output = $"Error: {exception.Message}", milliseconds = stopwatch.ElapsedMilliseconds });
+    }
+});
+
+// Runs a command tool that is not saved yet, to try it from the form.
+app.MapPost("/api/tools/custom/test", async (CustomToolTestRequest request, CancellationToken cancellationToken) =>
+{
+    string name = string.IsNullOrWhiteSpace(request.Name) ? "my_tool" : request.Name.Trim();
+    try
+    {
+        CustomToolRunner.Validate(name, request.Tool);
+    }
+    catch (InvalidOperationException exception)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+
+    Dictionary<string, string?> values = (request.Arguments ?? new Dictionary<string, string?>())
+        .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+    (string program, IReadOnlyList<string> arguments, _, _) = CustomToolRunner.Prepare(request.Tool, values);
+    CustomToolResult result = await CustomToolRunner.RunAsync(request.Tool, values, cancellationToken);
+    return Results.Json(new { ok = result.Ok, output = result.Output, milliseconds = result.Milliseconds, ran = string.Join(' ', new[] { program }.Concat(arguments)) });
+});
+
+app.MapGet("/api/tools/import", () => Results.Json(McpImport.Scan(fleetConfigStore.Current)));
+
+app.MapPost("/api/tools/import", async (McpImportRequest request, CancellationToken cancellationToken) =>
+{
+    if (request.Names is not { Count: > 0 })
+    {
+        return Results.BadRequest(new { error = "Pick at least one server." });
+    }
+
+    try
+    {
+        FleetConfig current = fleetConfigStore.Current;
+        IReadOnlyDictionary<string, FleetMcpServerConfig> taken = McpImport.Take(request.Path ?? string.Empty, request.Names, current);
+        Dictionary<string, FleetMcpServerConfig> servers = current.McpServerMap.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+        foreach ((string name, FleetMcpServerConfig server) in taken)
+        {
+            servers[name] = server;
+        }
+
+        fleetConfigStore.Save(current with { McpServers = servers });
+        IReadOnlyList<McpServerStatus> statuses = await toolRegistry.ReloadAsync(cancellationToken);
+        app.Logger.LogInformation("Imported MCP server(s) {Names} from {Path}.", string.Join(", ", taken.Keys), request.Path);
+        return Results.Json(new
+        {
+            imported = taken.Keys,
+            statuses = statuses.Where(status => taken.ContainsKey(status.Name))
+        });
+    }
+    catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or IOException or System.Text.Json.JsonException)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
 });
 
 // ---- Setup: the web UI's checklist, and the fixes it can make itself --------------------------------------
@@ -1321,7 +1541,15 @@ internal sealed record ContextDecisionRequest(string Text, string? Reason = null
 
 internal sealed record ContextCleanupRequest(int OlderThanDays);
 
+internal sealed record ContextFeedbackRequest(string? Rating, string? MessageId, string? Excerpt);
+
 internal sealed record ModelPullRequest(string Url, string? Model);
+
+internal sealed record ToolRunRequest(string? Name, System.Text.Json.JsonElement? Arguments);
+
+internal sealed record CustomToolTestRequest(string? Name, FleetCustomToolConfig Tool, IReadOnlyDictionary<string, string?>? Arguments);
+
+internal sealed record McpImportRequest(string? Path, IReadOnlyList<string>? Names);
 
 internal sealed record SandboxKeyRequest(string? Path);
 
@@ -1341,7 +1569,8 @@ internal sealed record FleetConfigUpdateRequest(
     IReadOnlyList<FleetConfigNodeUpdate>? Nodes,
     IReadOnlyDictionary<string, bool>? Tools,
     IReadOnlyDictionary<string, FleetMcpServerConfig>? McpServers = null,
-    FleetHistoryConfig? History = null);
+    FleetHistoryConfig? History = null,
+    IReadOnlyDictionary<string, FleetCustomToolConfig>? CustomTools = null);
 
 internal sealed record OllamaModelsResponse(IReadOnlyList<OllamaModelSummary>? Models);
 

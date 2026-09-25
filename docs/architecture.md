@@ -41,7 +41,10 @@ flowchart TB
 
 ## A request, end to end
 
-1. The client posts an AG-UI run to `POST /` with the conversation and any client-declared tools (VS Code sends its own).
+1. The client posts an AG-UI run to `POST /` with the conversation, any client-declared tools (VS Code sends its own; the
+   web UI declares `open_fleet_settings` and `set_project_folder`, which run in the browser) and AG-UI `context` (the web
+   UI's project folder). The AG-UI endpoint drops `context`, so `FleetRequestContext` reads it (bounded: 8 entries of 2000
+   characters) and the router hands it to the model with the durable-record block.
 2. `ChatClientAgent` calls its chat client, which is `FleetRoutingChatClient` wrapped in a function-invocation layer. That
    layer runs tool calls by name, with a per-request cap of 200 iterations and detailed errors (small models need to see
    the real error to correct themselves).
@@ -158,7 +161,10 @@ documentation. The web UI has no automated tests; changes to it were checked in 
 ## Building blocks worth knowing
 
 - **AG-UI** ([ag-ui-protocol](https://github.com/ag-ui-protocol/ag-ui)) is the streaming protocol between the UI and the agent.
-  CopilotKit is the React side.
+  CopilotKit is the React side. `AGUI.Server` is pinned to 0.0.6 or later: 0.0.5, which the hosting preview pulls in, hid
+  every server tool call of a run once the chat had used a browser-side tool. The web UI uses CopilotKit's `useRenderTool`
+  (tool cards, with `useDefaultRenderTool` for MCP and command tools), `useFrontendTool`, `useAgentContext`,
+  `useConfigureSuggestions` and the assistant message's thumbs callbacks.
 - **Microsoft Agent Framework** provides `ChatClientAgent` and the AG-UI hosting package.
 - **`Microsoft.Extensions.AI`** provides `IChatClient`, `FunctionInvokingChatClient` and `AIFunctionFactory`. Most of the
   routing and guarding logic is `DelegatingChatClient` layers around it.

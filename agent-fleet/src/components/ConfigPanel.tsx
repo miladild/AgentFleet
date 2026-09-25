@@ -6,6 +6,7 @@ import { HistorySettings } from "./HistorySettings";
 import { SandboxSettings } from "./SandboxSettings";
 import { SetupSettings } from "./SetupSettings";
 import { ToolsSettings, type McpStatus, type ToolConfig } from "./ToolsSettings";
+import type { CommandToolConfig, CommandToolStatus } from "./CommandTools";
 import { CopyCommand, DownloadButton, announceFleetChanged, type HubInfo } from "./setupApi";
 
 type FleetConfigNode = {
@@ -25,9 +26,12 @@ type FleetConfigData = {
   mcpServers: Record<string, McpServerConfig>;
   mcpStatus: McpStatus[];
   history?: { deleteAfterDays: number };
+  customTools?: Record<string, CommandToolConfig>;
+  customStatus?: CommandToolStatus[];
 };
 
 type NodeStatus = { name: string; ready: boolean; reachable: boolean };
+type FeedbackCount = { node: string; up: number; down: number };
 type FetchedModel = { name: string; sizeBytes: number };
 
 // One dropdown covers both fields the backend stores: vision nodes have no tier.
@@ -317,6 +321,7 @@ function MachineCard({
   node,
   index,
   status,
+  feedback,
   canRemove,
   onChange,
   onRemove,
@@ -325,6 +330,7 @@ function MachineCard({
   node: FleetConfigNode;
   index: number;
   status?: NodeStatus;
+  feedback?: FeedbackCount;
   canRemove: boolean;
   onChange: (node: FleetConfigNode) => void;
   onRemove: () => void;
@@ -378,6 +384,11 @@ function MachineCard({
         <span className="text-xs font-mono text-neutral-400 truncate" title={node.model}>
           {node.model || "(no model)"}
         </span>
+        {feedback && feedback.up + feedback.down > 0 && (
+          <span className="text-[11px] text-neutral-500 whitespace-nowrap" title="Thumbs up and down on this machine's answers in the chat">
+            👍 {feedback.up} · 👎 {feedback.down}
+          </span>
+        )}
         <label
           className={`ml-auto flex items-center gap-1 text-[11px] text-neutral-400 ${node.vision ? "opacity-40" : ""}`}
           title="Answers when routing fails, finishes tool rounds, and stands in when another machine is down. Routing runs on this machine."
@@ -466,6 +477,7 @@ export function ConfigPanel() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
   const [statuses, setStatuses] = useState<NodeStatus[]>([]);
+  const [feedback, setFeedback] = useState<FeedbackCount[]>([]);
   const [triageModels, setTriageModels] = useState<FetchedModel[] | null>(null);
 
   const snapshot = (data: FleetConfigData) => JSON.stringify({ nodes: data.nodes, triageModel: data.triageModel });
@@ -508,6 +520,14 @@ export function ConfigPanel() {
     return () => clearInterval(timer);
   }, [open, loadStatus]);
 
+  useEffect(() => {
+    if (!open) return;
+    fetch("/api/feedback", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : []))
+      .then(setFeedback)
+      .catch(() => {});
+  }, [open]);
+
   async function save(next: FleetConfigData): Promise<boolean> {
     setSaving(true);
     setMessage(null);
@@ -520,6 +540,8 @@ export function ConfigPanel() {
           nodes: next.nodes,
           tools: Object.fromEntries(Object.entries(next.tools).map(([name, tool]) => [name, tool.enabled])),
           mcpServers: next.mcpServers,
+          // Left out when unknown, so the backend keeps what it has.
+          customTools: next.customTools,
         }),
       });
       const data = await res.json();
@@ -534,6 +556,8 @@ export function ConfigPanel() {
         mcpServers: data.mcpServers,
         mcpStatus: data.mcpStatus,
         history: data.history,
+        customTools: data.customTools,
+        customStatus: data.customStatus,
       };
       setDraft(merged);
       setSaved(snapshot(merged));
@@ -622,6 +646,7 @@ export function ConfigPanel() {
                       node={node}
                       index={i}
                       status={statuses.find((s) => s.name === node.name)}
+                      feedback={feedback.find((f) => f.node === node.name)}
                       canRemove={draft.nodes.length > 1 && !node.fallback}
                       onChange={(next) => setNode(i, next)}
                       onRemove={() => setDraft({ ...draft, nodes: draft.nodes.filter((_, j) => j !== i) })}
@@ -635,8 +660,12 @@ export function ConfigPanel() {
                   servers={draft.mcpServers ?? {}}
                   statuses={draft.mcpStatus ?? []}
                   tools={draft.tools}
+                  customTools={draft.customTools ?? {}}
+                  customStatus={draft.customStatus ?? []}
                   saving={saving}
                   onSave={(mcpServers, tools) => save({ ...draft, mcpServers, tools })}
+                  onSaveCustom={(customTools) => save({ ...draft, customTools })}
+                  onReload={() => setDraft(null)}
                 />
               ) : tab === "history" ? (
                 <HistorySettings

@@ -106,6 +106,14 @@ Try these in order:
 
 Give the full path to the project. The assistant works on the hub machine's own files.
 
+Easier: type the project's folder once under **Project folder** on the main page (or tell the assistant "work on
+C:\path\to\your\project" and it sets it). Every message then carries it, so "run the tests" or "where is login handled?"
+work without a path, and the chat offers suggestions for that project. The folder is remembered in your browser.
+
+Under each answer, the thumbs up and down are kept with the machine that answered; **Config > Machines** shows the
+count on each machine, which helps when deciding which model to keep. When you ask how to set something up, the
+assistant can open the right settings tab for you.
+
 ## 4. Try plan mode
 
 Switch **Plan mode** on (top right) and ask for a change:

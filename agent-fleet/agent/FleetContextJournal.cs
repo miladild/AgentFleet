@@ -127,6 +127,12 @@ internal sealed class FleetContextJournal
         {
             ContextAssemblyPreview preview = ContextAssembler.Assemble(
                 Store, new ContextAssemblyRequest(identity.ContextId, identity.TaskId, MaxCharacters: MaxInjectedCharacters, IncludeTranscript: identity.Joined));
+            string? client = ClientContextItem.Describe(identity.ClientContext);
+            if (client is not null)
+            {
+                preview = preview with { Text = string.IsNullOrWhiteSpace(preview.Text) ? client : $"{preview.Text}\n\n{client}" };
+            }
+
             if (string.IsNullOrWhiteSpace(preview.Text))
             {
                 return null;

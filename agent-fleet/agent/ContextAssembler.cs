@@ -76,17 +76,29 @@ internal static class ContextText
     {
         switch (node)
         {
+            // Only a node that was actually replaced is put back: assigning a node to the slot it already sits in
+            // throws ("the node already has a parent"), which made every message with an array (tool calls, image
+            // parts) impossible to save.
             case System.Text.Json.Nodes.JsonObject obj:
                 foreach (KeyValuePair<string, System.Text.Json.Nodes.JsonNode?> pair in obj.ToList())
                 {
-                    obj[pair.Key] = Shorten(pair.Value, limit);
+                    System.Text.Json.Nodes.JsonNode? shortened = Shorten(pair.Value, limit);
+                    if (!ReferenceEquals(shortened, pair.Value))
+                    {
+                        obj[pair.Key] = shortened;
+                    }
                 }
 
                 return obj;
             case System.Text.Json.Nodes.JsonArray array:
                 for (int i = 0; i < array.Count; i++)
                 {
-                    array[i] = Shorten(array[i], limit);
+                    System.Text.Json.Nodes.JsonNode? item = array[i];
+                    System.Text.Json.Nodes.JsonNode? shortened = Shorten(item, limit);
+                    if (!ReferenceEquals(shortened, item))
+                    {
+                        array[i] = shortened;
+                    }
                 }
 
                 return array;

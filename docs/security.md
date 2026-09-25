@@ -76,6 +76,12 @@ Practical limits:
 - Be careful with MCP servers you did not write. They run with the same lack of approval, and some expose dangerous
   tools (the reference `server-everything` has one that returns all environment variables).
 - The sandbox container can reach the network, including other machines on yours.
+- Your own command tools run with the backend's account, like `run_command`, but narrower: the program is fixed and what
+  the model fills in is passed as separate arguments without a shell, so it cannot chain another command. A tool is still
+  as powerful as its program: `git {args}` lets the model run any git command.
+- **From your other apps** reads the MCP settings of VS Code, Claude Desktop, Claude Code, Cursor and Windsurf for the
+  backend's account. Only those files, and only their MCP servers; secret values are never sent to the browser, but an
+  imported entry with a secret written into it is copied into `fleet.config.json` as it is.
 - `web_search` and `web_fetch` send queries to DuckDuckGo and fetch pages you or the model choose. That is the one place
   data leaves your network. Switch them off in the Config panel for a fully offline fleet.
 

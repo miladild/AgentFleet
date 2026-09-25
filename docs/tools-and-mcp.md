@@ -16,14 +16,24 @@ This page lists what it has, how to switch tools off, and how to add more.
 | `run_command` | Runs any shell command on the hub: builds, tests, package installs, any tool you have installed. |
 | `run_git_command` | Runs git in a repository folder. |
 | `run_sandboxed_code` | Runs a snippet of Python, JavaScript or bash in a throwaway Docker container. Off when no Docker is found. |
+| `project_overview` | A project at a glance: its folders a few levels deep (dependencies and build output skipped), how to build and test it from its project files (package.json scripts, `.csproj`, `pyproject.toml`, `Cargo.toml`, `go.mod`, Makefile...), and the start of its README. |
+| `move_file` | Moves or renames a file or folder. Will not replace an existing file unless told to. |
+| `delete_file` | Deletes one file or an empty folder. It refuses a folder with contents. |
 | `web_search` | Searches the web (DuckDuckGo, no key needed). |
 | `web_fetch` | Fetches a page and returns its readable text. |
+| `http_request` | Calls an HTTP API with any method, headers and body, and returns the status and the raw body (JSON pretty-printed). For trying a local server you are building or any REST API. |
 | `propose_plan`, `get_plan` | Plan mode only. See [planning.md](planning.md). |
 
 All file and command tools work on **the hub machine's own disk**, as the account the backend runs as. Give full paths.
 
 Small local models do better with small precise tools than big blunt ones, which is why there are separate search, read
 and edit tools instead of one "do anything with files" tool.
+
+### Trying a tool yourself
+
+Every tool in **Config > Tools** has a **Try** link: fill in its values and press **Run**, and you see exactly what the
+model would get back. It really runs, on the hub. Handy for checking an MCP server or one of your own tools before
+leaving it to the model.
 
 ### Switching tools off
 
@@ -83,18 +93,69 @@ at the next start):
 the account may run `sudo docker` without a password instead of being in the `docker` group, and `hostKey` (without it,
 any host key is accepted). `timeoutSeconds` (1 to 120, default 20) is the time limit per run in every mode.
 
+## Your own tools, from a command
+
+The quickest way to give the fleet a tool for your own work: **Config > Tools > Your own tools > New tool from a
+command**. Write the command you would type, with `{name}` where the model fills something in:
+
+| Field | Example |
+|---|---|
+| Name | `run_tests` |
+| What it does (the model reads this) | Runs the .NET tests of a project and reports which failed. |
+| Command | `dotnet test {project} --nologo` |
+| Run it in (optional) | `C:\projects\shop`, or `{folder}` to let the model choose |
+
+Each `{name}` becomes a value the model passes; describe it and say whether it is required. An optional value that the
+model leaves out drops its whole argument, so `--filter={filter}` disappears rather than becoming `--filter=`. **Start
+from** has templates for .NET tests, an npm script, pytest and `dotnet format`. **Try it** runs it with values you type
+before you save, and **Add and save** makes it available to the next message, in the web UI, plan runs and `@fleet`.
+
+- **No shell.** The command runs as a program with separate arguments, never through `cmd` or `sh`, so whatever the
+  model fills in is always exactly one argument and cannot start a second command. The program itself is fixed; only its
+  arguments can be filled in. On Windows, a `.cmd` or `.bat` program (such as `npm`) is run by `cmd.exe`, so for those a
+  value may not contain `" % ! & | < > ^`. For pipes or several commands, write a script file and point the tool at it.
+- **Read-only.** Tick **it only reads** for a tool that changes nothing, such as one that lists or checks. It is then
+  allowed while a plan waits for approval.
+- **Limits.** Two minutes by default (up to ten), and the output is cut to its start and its end (where test summaries
+  are) if it is long.
+
+In `fleet.config.json`:
+
+```json
+"customTools": {
+  "run_tests": {
+    "description": "Runs the .NET tests of a project and reports which failed.",
+    "command": "dotnet test {project} --nologo",
+    "parameters": [{ "name": "project", "description": "Path to the test project or solution", "required": true }],
+    "workingDirectory": null,
+    "timeoutSeconds": 300,
+    "readOnly": false,
+    "enabled": true
+  }
+}
+```
+
 ## MCP servers: add tools without writing code
 
 [MCP](https://modelcontextprotocol.io) (Model Context Protocol) is a standard way for a program to offer tools to an AI.
 There are servers for documentation search, GitHub, databases, browsers and much more. The fleet can connect to them.
 
-In the web UI, open **Config** and scroll to **MCP servers**. There are three ways to add one:
+In the web UI, open **Config > Tools** and scroll to **MCP servers**. There are four ways to add one:
 
-1. **Pick from a list.** A short catalog of servers that work well for coding (Microsoft Learn, Context7, a Playwright
-   browser, sequential thinking, GitHub). **Set up** fills in the form; anything to prepare (a token) is explained there.
-2. **Custom server.** A name, then either a command to run on the hub (`npx -y ...`, `uvx ...`, a path to a program) or a
+1. **Pick from a list.** A catalog of servers that work well for coding, by category: documentation (Microsoft Learn,
+   Context7, DeepWiki, Hugging Face), browsers (Playwright, Chrome DevTools), code and files (GitHub, git for one
+   repository, files in one folder), thinking and memory (sequential thinking, memory, time) and Azure. Each card says
+   what it needs, and warns when that is missing on the hub (Node.js for `npx` servers, [uv](https://docs.astral.sh/uv/)
+   for `uvx` ones). **Set up** fills in the form; a value it needs from you, such as the folder or repository, gets a field
+   of its own, and anything to prepare (a token) is explained there.
+2. **From your other apps.** The servers you already set up in VS Code, Claude Desktop, Claude Code, Cursor or Windsurf on
+   this computer. Tick the ones the fleet should have and press **Add the ticked ones**. The list never shows secret
+   values; an entry with a secret written into it is flagged, because it would be copied into `fleet.config.json` as it
+   is. An entry that uses VS Code's `${input:...}` is flagged too: the fleet cannot ask for a value, so edit it to use
+   `${env:NAME}`.
+3. **Custom server.** A name, then either a command to run on the hub (`npx -y ...`, `uvx ...`, a path to a program) or a
    web address, plus environment variables or headers if it needs a key.
-3. **Paste mcp.json.** Paste the JSON from a server's README, from VS Code's `mcp.json`, or from a Claude or Cursor
+4. **Paste mcp.json.** Paste the JSON from a server's README, from VS Code's `mcp.json`, or from a Claude or Cursor
    config. Both `"servers"` and `"mcpServers"` work, and names are tidied up.
 
 Press **Test** first: the backend starts the server once and shows the tools it offers, or, if it will not start, what it
@@ -136,21 +197,22 @@ start, or as soon as anything is saved from the Config panel.
 
 ## Tools in VS Code
 
-`@fleet` gets its tools from three places. Only the third is VS Code's own configuration.
+`@fleet` gets its tools from four places. Only the last is VS Code's own configuration.
 
-| | Built-in tools | Fleet MCP servers | VS Code tools |
-|---|---|---|---|
-| Defined in | the backend | `mcpServers` in `fleet.config.json` | `.vscode/mcp.json`, your user `mcp.json`, other extensions |
-| Runs | on the hub, in the backend | on the hub, started by the backend | through VS Code |
-| In the web UI | yes | yes | no |
-| In `@fleet` | yes | yes | yes |
+| | Built-in tools | Your own tools | Fleet MCP servers | VS Code tools |
+|---|---|---|---|---|
+| Defined in | the backend | `customTools` in `fleet.config.json` | `mcpServers` in `fleet.config.json` | `.vscode/mcp.json`, your user `mcp.json`, other extensions |
+| Runs | on the hub, in the backend | on the hub, started by the backend | on the hub, started by the backend | through VS Code |
+| In the web UI | yes | yes | yes | no |
+| In `@fleet` | yes | yes | yes | yes |
 
 `.vscode/mcp.json` configures VS Code, not the fleet: the backend never reads it. Configure a given server in one place
 only. Otherwise `@fleet` sees it twice under different names.
 
 ## Adding a tool in code
 
-For something that has to live inside the backend:
+Most tools do not need code: a command tool or an MCP server covers them. For something that has to live inside the
+backend:
 
 1. Write a static method that returns a string (see `HubFileSystemTools.cs`).
 2. Add its description to the `toolDescriptions` dictionary in `Program.cs`. That string is what the model reads and what

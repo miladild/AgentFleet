@@ -6,7 +6,7 @@ import "@copilotkit/react-core/v2/styles.css";
 
 export const metadata: Metadata = {
   title: "Agent Fleet",
-  description: "Local coding-agent fleet, routed across three machines.",
+  description: "A coding assistant that runs on your own machines, each message routed to the one that fits.",
 };
 
 export default function RootLayout({

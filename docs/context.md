@@ -27,6 +27,7 @@ fleet's own, it survives a change of machine, a change of front end, and a resta
 | handoff | A structured note from one step to the next |
 | checkpoint | The state of a plan or agent session at a boundary |
 | context assembled | The exact block handed to a model (so you can see what it was told) |
+| feedback | A thumbs up or down you gave an answer, with the machine that gave it |
 
 The data lives in `contexts\fleet-context.db` next to the backend (or in `FLEET_CONTEXTS_DIR`). It contains everything the
 assistant saw and did, including file contents it read, so keep that folder private. It is listed in `.gitignore`. How long
@@ -47,6 +48,7 @@ built the same way every time, in this order:
    again first), or MISSING.
 6. A summary of older history, when one has been made.
 7. Recent failed checks and errors (for a plan step, that step's own, not ones earlier steps already got past).
+8. Your current settings in the app you are chatting from, such as the web UI's **Project folder**.
 
 The block is capped (about 4500 characters), and the least important sections are dropped first. A chat with nothing pinned
 and no plan gets no block at all, so ordinary conversations cost nothing extra.

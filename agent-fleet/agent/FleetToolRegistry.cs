@@ -60,6 +60,8 @@ internal sealed class FleetToolRegistry : IAsyncDisposable
     private readonly Func<string, bool> _available;
     private McpToolProvider _mcp = McpToolProvider.Empty;
     private string _connectedFingerprint = string.Empty;
+    private volatile IReadOnlyList<CustomCommandTool> _custom = [];
+    private volatile IReadOnlyList<CustomToolStatus> _customStatuses = [];
 
     /// <param name="available">
     /// Whether a built-in tool can work right now (the sandbox tool needs a sandbox). A tool that cannot is
@@ -89,6 +91,16 @@ internal sealed class FleetToolRegistry : IAsyncDisposable
 
     public McpToolProvider Mcp => _mcp;
 
+    /// <summary>The command tools made in the Config panel that are switched on and usable.</summary>
+    public IReadOnlyList<CustomCommandTool> Custom => _custom;
+
+    /// <summary>Every command tool in the config, and why one is not offered.</summary>
+    public IReadOnlyList<CustomToolStatus> CustomStatuses => _customStatuses;
+
+    /// <summary>A tool the registry offers besides the built-ins, by name: a command tool or an MCP tool.</summary>
+    public AIFunction? FindAdded(string name) =>
+        (AIFunction?)_custom.FirstOrDefault(tool => tool.Name == name) ?? _mcp.Tools.FirstOrDefault(entry => entry.Tool.Name == name)?.Tool;
+
     /// <summary>
     /// Connects to the servers in the current config if they differ from what is connected. New
     /// connections are made before the old ones are dropped, so a request in flight keeps working, and
@@ -99,6 +111,9 @@ internal sealed class FleetToolRegistry : IAsyncDisposable
         await _reloadGate.WaitAsync(cancellationToken);
         try
         {
+            // Command tools cost nothing to rebuild, so they always follow the config.
+            ReloadCustom();
+
             IReadOnlyDictionary<string, FleetMcpServerConfig> servers = _config.Current.McpServerMap;
             string fingerprint = JsonSerializer.Serialize(servers.OrderBy(pair => pair.Key, StringComparer.Ordinal));
             if (fingerprint == _connectedFingerprint)
@@ -110,9 +125,8 @@ internal sealed class FleetToolRegistry : IAsyncDisposable
             McpToolProvider previous = _mcp;
             _mcp = next;
             _connectedFingerprint = fingerprint;
-            _readOnly.Replace(_builtInReadOnly.Concat(next.Tools
-                .Where(entry => entry.Tool.ProtocolTool.Annotations?.ReadOnlyHint == true)
-                .Select(entry => entry.Tool.Name)));
+            // Again, now that the servers' tool names are known (a command tool must not take one of them).
+            ReloadCustom();
             _logger.LogInformation(
                 "MCP tools reloaded: {Servers} server(s), {Tools} tool(s).",
                 next.Statuses.Count(status => status.Connected),
@@ -135,9 +149,36 @@ internal sealed class FleetToolRegistry : IAsyncDisposable
         }
     }
 
+    private void ReloadCustom()
+    {
+        var tools = new List<CustomCommandTool>();
+        var statuses = new List<CustomToolStatus>();
+        foreach ((string name, FleetCustomToolConfig config) in _config.Current.CustomToolMap.OrderBy(pair => pair.Key, StringComparer.Ordinal))
+        {
+            string? problem = BuiltInNames.Contains(name)
+                ? $"{name} is the name of a built-in tool. Rename it."
+                : _mcp.Tools.Any(entry => entry.Tool.Name == name) ? $"An MCP server already offers a tool called {name}. Rename it." : null;
+            if (problem is null && config.Enabled)
+            {
+                tools.Add(new CustomCommandTool(name, config));
+            }
+
+            statuses.Add(new CustomToolStatus(name, config.Enabled, problem is null && config.Enabled, problem));
+        }
+
+        _custom = tools;
+        _customStatuses = statuses;
+        UpdateReadOnly();
+    }
+
+    private void UpdateReadOnly() =>
+        _readOnly.Replace(_builtInReadOnly
+            .Concat(_mcp.Tools.Where(entry => entry.Tool.ProtocolTool.Annotations?.ReadOnlyHint == true).Select(entry => entry.Tool.Name))
+            .Concat(_custom.Where(tool => tool.Config.ReadOnly).Select(tool => tool.Name)));
+
     /// <summary>
     /// The request's tool list as it should be now: built-in tools that are switched off removed, the
-    /// connected MCP servers' enabled tools added. Tools the client declared (VS Code's) are kept.
+    /// connected MCP servers' enabled tools and the command tools added. Tools the client declared (VS Code's) are kept.
     /// </summary>
     public IList<AITool> Apply(IList<AITool>? requested)
     {
@@ -165,11 +206,21 @@ internal sealed class FleetToolRegistry : IAsyncDisposable
             }
         }
 
+        foreach (CustomCommandTool tool in _custom)
+        {
+            if (names.Add(tool.Name))
+            {
+                tools.Add(tool);
+            }
+        }
+
         return tools;
     }
 
     public ValueTask DisposeAsync() => _mcp.DisposeAsync();
 }
+
+internal sealed record CustomToolStatus(string Name, bool Enabled, bool Offered, string? Problem);
 
 /// <summary>
 /// Sits in front of the function-invocation layer and gives every request the current tool list, so a

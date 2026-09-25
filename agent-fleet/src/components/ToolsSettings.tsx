@@ -1,18 +1,33 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { CommandTools, type CommandToolConfig, type CommandToolStatus } from "./CommandTools";
+import { McpImportPanel } from "./McpImportPanel";
+import { ToolTry, type ToolParameter } from "./ToolTry";
 import {
+  CATALOG_CATEGORIES,
   MCP_CATALOG,
   type CatalogEntry,
   type McpServerConfig,
+  catalogPlaceholders,
   describeServer,
+  fillPlaceholders,
   joinCommandLine,
   looksLikeInlineSecret,
   parsePastedServers,
   splitCommandLine,
 } from "./mcpCatalog";
 
-export type ToolConfig = { enabled: boolean; description: string; source: string };
+export type ToolConfig = { enabled: boolean; description: string; source: string; parameters?: ToolParameter[] };
+
+type Prerequisites = { npx: boolean; uvx: boolean; docker: boolean; git: boolean; os: string };
+
+function missingHint(requires: "npx" | "uvx", os: string): string {
+  if (requires === "npx") return "Node.js is not installed on the hub (or not on the backend's PATH): install it from nodejs.org first.";
+  return os === "windows"
+    ? "uv is not installed on the hub: in PowerShell, winget install astral-sh.uv, then restart the fleet."
+    : "uv is not installed on the hub: curl -LsSf https://astral.sh/uv/install.sh | sh, then restart the fleet.";
+}
 export type McpStatus = { name: string; type: string; enabled: boolean; connected: boolean; toolCount: number; error: string | null };
 
 type TestResult = { ok: boolean; tools: { name: string; description: string; readOnly: boolean }[]; error: string | null };
@@ -21,9 +36,14 @@ type Props = {
   servers: Record<string, McpServerConfig>;
   statuses: McpStatus[];
   tools: Record<string, ToolConfig>;
+  customTools: Record<string, CommandToolConfig>;
+  customStatus: CommandToolStatus[];
   saving: boolean;
   /** Save with these servers and tool switches; tools and MCP servers apply immediately on the backend. */
   onSave: (servers: Record<string, McpServerConfig>, tools: Record<string, ToolConfig>) => Promise<boolean>;
+  onSaveCustom: (customTools: Record<string, CommandToolConfig>) => Promise<boolean>;
+  /** The backend changed the config itself (an import): load it again. */
+  onReload: () => void;
 };
 
 type Pair = { key: string; value: string };
@@ -36,9 +56,11 @@ type Form = {
   env: Pair[];
   headers: Pair[];
   setup: string | null;
+  /** Values for {placeholders} in the command or address, such as the folder a server may use. */
+  fills: Record<string, string>;
 };
 
-const EMPTY_FORM: Form = { editing: null, name: "", type: "stdio", commandLine: "", url: "", env: [], headers: [], setup: null };
+const EMPTY_FORM: Form = { editing: null, name: "", type: "stdio", commandLine: "", url: "", env: [], headers: [], setup: null, fills: {} };
 const NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 const toPairs = (map?: Record<string, string> | null): Pair[] => Object.entries(map ?? {}).map(([key, value]) => ({ key, value }));
@@ -49,8 +71,12 @@ const toMap = (pairs: Pair[]): Record<string, string> | null => {
 
 function formToServer(form: Form): McpServerConfig {
   return form.type === "http"
-    ? { type: "http", url: form.url.trim(), headers: toMap(form.headers), env: null, enabled: true }
-    : { type: "stdio", ...splitCommandLine(form.commandLine.trim()), env: toMap(form.env), enabled: true };
+    ? { type: "http", url: fillPlaceholders(form.url.trim(), form.fills), headers: toMap(form.headers), env: null, enabled: true }
+    : { type: "stdio", ...splitCommandLine(fillPlaceholders(form.commandLine.trim(), form.fills)), env: toMap(form.env), enabled: true };
+}
+
+function formPlaceholders(form: Form): string[] {
+  return catalogPlaceholders(form.type === "http" ? form.url : form.commandLine);
 }
 
 function serverToForm(name: string, server: McpServerConfig, setup: string | null = null, editing: string | null = null): Form {
@@ -63,6 +89,7 @@ function serverToForm(name: string, server: McpServerConfig, setup: string | nul
     env: toPairs(server.env),
     headers: toPairs(server.headers),
     setup,
+    fills: {},
   };
 }
 
@@ -115,8 +142,19 @@ function StatusBadge({ server, status }: { server: McpServerConfig; status?: Mcp
 }
 
 /** The Tools part of the Config panel: MCP servers (catalog, custom, paste), their tools, and the built-in tools. */
-export function ToolsSettings({ servers, statuses, tools, saving, onSave }: Props) {
-  const [tab, setTab] = useState<"catalog" | "custom" | "paste">("catalog");
+export function ToolsSettings({ servers, statuses, tools, customTools, customStatus, saving, onSave, onSaveCustom, onReload }: Props) {
+  const [tab, setTab] = useState<"catalog" | "custom" | "paste" | "import">("catalog");
+  const [prerequisites, setPrerequisites] = useState<Prerequisites | null>(null);
+  const [category, setCategory] = useState<string>("all");
+  const [filter, setFilter] = useState("");
+  const [trying, setTrying] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/api/tools/prerequisites")
+      .then((res) => (res.ok ? res.json() : null))
+      .then(setPrerequisites)
+      .catch(() => {});
+  }, []);
   const [form, setForm] = useState<Form>(EMPTY_FORM);
   const [test, setTest] = useState<TestResult | null>(null);
   const [testing, setTesting] = useState(false);
@@ -150,6 +188,8 @@ export function ToolsSettings({ servers, statuses, tools, saving, onSave }: Prop
     if (form.editing !== name && servers[name]) return `There is already a server called ${name}.`;
     if (form.type === "http" && !/^https?:\/\//.test(form.url.trim())) return "Enter the server's address, starting with http:// or https://.";
     if (form.type === "stdio" && !form.commandLine.trim()) return "Enter the command that starts the server, for example npx -y @scope/server.";
+    const unfilled = formPlaceholders(form).filter((key) => !form.fills[key]?.trim());
+    if (unfilled.length) return `Fill in ${unfilled.join(", ")} first.`;
     return null;
   }
 
@@ -213,6 +253,8 @@ export function ToolsSettings({ servers, statuses, tools, saving, onSave }: Prop
 
   return (
     <div className="space-y-5">
+      <CommandTools tools={customTools} statuses={customStatus} saving={saving} onSave={onSaveCustom} />
+
       <div className="space-y-2">
         <div className="flex items-baseline justify-between">
           <h3 className="text-xs uppercase tracking-wide text-neutral-500">MCP servers</h3>
@@ -272,9 +314,15 @@ export function ToolsSettings({ servers, statuses, tools, saving, onSave }: Prop
                             disabled={saving}
                             onChange={() => onSave(servers, { ...tools, [toolName]: { ...tool, enabled: !tool.enabled } })}
                           />
-                          <span className="min-w-0">
+                          <span className="min-w-0 flex-1">
                             <span className="font-mono text-neutral-200">{toolName}</span>
+                            {tool.enabled && (
+                              <button type="button" onClick={(e) => { e.preventDefault(); setTrying(trying === toolName ? null : toolName); }} className="ml-2 text-[11px] text-sky-400 hover:underline">
+                                Try
+                              </button>
+                            )}
                             <span className="text-neutral-500 line-clamp-2" title={tool.description}>{tool.description}</span>
+                            {trying === toolName && <ToolTry name={toolName} parameters={tool.parameters ?? []} onClose={() => setTrying(null)} />}
                           </span>
                         </label>
                       ))}
@@ -291,6 +339,7 @@ export function ToolsSettings({ servers, statuses, tools, saving, onSave }: Prop
         <div className="flex border-b border-neutral-700 text-xs">
           {([
             ["catalog", "Pick from a list"],
+            ["import", "From your other apps"],
             ["custom", form.editing ? `Edit ${form.editing}` : "Custom server"],
             ["paste", "Paste mcp.json"],
           ] as const).map(([key, label]) => (
@@ -310,30 +359,60 @@ export function ToolsSettings({ servers, statuses, tools, saving, onSave }: Prop
 
         <div className="p-3 space-y-3">
           {tab === "catalog" && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              {MCP_CATALOG.map((entry) => {
-                const already = Object.values(servers).some((s) => describeServer(s) === describeServer(entry.server));
-                return (
-                  <div key={entry.id} className="bg-neutral-800/50 border border-neutral-800 rounded-md p-3 flex flex-col gap-1">
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm text-neutral-100">{entry.title}</span>
-                      <span className="text-[10px] uppercase tracking-wide text-neutral-500">{entry.server.type}</span>
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center gap-1.5">
+                {["all", ...CATALOG_CATEGORIES].map((name) => (
+                  <button
+                    key={name}
+                    type="button"
+                    onClick={() => setCategory(name)}
+                    className={`text-[11px] px-2 py-0.5 rounded-full border ${
+                      category === name ? "border-sky-500/60 bg-sky-500/10 text-sky-200" : "border-neutral-700 text-neutral-400 hover:bg-neutral-800"
+                    }`}
+                  >
+                    {name === "all" ? "All" : name}
+                  </button>
+                ))}
+                <input
+                  value={filter}
+                  onChange={(e) => setFilter(e.target.value)}
+                  placeholder="Search"
+                  className="ml-auto w-36 text-xs px-2 py-0.5 rounded bg-neutral-950 border border-neutral-700 text-neutral-200"
+                />
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {MCP_CATALOG.filter(
+                  (entry) =>
+                    (category === "all" || entry.category === category) &&
+                    (!filter.trim() || `${entry.title} ${entry.what}`.toLowerCase().includes(filter.trim().toLowerCase())),
+                ).map((entry) => {
+                  const already = Object.values(servers).some((s) => describeServer(s) === describeServer(entry.server));
+                  const missing = entry.requires && prerequisites && !prerequisites[entry.requires];
+                  return (
+                    <div key={entry.id} className="bg-neutral-800/50 border border-neutral-800 rounded-md p-3 flex flex-col gap-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm text-neutral-100">{entry.title}</span>
+                        <span className="text-[10px] uppercase tracking-wide text-neutral-500">{entry.category}</span>
+                      </div>
+                      <p className="text-xs text-neutral-400">{entry.what}</p>
+                      <p className="text-[11px] text-neutral-500">Needs: {entry.needs}</p>
+                      {missing && <p className="text-[11px] text-amber-300">{missingHint(entry.requires!, prerequisites!.os)}</p>}
+                      <button
+                        type="button"
+                        onClick={() => pick(entry)}
+                        disabled={already}
+                        className="mt-auto self-start text-xs px-3 py-1 rounded-md bg-neutral-700 text-neutral-100 hover:bg-neutral-600 disabled:opacity-40"
+                      >
+                        {already ? "Added" : "Set up"}
+                      </button>
                     </div>
-                    <p className="text-xs text-neutral-400">{entry.what}</p>
-                    <p className="text-[11px] text-neutral-500">Needs: {entry.needs}</p>
-                    <button
-                      type="button"
-                      onClick={() => pick(entry)}
-                      disabled={already}
-                      className="mt-auto self-start text-xs px-3 py-1 rounded-md bg-neutral-700 text-neutral-100 hover:bg-neutral-600 disabled:opacity-40"
-                    >
-                      {already ? "Added" : "Set up"}
-                    </button>
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </div>
             </div>
           )}
+
+          {tab === "import" && <McpImportPanel onImported={onReload} />}
 
           {tab === "custom" && (
             <div className="space-y-3">
@@ -383,6 +462,23 @@ export function ToolsSettings({ servers, statuses, tools, saving, onSave }: Prop
                     placeholder="https://example.com/mcp"
                     className="w-full text-xs px-2 py-1.5 rounded bg-neutral-950 border border-neutral-700 text-neutral-200 font-mono"
                   />
+                </div>
+              )}
+
+              {formPlaceholders(form).length > 0 && (
+                <div className="space-y-1.5 bg-sky-500/5 border border-sky-500/30 rounded p-2">
+                  <span className="block text-[11px] text-sky-200">Fill in:</span>
+                  {formPlaceholders(form).map((key) => (
+                    <label key={key} className="flex items-center gap-2">
+                      <span className="w-28 text-xs font-mono text-neutral-300">{key}</span>
+                      <input
+                        value={form.fills[key] ?? ""}
+                        onChange={(e) => setForm({ ...form, fills: { ...form.fills, [key]: e.target.value } })}
+                        placeholder={key === "folder" || key === "repository" ? "C:\\projects\\my-app" : ""}
+                        className="flex-1 text-xs px-2 py-1 rounded bg-neutral-950 border border-neutral-700 text-neutral-200 font-mono"
+                      />
+                    </label>
+                  ))}
                 </div>
               )}
 
@@ -502,13 +598,21 @@ export function ToolsSettings({ servers, statuses, tools, saving, onSave }: Prop
                 disabled={saving}
                 onChange={() => onSave(servers, { ...tools, [name]: { ...tool, enabled: !tool.enabled } })}
               />
-              <span className="min-w-0">
+              <span className="min-w-0 flex-1">
                 <span className="font-mono text-neutral-200">{name}</span>
+                {tool.enabled && !["propose_plan", "get_plan", "record_decision", "search_context"].includes(name) && (
+                  <button type="button" onClick={(e) => { e.preventDefault(); setTrying(trying === name ? null : name); }} className="ml-2 text-[11px] text-sky-400 hover:underline">
+                    Try
+                  </button>
+                )}
                 {showBuiltInDetails && <span className="block text-neutral-500">{tool.description}</span>}
               </span>
             </label>
           ))}
         </div>
+        {trying && builtIns.some(([name]) => name === trying) && (
+          <ToolTry name={trying} parameters={tools[trying]?.parameters ?? []} onClose={() => setTrying(null)} />
+        )}
       </div>
     </div>
   );
