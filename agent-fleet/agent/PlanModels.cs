@@ -52,6 +52,7 @@ internal static class RunEventKind
     public const string ParallelStarted = "parallel-started";
     public const string ParallelFallback = "parallel-fallback";
     public const string Waiting = "waiting";
+    public const string WorkRestored = "work-restored";
 }
 
 /// <summary>
