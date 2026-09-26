@@ -471,6 +471,135 @@ internal sealed partial class PlanTools
         }
     }
 
+    /// <summary>What the plan had changed or created in a git project before an attempt, so the attempt cannot throw it away.</summary>
+    internal sealed record WorkSnapshot(string Head, IReadOnlyDictionary<string, byte[]> Files);
+
+    private const long MaxSnapshotFileBytes = 2_000_000;
+    private const long MaxSnapshotBytes = 50_000_000;
+
+    /// <summary>
+    /// The files git sees as changed or new (not ignored) before an attempt, with their contents. Measured: a model on
+    /// its last round ran `git checkout HEAD -- src/server/marketHours.ts` and threw away its own step's work; nothing
+    /// is committed between steps, so `git checkout -- .`, `git stash` or `git clean` would throw away every earlier
+    /// step's. Null outside a git working tree or when git is missing.
+    /// </summary>
+    internal async Task<WorkSnapshot?> SnapshotWorkAsync(PlanRecord plan, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(plan.WorkingDirectory) || !Directory.Exists(plan.WorkingDirectory))
+        {
+            return null;
+        }
+
+        try
+        {
+            if (await GitStateAsync(plan.WorkingDirectory, cancellationToken) is not { } state)
+            {
+                return null;
+            }
+
+            var files = new Dictionary<string, byte[]>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+            long total = 0;
+            foreach (string path in state.Changed)
+            {
+                var info = new FileInfo(path);
+                if (info.Exists && info.Length <= MaxSnapshotFileBytes && total + info.Length <= MaxSnapshotBytes)
+                {
+                    files[path] = await File.ReadAllBytesAsync(path, cancellationToken);
+                    total += info.Length;
+                }
+            }
+
+            return new WorkSnapshot(state.Head, files);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// After an attempt: the files of the snapshot that are gone, or back to what git has committed, and that no
+    /// unfinished step names, written back as they were. A file an unfinished step names (this step's own, or one a
+    /// step running beside it or after it will write) is that step's to change. When the attempt committed (HEAD moved),
+    /// only deleted files come back, so nothing committed is overwritten. Returns the files put back.
+    /// </summary>
+    internal async Task<IReadOnlyList<string>> RestoreDiscardedWorkAsync(PlanRecord plan, WorkSnapshot? snapshot, CancellationToken cancellationToken)
+    {
+        if (snapshot is null || snapshot.Files.Count == 0 || string.IsNullOrWhiteSpace(plan.WorkingDirectory))
+        {
+            return [];
+        }
+
+        try
+        {
+            if (await GitStateAsync(plan.WorkingDirectory, cancellationToken) is not { } state)
+            {
+                return [];
+            }
+
+            StringComparison comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            string[] unfinished = plan.Steps
+                .Where(step => step.Status != StepStatus.Done)
+                .SelectMany(step => FleetPlanContext.DeclaredPaths(plan, step))
+                .Select(path => Path.TrimEndingDirectorySeparator(path))
+                .ToArray();
+            var changedNow = new HashSet<string>(state.Changed, OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+            bool committed = !string.Equals(state.Head, snapshot.Head, StringComparison.Ordinal);
+
+            var restored = new List<string>();
+            foreach ((string path, byte[] contents) in snapshot.Files)
+            {
+                bool named = unfinished.Any(declared => string.Equals(declared, path, comparison) ||
+                                                         path.StartsWith(declared + Path.DirectorySeparatorChar, comparison));
+                bool discarded = !File.Exists(path) || (!committed && !changedNow.Contains(path));
+                if (named || !discarded)
+                {
+                    continue;
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                await File.WriteAllBytesAsync(path, contents, cancellationToken);
+                restored.Add(RelativeTo(plan.WorkingDirectory, path));
+            }
+
+            return restored;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return [];
+        }
+    }
+
+    // HEAD and the full paths of the files git sees as changed or new, or null outside a git working tree.
+    private async Task<(string Head, List<string> Changed)?> GitStateAsync(string workingDirectory, CancellationToken cancellationToken)
+    {
+        string? root = Stdout(await _runCommand("git rev-parse --show-toplevel", workingDirectory, cancellationToken))?.Trim();
+        string? head = Stdout(await _runCommand("git rev-parse HEAD", workingDirectory, cancellationToken))?.Trim();
+        string? status = Stdout(await _runCommand("git -c core.quotepath=off status --porcelain=v1 --untracked-files=all", workingDirectory, cancellationToken));
+        if (string.IsNullOrWhiteSpace(root) || string.IsNullOrWhiteSpace(head) || status is null)
+        {
+            return null;
+        }
+
+        var changed = new List<string>();
+        foreach (string line in status.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            string entry = line.TrimEnd('\r');
+            if (entry.Length < 4 || entry[0] == 'D' || entry[1] == 'D')
+            {
+                continue;
+            }
+
+            // A rename lists "old -> new"; the file on disk is the new one.
+            string relative = entry[3..];
+            int arrow = relative.IndexOf(" -> ", StringComparison.Ordinal);
+            relative = (arrow >= 0 ? relative[(arrow + 4)..] : relative).Trim().Trim('"');
+            changed.Add(Path.GetFullPath(Path.Combine(root, relative)));
+        }
+
+        return (head, changed);
+    }
+
     // The stdout part of a command result, or null when the command did not succeed.
     private static string? Stdout(string result)
     {

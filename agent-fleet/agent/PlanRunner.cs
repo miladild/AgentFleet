@@ -672,9 +672,11 @@ internal sealed partial class PlanRunner
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         using var attemptCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         attemptCancellation.CancelAfter(_attemptTimeout);
+        PlanTools.WorkSnapshot? work = null;
         try
         {
             SnapshotFilesToCreate(plan, step);
+            work = await _tools.SnapshotWorkAsync(plan, attemptCancellation.Token);
             string fileContext = await LoadStepFileContextAsync(plan, step, attemptCancellation.Token);
 
             // Everything the step's model does (routing, tool calls, decisions it pins) is recorded in the
@@ -708,6 +710,21 @@ internal sealed partial class PlanRunner
             string failure = $"The model call failed: {exception.Message}";
             _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.ModelFailed, tier, detail: failure);
             return new ModelAttemptResult(step.Id, string.Empty, failure, ShouldVerify: false, Transient: IsTransient(exception));
+        }
+        finally
+        {
+            // Before the check: put back earlier work the attempt deleted or reset with git (see PlanTools.SnapshotWorkAsync).
+            if (work is not null)
+            {
+                IReadOnlyList<string> restored = await _tools.RestoreDiscardedWorkAsync(_store.Get(plan.Id) ?? plan, work, CancellationToken.None);
+                if (restored.Count > 0)
+                {
+                    string files = string.Join(", ", restored);
+                    _logger.LogWarning("Plan {PlanId} step {StepId} attempt {Attempt} threw away earlier work; put back {Files}.", plan.Id, step.Id, attempt, files);
+                    _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.WorkRestored, tier,
+                        detail: $"Put back {files}: work of an earlier step that this attempt deleted or reset with git.");
+                }
+            }
         }
     }
 
