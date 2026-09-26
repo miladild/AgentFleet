@@ -2,7 +2,7 @@
   "name": "agent-fleet-chat",
   "displayName": "Agent Fleet",
   "description": "Chat with your local Agent Fleet from inside VS Code - runs entirely on your own machines, never uses a Copilot token.",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -47,6 +47,12 @@
         "command": "agentFleet.unlinkModelPicker",
         "title": "Stop linking the Fleet Router model to a fleet chat",
         "category": "Agent Fleet"
+      },
+      {
+        "command": "agentFleet.watchPlan",
+        "title": "Watch the running plan live",
+        "category": "Agent Fleet",
+        "icon": "$(pulse)"
       }
     ],
     "languageModelTools": [
@@ -144,6 +150,11 @@
           "type": "string",
           "default": "http://localhost:8000",
           "description": "Address of the Agent Fleet backend. The default is right when VS Code runs on the same machine as the backend; use the hub's address (for example http://192.168.1.10:8000) from another machine on your network."
+        },
+        "agentFleet.webUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Address of the Agent Fleet web UI, for the live view of a plan (Watch it live). Leave it empty to use the backend's machine on port 3000."
         }
       }
     }

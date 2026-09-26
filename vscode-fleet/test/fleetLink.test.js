@@ -1,7 +1,7 @@
 // Run with: npm test (compiles first). Covers the parts of joining a fleet conversation that do not need VS Code.
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { asksToRunPlan, continuedMessages, describeSession, otherChatTurns, pickerMessageId, routePickerRequest, workspaceContext, INSTRUCTIONS_PREFIX } = require("../out/fleetLink.js");
+const { asksToRunPlan, continuedMessages, describeSession, otherChatTurns, pickerMessageId, routePickerRequest, webUiBase, workspaceContext, INSTRUCTIONS_PREFIX } = require("../out/fleetLink.js");
 
 const GUID = "1b10662d-23b2-4733-b2af-206e5f1d1ca1";
 const OTHER = "bc57f560-e59a-4d0e-907f-eb3579c80673";
@@ -156,4 +156,10 @@ test("asking to run a plan hands it over, asking about a plan does not", () => {
   for (const prompt of ["what do you think of this plan?", "is the plan any good", "run the tests"]) {
     assert.equal(asksToRunPlan(prompt), false, prompt);
   }
+});
+test("the live view opens on the backend's machine on port 3000 unless a web address is set", () => {
+  assert.equal(webUiBase("http://localhost:8000", ""), "http://localhost:3000");
+  assert.equal(webUiBase("http://192.168.1.10:8000", ""), "http://192.168.1.10:3000");
+  assert.equal(webUiBase("http://localhost:8000", " http://hub.lan:4000/ "), "http://hub.lan:4000");
+  assert.equal(webUiBase("not a url", ""), "http://localhost:3000");
 });

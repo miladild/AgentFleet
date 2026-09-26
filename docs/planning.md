@@ -61,6 +61,26 @@ steps, and checks each step with a real command instead of trusting itself.
    current plan's report in the chat, with **Stop it**, or **Approve and resume** for a blocked plan. Close the browser and
    VS Code, go to bed: the plan runs in the backend. **Stop** halts a running plan.
 
+## Watching it live
+
+`http://localhost:3000/live` opens the running plan in a page of its own (or lists the plans when none is running);
+`/live/<plan id>` opens one plan. In the web UI, the **Live** button next to **Plans**, the **Live** link on a plan and
+the **live** badge on a session that carried a plan open it; in VS Code, **Watch it live** under `@fleet /status`, after
+approving a plan, or the command **Agent Fleet: Watch the running plan live** opens it in VS Code's Simple Browser
+(`agentFleet.webUrl` sets the web UI's address when it is not on the backend's machine at port 3000).
+
+- **Pipeline.** The steps from left to right, a parallel group stacked in one column. A running step glows and shows
+  the machine working on it and its latest tool call; data flows along the edges into it. Hover a step for its latest
+  lines, click it for its instructions, its check and the output of its last check.
+- **Machines.** Each machine, what it is working on, and its tool calls over the last two minutes.
+- **Log.** Everything the machines do, as a terminal: routing, tool calls and results, what the model said, checks and
+  the runner's own events. Filter it by step, or to errors only.
+
+It asks the web server for news every two seconds while the plan runs (every fifteen once it has stopped), and not at
+all while the tab is hidden; each answer carries only what is new, cut down to a line per event. Animations move only
+what the graphics card can move cheaply, pause in a hidden tab, and stop for anyone whose system asks for less motion.
+`/live/demo` plays a made-up plan on a loop, to see the view without a real run.
+
 ## A plan made with GitHub Copilot
 
 You can work a plan out with Copilot (or any chat model in VS Code) and have the fleet carry it out. There are two ways.

@@ -105,19 +105,30 @@ export function PlansPanel() {
 
   return (
     <>
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        title="Plans the agent has proposed, and how far each one got"
-        className="absolute top-4 left-[15.5rem] rounded-full px-4 py-2 text-sm font-medium bg-neutral-800 text-neutral-300 border border-neutral-700 hover:bg-neutral-700 transition-colors"
-      >
-        Plans
-        {waiting > 0 && (
-          <span className="ml-2 inline-block min-w-4 rounded-full bg-amber-500/20 text-amber-300 text-[11px] px-1.5">
-            {waiting}
-          </span>
-        )}
-      </button>
+      <div className="absolute top-4 left-[15.5rem] flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          title="Plans the agent has proposed, and how far each one got"
+          className="rounded-full px-4 py-2 text-sm font-medium bg-neutral-800 text-neutral-300 border border-neutral-700 hover:bg-neutral-700 transition-colors"
+        >
+          Plans
+          {waiting > 0 && (
+            <span className="ml-2 inline-block min-w-4 rounded-full bg-amber-500/20 text-amber-300 text-[11px] px-1.5">
+              {waiting}
+            </span>
+          )}
+        </button>
+        <a
+          href="/live"
+          target="_blank"
+          rel="noreferrer"
+          title="Watch the running plan live, in a page of its own"
+          className="rounded-full px-4 py-2 text-sm font-medium bg-neutral-800 text-cyan-300 border border-cyan-500/40 hover:bg-neutral-700 transition-colors"
+        >
+          ◉ Live
+        </a>
+      </div>
 
       {notifications.length > 0 && (
         <aside
@@ -201,11 +212,11 @@ export function PlansPanel() {
             ) : (
               <ul className="space-y-1.5">
                 {plans.map((plan) => (
-                  <li key={plan.id}>
+                  <li key={plan.id} className="flex items-stretch gap-1.5">
                     <button
                       type="button"
                       onClick={() => setSelected(plan.id)}
-                      className="w-full text-left flex items-center gap-3 bg-neutral-800/50 border border-neutral-800 rounded-md px-3 py-2 hover:bg-neutral-800 transition-colors"
+                      className="min-w-0 flex-1 text-left flex items-center gap-3 bg-neutral-800/50 border border-neutral-800 rounded-md px-3 py-2 hover:bg-neutral-800 transition-colors"
                     >
                       <span className={`w-2 h-2 rounded-full shrink-0 ${DOT[plan.status] ?? "bg-neutral-500"}`} />
                       <span className="min-w-0 flex-1">
@@ -216,6 +227,17 @@ export function PlansPanel() {
                         </span>
                       </span>
                     </button>
+                    {plan.status !== "awaiting-approval" && plan.status !== "rejected" && (
+                      <a
+                        href={`/live/${plan.id}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        title="Watch this plan live"
+                        className="shrink-0 flex items-center rounded-md px-3 text-xs text-cyan-300 bg-neutral-800/50 border border-neutral-800 hover:bg-neutral-800"
+                      >
+                        ◉ Live
+                      </a>
+                    )}
                   </li>
                 ))}
               </ul>
