@@ -53,6 +53,23 @@ public sealed class PlanPromptTests : PlanTestBase
     }
 
     [Fact]
+    public void A_steps_commands_run_in_its_project_folder_and_the_prompt_says_so()
+    {
+        PlanRecord plan = Store.Approve(Store.Create("Board", "Test it", PlansDirectory, [], [], [], null, null, [Step("add a runner")]).Id)!;
+        string prompt = PlanRunner.BuildPrompt(plan, plan.Steps[0], 1, null);
+        var tools = new PlanTools(Store, new FakeValidator(code => new DiagramCheck(true, true, code, null)), (_, _, _) => Task.FromResult("Exit code: 0"));
+
+        Assert.Equal(PlansDirectory, tools.StepWorkingDirectory([new Microsoft.Extensions.AI.ChatMessage(Microsoft.Extensions.AI.ChatRole.User, prompt)]));
+        Assert.Null(tools.StepWorkingDirectory([new Microsoft.Extensions.AI.ChatMessage(Microsoft.Extensions.AI.ChatRole.User, "hello")]));
+        Assert.Contains("run_command runs in the project folder", prompt);
+        Assert.Contains("Never install anything globally", prompt);
+
+        // A plan whose folder is gone gives no folder rather than a wrong one.
+        PlanRecord elsewhere = Store.Approve(NewPlan(Step("x")).Id)!;
+        Assert.Null(tools.StepWorkingDirectory([new Microsoft.Extensions.AI.ChatMessage(Microsoft.Extensions.AI.ChatRole.User, PlanRunner.BuildPrompt(elsewhere, elsewhere.Steps[0], 1, null))]));
+    }
+
+    [Fact]
     public void A_long_check_output_keeps_every_failing_test_and_the_totals_ahead_of_its_end()
     {
         string[] holidays = ["Good Friday 2026", "Independence Day 2026", "Juneteenth 2026", "Thanksgiving 2026"];

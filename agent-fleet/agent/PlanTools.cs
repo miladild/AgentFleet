@@ -756,6 +756,24 @@ internal sealed partial class PlanTools
     }
 
     /// <summary>
+    /// The project folder of the plan step a conversation carries out, from the plan marker in the step's prompt.
+    /// Measured: a worker ran the step's check with run_command and no folder, so it ran in the backend's own folder,
+    /// could not find the project's tsx, and spent eight minutes trying to install it globally.
+    /// </summary>
+    public string? StepWorkingDirectory(IEnumerable<Microsoft.Extensions.AI.ChatMessage> messages)
+    {
+        foreach (Microsoft.Extensions.AI.ChatMessage message in messages)
+        {
+            if (message.Role == Microsoft.Extensions.AI.ChatRole.User && FleetPlanStore.FindMarkerId(message.Text) is { } id)
+            {
+                return _store.Get(id)?.WorkingDirectory is { } folder && Directory.Exists(folder) ? folder : null;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// A long check output as the next attempt sees it. Only the end fits, but the end of a test run is the detail of
     /// its last failure: with four holiday tests failing, the retry was shown one of them and fixed only that. So the
     /// lines that name failures and totals, from the whole output, come before the end.

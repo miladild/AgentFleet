@@ -855,6 +855,12 @@ internal sealed partial class PlanRunner
             text.AppendLine($"Project folder: {plan.WorkingDirectory}");
         }
 
+        // Measured: a worker piped commands into head, tail and Select-Object under cmd.exe, and tried three times to
+        // install tsx globally when it could not find the project's own copy.
+        text.AppendLine($"run_command runs in the project folder unless you give another, with {HubPlatform.ShellDescription}" +
+                        (OperatingSystem.IsWindows() ? ": head, tail, grep and PowerShell commands such as Select-Object do not exist there." : ".") +
+                        " Never install anything globally; the project's own tools are in its node_modules, virtual environment or equivalent.");
+
         foreach (string assumption in plan.Assumptions)
         {
             text.AppendLine($"Assumption: {assumption}");
