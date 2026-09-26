@@ -137,7 +137,9 @@ What keeps a plan going when something happens in the night:
   the conversation are on disk. The plan picks up at the step that was interrupted; finished steps are not redone. Plan
   files are flushed to disk before they replace the old one, so a power cut cannot leave a half-written plan. Run as a
   Windows service (`Install-Autostart.ps1 -Mode Service`), the backend is started again within seconds if it stops
-  unexpectedly, and at boot; the scheduled-task mode retries three times, a minute apart.
+  unexpectedly, and at boot; the scheduled-task mode retries three times, a minute apart. The web UI service starts a
+  little after boot and is started again if it stops, because it runs from the source folder, which may be on a disk
+  that comes up late (on a USB drive it failed at boot and stayed down).
 - **A machine goes down or slows down.** Each call goes to a ready machine of the step's tier; a machine that is off, or
   fails a call, is replaced by the fallback machine. A machine that times out rests for ten minutes, so the rest of the
   step does not wait for it again. If no machine can answer at all (the network is down, the fallback is rebooting), the

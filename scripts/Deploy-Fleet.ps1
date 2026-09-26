@@ -57,7 +57,14 @@ function Stop-One([string]$Name) {
 
 function Start-One([string]$Name) {
     if (-not (($mode -eq 'service' -and (Get-Service -Name $Name -ErrorAction SilentlyContinue)) -or ($mode -eq 'task' -and (Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue)))) { return }
-    if ($mode -eq 'service') { Start-Service -Name $Name } else { Start-ScheduledTask -TaskName $Name }
+    if ($mode -ne 'service') { Start-ScheduledTask -TaskName $Name; return }
+    # An antivirus can refuse the first start of a freshly published program ("Access is denied"); the second start works.
+    try { Start-Service -Name $Name }
+    catch {
+        Write-Warn "The first start of $Name was refused ($($_.Exception.Message)); trying again."
+        Start-Sleep -Seconds 3
+        Start-Service -Name $Name
+    }
 }
 
 if (-not $SkipFrontend) {
@@ -89,6 +96,13 @@ if ($mode -eq 'service') {
     # Installs made before this setting existed get it here: a backend that stops unexpectedly is started again, so a
     # plan running overnight carries on (it resumes from disk).
     sc.exe failure $BackendName reset= 86400 actions= restart/5000/restart/30000/restart/60000 | Out-Null
+    if (-not $SkipFrontend -and (Get-Service -Name $FrontendName -ErrorAction SilentlyContinue)) {
+        # The web UI runs from the source folder, which can be on a disk that comes up after the services start (a USB
+        # drive): after a reboot it failed with "The system cannot open the file" and stayed down. It starts a little
+        # later now, and is started again if it stops.
+        sc.exe failure $FrontendName reset= 86400 actions= restart/5000/restart/30000/restart/60000 | Out-Null
+        sc.exe config $FrontendName start= delayed-auto | Out-Null
+    }
 }
 
 Write-Step "Starting $BackendName"
