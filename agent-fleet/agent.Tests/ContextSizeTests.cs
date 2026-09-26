@@ -203,6 +203,27 @@ public sealed class ContextSizeTests
     }
 
     [Fact]
+    public void Latest_turns_that_hold_whole_files_are_shortened_too_but_never_the_last_call_and_its_result()
+    {
+        string task = "Implement the holidays. " + new string('t', 2_000);
+        List<ChatMessage> conversation = [new(ChatRole.System, "You carry out one plan step."), new(ChatRole.User, task)];
+        for (int round = 0; round < 3; round++)
+        {
+            conversation.Add(new ChatMessage(ChatRole.Assistant, [new FunctionCallContent($"c{round}", "write_file", new Dictionary<string, object?> { ["path"] = "src/a.ts", ["content"] = new string('w', 20_000) })]));
+            conversation.Add(new ChatMessage(ChatRole.Tool, [new FunctionResultContent($"c{round}", new string('r', 20_000))]));
+        }
+
+        // Three rounds are the six latest turns, and together they are about 48000 tokens.
+        IReadOnlyList<ChatMessage> fitted = ContextSizeChatClient.FitToWindow(conversation, null, 28_672, 1.0);
+
+        Assert.True(ContextSizeChatClient.EstimateTokens(fitted, null) <= 28_672);
+        Assert.Equal(task, fitted[1].Text);
+        Assert.Contains("removed to keep this conversation", ((FunctionResultContent)fitted[3].Contents[0]).Result!.ToString());
+        Assert.Equal(new string('w', 20_000), ((FunctionCallContent)fitted[^2].Contents[0]).Arguments!["content"]);
+        Assert.Equal(new string('r', 20_000), ((FunctionResultContent)fitted[^1].Contents[0]).Result);
+    }
+
+    [Fact]
     public async Task A_caller_that_sets_its_own_size_keeps_it()
     {
         ContextSizeChatClient client = Client("{}", 32768, out _);

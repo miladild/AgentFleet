@@ -53,6 +53,28 @@ public sealed class PlanPromptTests : PlanTestBase
     }
 
     [Fact]
+    public void A_long_check_output_keeps_every_failing_test_and_the_totals_ahead_of_its_end()
+    {
+        string[] holidays = ["Good Friday 2026", "Independence Day 2026", "Juneteenth 2026", "Thanksgiving 2026"];
+        string Failure(string name) =>
+            $"✖ {name} (0.4ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\n  false !== true\n\n" +
+            string.Concat(Enumerable.Range(0, 12).Select(frame => $"      at Test.run (node:internal/test_runner/test:{frame}:25)\n")) +
+            "  {\n    code: 'ERR_ASSERTION',\n    actual: false,\n    expected: true\n  }\n";
+        string output = "Exit code: 1\n--- stdout ---\n✔ market session - pre-market (1ms)\n" +
+                        string.Concat(holidays.Select(Failure)) + "ℹ tests 11\nℹ pass 7\nℹ fail 4\n\n✖ failing tests:\n\n" +
+                        string.Concat(holidays.Select(Failure));
+
+        string shown = PlanTools.ShortenCheckOutput(output);
+
+        Assert.True(output.Length > 2500);
+        Assert.All(holidays, name => Assert.Contains($"✖ {name}", shown[..shown.IndexOf("The end of the output", StringComparison.Ordinal)]));
+        Assert.Contains("ℹ fail 4", shown);
+        Assert.DoesNotContain("✔ market session", shown[..shown.IndexOf("The end of the output", StringComparison.Ordinal)]);
+        Assert.EndsWith(output[^200..], shown);
+        Assert.Equal("Exit code: 0\nshort", PlanTools.ShortenCheckOutput("Exit code: 0\nshort"));
+    }
+
+    [Fact]
     public void The_planner_is_told_a_check_must_exercise_behavior_and_finish_on_its_own()
     {
         string directive = PlanGate.PlanningDirective(null);
@@ -84,5 +106,19 @@ public sealed class PlanPromptTests : PlanTestBase
         Assert.Contains("Exit code: 0", result);
         Assert.Contains("one", result);
         Assert.Contains("two", result);
+    }
+
+    [Fact]
+    public async Task The_shell_tool_reads_a_commands_UTF8_output_as_UTF8()
+    {
+        var options = HubShellOptions.Load(new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build());
+        string file = Path.Combine(PlansDirectory, "marks.txt");
+        File.WriteAllText(file, "✖ Juneteenth 2026\n✔ pre-market\n", new System.Text.UTF8Encoding(false));
+
+        string result = await HubShellTools.RunCommandAsync(
+            OperatingSystem.IsWindows() ? $"type \"{file}\"" : $"cat \"{file}\"", null, options, NullLogger.Instance, default);
+
+        Assert.Contains("✖ Juneteenth 2026", result);
+        Assert.Contains("✔ pre-market", result);
     }
 }

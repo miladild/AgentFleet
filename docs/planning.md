@@ -46,7 +46,9 @@ steps, and checks each step with a real command instead of trusting itself.
      back from git just before and just after the step's check, and the run log says which (a test a model wrote once
      tidied up by deleting the project's own config file on every run). Outside git this protection does not exist, so
      put a project under git before leaving a plan to run.
-   - A failed check goes back to the model with the real output, up to three attempts. The first attempt runs on a machine
+   - A failed check goes back to the model with the real output, up to three attempts. A long output is cut to its end,
+     after a list of the lines that name failures and totals, so the next attempt sees every failing test and not only
+     the last one. The first attempt runs on a machine
      of the step's own tier, which is what spreads a plan over your machines; after a failure the next attempts go to the
      strongest machine, because a small model rarely does better the second time (`FLEET_PLAN_CHEAP_ATTEMPTS=2` gives the
      step's own machine a second try first).
@@ -205,7 +207,8 @@ no longer fits runs partly on the processor and becomes much slower, so on a mac
 A long step keeps growing: every tool call and its output stays in the conversation. When it would outgrow the most a
 machine may use, the fleet shortens the oldest tool outputs and the file contents of old calls, and keeps the
 instructions, the task and the latest turns whole; left to Ollama, the start of the conversation (the task) would go
-first. The size is estimated at 2.5 characters per token, the worst case measured on fleet traffic (tool calls full of
+first. When the latest turns alone are too big (a whole file written and read back), those are shortened too, except
+the last call and its result. The size is estimated at 2.5 characters per token, the worst case measured on fleet traffic (tool calls full of
 paths and JSON). Ollama reports the real size of each prompt: when one turns out to have filled its window, the log
 says so, the request is asked again with a bigger window, and that machine's later requests are sized larger.
 

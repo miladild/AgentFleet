@@ -254,21 +254,35 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
 
         List<ChatMessage> fitted = [.. messages];
         int task = fitted.FindIndex(message => message.Role == ChatRole.User);
-        for (int index = 0; index < fitted.Count - KeepRecentMessages; index++)
-        {
-            if (index == task || fitted[index].Role == ChatRole.System || Shortened(fitted[index]) is not { } shorter)
-            {
-                continue;
-            }
 
-            fitted[index] = shorter;
-            if (EstimateTokens(fitted, options) * scale <= budgetTokens)
-            {
-                break;
-            }
+        // The latest turns can hold whole files (measured: a retry on the hub stayed at 29000 of its 28672 tokens after
+        // every older turn was shortened, because its last turns wrote a file and read it back). Those are shortened
+        // too when the older ones are not enough, but never the last call and its result, which the model is acting on.
+        if (!ShortenUntilItFits(0, fitted.Count - KeepRecentMessages))
+        {
+            ShortenUntilItFits(Math.Max(0, fitted.Count - KeepRecentMessages), fitted.Count - 2);
         }
 
         return fitted;
+
+        bool ShortenUntilItFits(int from, int to)
+        {
+            for (int index = from; index < to; index++)
+            {
+                if (index == task || fitted[index].Role == ChatRole.System || Shortened(fitted[index]) is not { } shorter)
+                {
+                    continue;
+                }
+
+                fitted[index] = shorter;
+                if (EstimateTokens(fitted, options) * scale <= budgetTokens)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
     }
 
     private const int LongPart = 400;
