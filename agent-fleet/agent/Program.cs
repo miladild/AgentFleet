@@ -571,6 +571,14 @@ IChatClient agentClient = new ChatClientBuilder(fleetClient)
                 context.Arguments["planFile"] = planFile;
             }
 
+            // A plan step's commands run in its project folder unless the model names another (see StepWorkingDirectory).
+            if (fromRunner && toolName == "run_command" &&
+                string.IsNullOrWhiteSpace(context.Arguments.TryGetValue("workingDirectory", out object? folder) ? folder?.ToString() : null) &&
+                planTools.StepWorkingDirectory(context.Messages) is { } stepFolder)
+            {
+                context.Arguments["workingDirectory"] = stepFolder;
+            }
+
             try
             {
                 object? result = await context.Function.InvokeAsync(context.Arguments, cancellationToken);
