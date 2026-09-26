@@ -112,22 +112,46 @@ internal static partial class PlanFile
     /// </summary>
     public static (string Path, int Steps)? NamedInLatestRequest(IReadOnlyList<ChatMessage> messages)
     {
-        int latest = -1;
-        for (int index = messages.Count - 1; index >= 0 && latest < 0; index--)
-        {
-            if (messages[index].Role == ChatRole.User)
-            {
-                latest = index;
-            }
-        }
+        int latest = LatestRequest(messages);
+        return latest < 0 || messages.Skip(latest + 1).SelectMany(message => message.Contents)
+                .Any(content => content is FunctionCallContent { Name: "propose_plan" })
+            ? null
+            : NamedIn(messages[latest]);
+    }
 
-        if (latest < 0 || messages.Skip(latest + 1).SelectMany(message => message.Contents)
-                .Any(content => content is FunctionCallContent { Name: "propose_plan" }))
+    /// <summary>
+    /// The fleet-format plan file the user's latest message names, for a propose_plan call in answer to it. Measured:
+    /// even told to hand the file over, the planner once read ten project files and proposed a two-step plan of its
+    /// own for the file's first step, and FindTranscribed let it through because the step counts differed. A user who
+    /// names a plan file wants that plan, so the call gets the file's steps whatever the planner typed.
+    /// </summary>
+    public static string? NamedByLatestRequest(IReadOnlyList<ChatMessage> messages, IDictionary<string, object?> arguments)
+    {
+        if (arguments.TryGetValue("planFile", out object? given) && !string.IsNullOrWhiteSpace(given?.ToString()))
         {
             return null;
         }
 
-        foreach (string path in MentionedFiles(messages[latest]).Distinct(StringComparer.OrdinalIgnoreCase))
+        int latest = LatestRequest(messages);
+        return latest < 0 ? null : NamedIn(messages[latest])?.Path;
+    }
+
+    private static int LatestRequest(IReadOnlyList<ChatMessage> messages)
+    {
+        for (int index = messages.Count - 1; index >= 0; index--)
+        {
+            if (messages[index].Role == ChatRole.User)
+            {
+                return index;
+            }
+        }
+
+        return -1;
+    }
+
+    private static (string Path, int Steps)? NamedIn(ChatMessage request)
+    {
+        foreach (string path in MentionedFiles(request).Distinct(StringComparer.OrdinalIgnoreCase))
         {
             if (TryReadFleetPlan(path) is { } plan)
             {

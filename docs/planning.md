@@ -124,9 +124,10 @@ on, the cases its test must cover.
 - Other `##` sections after the steps (notes, an appendix) are ignored.
 
 When your message names a file in this format, the fleet checks it first and tells the planner to hand it over
-straight away, rather than reading around the project (which took a planner 13 file reads and 101 seconds). If the
-planner retypes a plan file instead of pointing at it, the fleet notices (the same number of steps as a plan file the
-user named or the planner read) and takes the steps from the file.
+straight away, rather than reading around the project (which took a planner 13 file reads and 101 seconds). Whatever
+the planner then proposes in answer to that message, the steps come from the file: a planner once proposed a two-step
+plan of its own for the file's first step. If the planner retypes a plan file it read, or one named earlier in the
+chat, the fleet notices (the same number of steps) and takes the steps from the file too.
 
 ## Leaving it overnight
 

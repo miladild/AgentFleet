@@ -181,6 +181,27 @@ public sealed class PlanFileTests : PlanTestBase
     }
 
     [Fact]
+    public void A_plan_of_its_own_proposed_in_answer_to_a_named_plan_file_gets_the_files_steps()
+    {
+        string file = Path.Combine(_project, "PLAN.md");
+        File.WriteAllText(file, Sample(_project));
+        var twoSteps = new Dictionary<string, object?> { ["title"] = "Add test runner", ["steps"] = JsonSerializer.SerializeToElement(new[] { new { title = "a" }, new { title = "b" } }) };
+        List<ChatMessage> turn =
+        [
+            new(ChatRole.User, $"Carry out the plan in {file}"),
+            new(ChatRole.Assistant, [new FunctionCallContent("c1", "read_file", new Dictionary<string, object?> { ["path"] = file })]),
+            new(ChatRole.Tool, [new FunctionResultContent("c1", "...")]),
+            new(ChatRole.Assistant, [new FunctionCallContent("c2", "propose_plan", twoSteps)])
+        ];
+
+        Assert.Equal(file, PlanFile.NamedByLatestRequest(turn, twoSteps));
+
+        // A planFile the planner gave is its own; a later request that names no file is about the plan as proposed.
+        Assert.Null(PlanFile.NamedByLatestRequest(turn, new Dictionary<string, object?>(twoSteps) { ["planFile"] = file }));
+        Assert.Null(PlanFile.NamedByLatestRequest([.. turn, new(ChatRole.User, "make step 2 heavy")], twoSteps));
+    }
+
+    [Fact]
     public async Task A_plan_file_that_would_fail_is_not_saved_and_the_user_is_told_what_to_change()
     {
         string file = Path.Combine(_project, "PLAN.md");
