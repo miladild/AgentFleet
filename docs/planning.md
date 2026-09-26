@@ -41,6 +41,10 @@ steps, and checks each step with a real command instead of trusting itself.
      also run sequentially. **The fleet runs every step's check itself**; only a pass marks the step done.
    - An attempt ends after 25 rounds of tool calls (`FLEET_PLAN_STEP_TOOL_ROUNDS`) or 20 minutes, whichever comes
      first, so a model going round in circles cannot hold a machine; the step's check then decides.
+   - In a git project, a tracked file that is deleted while a step runs, and that no step of the plan names, is put
+     back from git just before and just after the step's check, and the run log says which (a test a model wrote once
+     tidied up by deleting the project's own config file on every run). Outside git this protection does not exist, so
+     put a project under git before leaving a plan to run.
    - A failed check goes back to the model with the real output, up to three attempts. The first attempt runs on a machine
      of the step's own tier, which is what spreads a plan over your machines; after a failure the next attempts go to the
      strongest machine, because a small model rarely does better the second time (`FLEET_PLAN_CHEAP_ATTEMPTS=2` gives the

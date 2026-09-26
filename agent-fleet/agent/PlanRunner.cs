@@ -522,7 +522,7 @@ internal sealed partial class PlanRunner
             {
                 _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.CheckPassed, tier,
                     detail: step.Verify is null ? "No automatic check for this step." : $"`{step.Verify}` passed.");
-                _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.StepDone, tier, detail: StrayDetail(plan, step));
+                _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.StepDone, tier, detail: JoinNotes(StrayDetail(plan, step), result.Restored));
                 RecordStepDone(plan, step, verification, ViaNode(model.Summary));
                 return true;
             }
@@ -570,7 +570,7 @@ internal sealed partial class PlanRunner
             {
                 _store.AddEvent(plan.Id, step.Id, 1, RunEventKind.CheckPassed, step.Tier,
                     detail: step.Verify is null ? "No automatic check for this step." : $"`{step.Verify}` passed.");
-                _store.AddEvent(plan.Id, step.Id, 1, RunEventKind.StepDone, step.Tier, detail: StrayDetail(plan, step));
+                _store.AddEvent(plan.Id, step.Id, 1, RunEventKind.StepDone, step.Tier, detail: JoinNotes(StrayDetail(plan, step), check.Restored));
                 RecordStepDone(plan, step, verification, ViaNode(attempt.Summary));
             }
             else
@@ -745,6 +745,9 @@ internal sealed partial class PlanRunner
             .Select(file => Path.GetRelativePath(root, file))
             .ToArray();
     }
+
+    private static string JoinNotes(string first, string? second) =>
+        string.IsNullOrWhiteSpace(second) ? first : string.IsNullOrWhiteSpace(first) ? second : $"{first} {second}";
 
     private string StrayDetail(PlanRecord plan, PlanStep step)
     {
