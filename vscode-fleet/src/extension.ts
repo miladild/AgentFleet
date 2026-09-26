@@ -8,6 +8,7 @@ import {
   otherChatTurns,
   pickerMessageId,
   routePickerRequest,
+  webUiBase,
   workspaceContext,
   type WireMessage,
 } from "./fleetLink";
@@ -29,6 +30,19 @@ const backendUrl = () => `${backendBase()}/`;
 const sessionsUrl = () => `${backendBase()}/api/sessions`;
 const plansUrl = () => `${backendBase()}/api/plans`;
 const fleetToolsUrl = () => `${backendBase()}/api/fleet-tools`;
+
+// The web UI, for the live view of a plan (see webUiBase).
+const webBase = () => webUiBase(backendBase(), vscode.workspace.getConfiguration("agentFleet").get<string>("webUrl", ""));
+
+// The live view in VS Code's own Simple Browser, beside the code; the system browser if that is turned off.
+async function watchPlanLive(planId?: string): Promise<void> {
+  const url = `${webBase()}/live${planId ? `/${planId}` : ""}`;
+  try {
+    await vscode.commands.executeCommand("simpleBrowser.show", url);
+  } catch {
+    await vscode.env.openExternal(vscode.Uri.parse(url));
+  }
+}
 
 const PLAN_MARKER = /\[plan:([0-9a-f]{32})\]/;
 
@@ -237,6 +251,9 @@ async function showStatusInChat(stream: vscode.ChatResponseStream): Promise<void
   } else if (plan.status === "awaiting-approval") {
     stream.button({ command: "agentFleet.approvePlan", title: "Approve and run", arguments: [plan.id] });
     stream.button({ command: "agentFleet.rejectPlan", title: "Reject", arguments: [plan.id] });
+  }
+  if (plan.status !== "awaiting-approval" && plan.status !== "rejected") {
+    stream.button({ command: "agentFleet.watchPlan", title: "Watch it live", arguments: [plan.id] });
   }
   stream.button({ command: "agentFleet.showPlan", title: "Open the report", arguments: [plan.id] });
 
@@ -1411,10 +1428,13 @@ export function activate(context: vscode.ExtensionContext) {
       }
       const choice = await vscode.window.showInformationMessage(
         "Plan approved. It runs in the background across your machines, each step checked before the next one starts. Ask @fleet /status any time.",
+        "Watch it live",
         "Show status",
       );
+      if (choice === "Watch it live") await watchPlanLive(planId);
       if (choice === "Show status") await showPlanStatus(planId);
     }),
+    vscode.commands.registerCommand("agentFleet.watchPlan", (planId?: string) => watchPlanLive(typeof planId === "string" ? planId : undefined)),
     vscode.commands.registerCommand("agentFleet.rejectPlan", async (planId: string) => {
       const res = await planAction(planId, "reject");
       if (res?.ok) void vscode.window.showInformationMessage("Plan rejected. Nothing was changed.");

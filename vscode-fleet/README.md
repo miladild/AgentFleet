@@ -84,6 +84,13 @@ which machine did what, the files changed) with **Stop it**, or **Approve and
 resume** when it is blocked. The web UI's **Plans** button shows the same.
 Typing `approve` in the chat also approves the pending plan.
 
+**Watch it live** (under `@fleet /status`, after approving, or the command
+**Agent Fleet: Watch the running plan live**) opens the web UI's live view of
+the plan in VS Code's Simple Browser: the steps as a pipeline, the machine on
+each, and a log of what they do, updated every two seconds. The web UI is looked
+for on the backend's machine at port 3000; `agentFleet.webUrl` sets another
+address.
+
 ## A plan made with Copilot
 
 Work the plan out with Copilot, then hand it over in one of two ways.

@@ -53,7 +53,29 @@ export function SessionPanel() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [livePlans, setLivePlans] = useState<Record<string, { planId: string; title: string; status: string }>>({});
   const hydratedRef = useRef(false);
+
+  // Conversations that carried a plan get a link to its live view (the newest plan of each).
+  useEffect(() => {
+    let stopped = false;
+    const load = () =>
+      fetch("/api/live/sessions", { cache: "no-store" })
+        .then((res) => (res.ok ? res.json() : []))
+        .then((rows: { contextId: string; planId: string; title: string; status: string }[]) => {
+          if (stopped) return;
+          const byContext: Record<string, { planId: string; title: string; status: string }> = {};
+          for (const row of rows) byContext[row.contextId] ??= { planId: row.planId, title: row.title, status: row.status };
+          setLivePlans(byContext);
+        })
+        .catch(() => {});
+    load();
+    const interval = setInterval(load, 20_000);
+    return () => {
+      stopped = true;
+      clearInterval(interval);
+    };
+  }, []);
   const skipNextAutosaveRef = useRef(false);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -208,6 +230,22 @@ export function SessionPanel() {
             >
               <span className="truncate text-neutral-200">{session.title}</span>
               <span className="flex items-center gap-2 shrink-0">
+                {livePlans[session.id] && (
+                  <a
+                    href={`/live/${livePlans[session.id].planId}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    title={`Watch "${livePlans[session.id].title}" live (${livePlans[session.id].status})`}
+                    className={`text-[11px] px-1.5 rounded border ${
+                      livePlans[session.id].status === "running"
+                        ? "border-cyan-400/60 text-cyan-300 animate-pulse"
+                        : "border-neutral-700 text-neutral-400 hover:text-cyan-300"
+                    }`}
+                  >
+                    ◉ live
+                  </a>
+                )}
                 <span className="text-xs text-neutral-500">{relativeTime(session.updatedAtUtc)}</span>
                 <button
                   type="button"

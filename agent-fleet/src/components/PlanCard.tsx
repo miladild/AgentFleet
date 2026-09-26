@@ -252,7 +252,20 @@ export function PlanCard({ planId }: { planId: string }) {
             <div className="text-[11px] font-mono text-neutral-500 truncate">{plan.workingDirectory}</div>
           )}
         </div>
-        <span className={`shrink-0 text-[11px] px-2 py-0.5 rounded-full border ${status.className}`}>{status.text}</span>
+        <span className="shrink-0 flex items-center gap-2">
+          {plan.status !== "awaiting-approval" && plan.status !== "rejected" && (
+            <a
+              href={`/live/${plan.id}`}
+              target="_blank"
+              rel="noreferrer"
+              title="Watch the run live in a page of its own"
+              className="text-[11px] px-2 py-0.5 rounded-full border border-cyan-400/50 text-cyan-300 hover:bg-cyan-400/10"
+            >
+              ◉ Live
+            </a>
+          )}
+          <span className={`text-[11px] px-2 py-0.5 rounded-full border ${status.className}`}>{status.text}</span>
+        </span>
       </div>
 
       <div className="px-3 py-2 space-y-3">

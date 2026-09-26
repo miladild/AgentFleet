@@ -179,3 +179,19 @@ export function asksToRunPlan(prompt: string): boolean {
     )
   );
 }
+
+/**
+ * The web UI's address for the live view of a plan: the setting when there is one, else the backend's machine on
+ * port 3000, where Install-Autostart puts the web UI.
+ */
+export function webUiBase(backendBase: string, configured: string): string {
+  const setting = configured.trim();
+  if (setting) return setting.replace(/\/+$/, "");
+  try {
+    const url = new URL(backendBase);
+    url.port = "3000";
+    return url.origin;
+  } catch {
+    return "http://localhost:3000";
+  }
+}
