@@ -3,7 +3,7 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { PlanStep } from "../PlanCard";
 import { useLiveFeed, type LiveNode, type LivePlan, type LogLine, type StepActivity } from "./useLiveFeed";
-import { blockOf, stepFailures, stepTiers, type Why } from "./why";
+import { blockOf, stepFailures, stepTiers, withRunAttempts, type Why } from "./why";
 
 // ---------- colours and helpers ----------
 
@@ -383,7 +383,7 @@ const StepNode = memo(function StepNode({
         <span className="act" title={failure && step.status === "failed" ? `${failure.short}\n\n${failure.hint}` : footer}>
           {footer}
         </span>
-        {(step.attempts > 1 || step.status === "failed") && (
+        {(step.attempts > 1 || (step.status === "failed" && step.attempts > 0)) && (
           <span className="tries" title={`${step.attempts} of 3 attempts used`}>
             ↻ {step.attempts}/3
           </span>
@@ -813,7 +813,7 @@ function PlanBanner({ plan, onInspect }: { plan: LivePlan; onInspect: (id: numbe
         )}
         {!stopped && step && (
           <span className="muted">
-            {step.attempts} of 3 attempts{tiers.length > 0 ? ` · ${tiers.join(" → ")}` : ""}
+            {step.attempts > 0 ? `${step.attempts} of 3 attempts` : "no attempt spent"}{tiers.length > 0 ? ` · ${tiers.join(" → ")}` : ""}
           </span>
         )}
       </div>
@@ -896,7 +896,8 @@ function useNewer(plan: LivePlan | null, following: boolean): LiveCurrent | null
  * page is /live, which moves on by itself to whatever the fleet does next.
  */
 export function LiveRun({ planId, following = false }: { planId: string; following?: boolean }) {
-  const { plan, nodes, activity, log, error, connected } = useLiveFeed(planId);
+  const { plan: fed, nodes, activity, log, error, connected } = useLiveFeed(planId);
+  const plan = useMemo(() => (fed ? withRunAttempts(fed) : null), [fed]);
   const colorOf = useMachineColors(nodes);
   const reducedMotion = useReducedMotion();
   const [selected, setSelected] = useState<number | null>(null);

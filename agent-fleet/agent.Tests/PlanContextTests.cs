@@ -480,6 +480,59 @@ public sealed class PlanContextTests : ContextTestBase
     }
 
     [Fact]
+    public async Task A_step_retried_after_its_plan_blocked_is_told_what_went_wrong_and_gets_three_fresh_attempts()
+    {
+        // Measured: after "retry" on a blocked plan, the step's first attempt had nothing of the failure in its prompt,
+        // and its attempt count went on from three ("4 of 3").
+        PlanRecord plan = Approved(Plans, Step("Write the slug helper", "a.txt"));
+        bool fixedNow = false;
+        var tools = new PlanTools(Plans, Valid, (command, _, _) => Task.FromResult(
+            command.StartsWith("git ", StringComparison.Ordinal) || fixedNow
+                ? "Exit code: 0\n--- stdout ---\nok"
+                : "Exit code: 1\n--- stdout ---\nnot ok 1 - slug keeps accents"), Journal);
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            File.WriteAllText(File1, "slug");
+            return Task.FromResult("Done.");
+        });
+        PlanRunner Runner() => new(Plans, tools, agent, NullLogger.Instance,
+            recorder: new PlanContextRecorder(Store, Plans, NullLogger.Instance), journal: Journal);
+
+        await Runner().RunPlanAsync(plan.Id, default);
+        Assert.Equal(PlanStatus.Blocked, Plans.Get(plan.Id)!.Status);
+        Assert.Equal(3, Plans.Get(plan.Id)!.Steps[0].Attempts);
+
+        fixedNow = true;
+        Plans.Approve(plan.Id);
+        await Runner().RunPlanAsync(plan.Id, default);
+
+        string resumed = agent.Calls[3].Prompt;
+        Assert.Contains("tried before and did not pass", resumed);
+        Assert.Contains("slug keeps accents", resumed);
+        PlanRecord after = Plans.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.Equal(1, after.Steps[0].Attempts);
+        Assert.Contains(after.Events!, e => e.Kind == RunEventKind.AttemptStarted && e.Detail.Contains("last failure"));
+    }
+
+    [Fact]
+    public async Task A_skipped_step_hands_over_to_the_next_one_and_says_its_check_never_ran()
+    {
+        PlanRecord plan = Approved(Plans, Step("Write a", "a.txt"), Step("Write b", "b.txt"));
+        Plans.Update(plan.Id, current => current with { Status = PlanStatus.Blocked });
+        PlanRunner runner = Runner(new FakeStepAgent((_, _, _) => Task.FromResult("ok")));
+
+        runner.SkipStep(plan.Id, 1);
+
+        string contextId = Plans.Get(plan.Id)!.ContextId!;
+        HandoffEnvelope handoff = Store.LatestHandoff(contextId, FleetPlanContext.StepTaskId(plan.Id, 2))!.Envelope;
+        Assert.Equal(FleetPlanContext.StepTaskId(plan.Id, 2), handoff.TaskId);
+        Assert.StartsWith("Do step 2", handoff.NextAction);
+        Assert.Contains("skipped by the user and its check was NOT run", Assert.Single(handoff.VerificationEvidence));
+        Assert.Contains(handoff.CompletedWork, line => line.Contains("Skipped by the user"));
+    }
+
+    [Fact]
     public void Only_a_stopped_or_blocked_plan_can_skip_a_step()
     {
         PlanRecord plan = Approved(Plans, Step("Write a", "a.txt"));
