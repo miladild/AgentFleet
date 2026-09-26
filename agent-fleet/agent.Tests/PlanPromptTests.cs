@@ -52,6 +52,46 @@ public sealed class PlanPromptTests : PlanTestBase
         Assert.Contains("keeps the process alive", prompt);
     }
 
+    // Replies with the given texts in turn and remembers what it was sent.
+    private sealed class Replies(params string[] texts) : Microsoft.Extensions.AI.IChatClient
+    {
+        public readonly List<List<Microsoft.Extensions.AI.ChatMessage>> Sent = [];
+
+        public Task<Microsoft.Extensions.AI.ChatResponse> GetResponseAsync(IEnumerable<Microsoft.Extensions.AI.ChatMessage> messages, Microsoft.Extensions.AI.ChatOptions? options = null, CancellationToken cancellationToken = default)
+        {
+            Sent.Add(messages.ToList());
+            return Task.FromResult(new Microsoft.Extensions.AI.ChatResponse(new Microsoft.Extensions.AI.ChatMessage(Microsoft.Extensions.AI.ChatRole.Assistant, texts[Sent.Count - 1])));
+        }
+
+        public async IAsyncEnumerable<Microsoft.Extensions.AI.ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<Microsoft.Extensions.AI.ChatMessage> messages, Microsoft.Extensions.AI.ChatOptions? options = null, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            Microsoft.Extensions.AI.ChatResponse response = await GetResponseAsync(messages, options, cancellationToken);
+            yield return new Microsoft.Extensions.AI.ChatResponseUpdate(Microsoft.Extensions.AI.ChatRole.Assistant, response.Text);
+        }
+
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+
+        public void Dispose()
+        {
+        }
+    }
+
+    [Fact]
+    public async Task A_step_whose_model_did_nothing_is_asked_once_more_in_the_same_session()
+    {
+        var idle = new Replies("", "Added the backoff.");
+        string summary = await new FleetStepAgent(new Microsoft.Agents.AI.ChatClientAgent(idle)).RunStepAsync("Do step 3.", "standard", default);
+
+        Assert.Equal("Added the backoff.", summary);
+        Assert.Equal(2, idle.Sent.Count);
+        Assert.Contains("Do step 3.", idle.Sent[1].Select(message => message.Text)); // same session: the step is still there
+        Assert.Equal(FleetStepAgent.Nudge, idle.Sent[1][^1].Text);
+
+        var busy = new Replies("Done.");
+        Assert.Equal("Done.", await new FleetStepAgent(new Microsoft.Agents.AI.ChatClientAgent(busy)).RunStepAsync("Do step 4.", "light", default));
+        Assert.Single(busy.Sent);
+    }
+
     [Fact]
     public void A_steps_commands_run_in_its_project_folder_and_the_prompt_says_so()
     {

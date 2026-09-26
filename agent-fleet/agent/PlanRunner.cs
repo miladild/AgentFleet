@@ -21,6 +21,10 @@ internal interface IStepAgent
 /// </summary>
 internal sealed class FleetStepAgent(AIAgent agent) : IStepAgent
 {
+    internal const string Nudge =
+        "You have not changed anything yet, and the fleet will now run the step's check. Use your tools to carry out the " +
+        "step: read the files it names, then write or edit them.";
+
     public async Task<string> RunStepAsync(string prompt, string tier, CancellationToken cancellationToken)
     {
         AgentSession session = await agent.CreateSessionAsync(cancellationToken);
@@ -29,6 +33,16 @@ internal sealed class FleetStepAgent(AIAgent agent) : IStepAgent
             AdditionalProperties = new AdditionalPropertiesDictionary { [FleetRoutingChatClient.RunnerTierKey] = tier }
         });
         AgentResponse response = await agent.RunAsync(prompt, session, options, cancellationToken);
+
+        // Measured: a worker spent 75 s on one reply and ended with no tool call and no text (a thinking model that
+        // only thought), which cost the step an attempt and sent it to the hub's queue. Asked once more in the same
+        // session, it gets on with it.
+        if (string.IsNullOrWhiteSpace(response.Text) &&
+            !response.Messages.SelectMany(message => message.Contents).Any(content => content is FunctionCallContent))
+        {
+            response = await agent.RunAsync(Nudge, session, options, cancellationToken);
+        }
+
         return response.Text;
     }
 }
