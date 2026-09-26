@@ -883,18 +883,22 @@ internal sealed partial class PlanRunner
                 "search_context finds anything said or done earlier in this plan.");
         }
 
+        // Measured: a small worker whose check already passed spent ten minutes creating, editing and deleting a file no
+        // step named. Where to stop, and what to leave alone, is said outright.
+        const string stayInScope = "Only create or change the files this step names, and a file the check's output points to; nothing else. ";
         text.AppendLine();
         text.AppendLine(parallelGroup
             ? "Use your tools to make only this step's changes. This step is running at the same time as independent steps " +
               "on other machines; do not run project-wide checks or the verify command while those edits are in progress. " +
+              stayInScope +
               "The runner waits until every group member finishes, then runs the checks. Follow the plan exactly and reply " +
               "with one short sentence saying what you changed."
             : "Use your tools to do the work: prefer edit_file for existing files, write_file for new ones, run_command to try things. " +
-              "Follow the plan exactly, including the framework or library it names. " +
+              "Follow the plan exactly, including the framework or library it names. " + stayInScope +
               (step.Verify is null
-                  ? string.Empty
-                  : "Run the check yourself with run_command before you finish, so you see what the fleet will see. ") +
-              "When you are finished, reply with one short sentence saying what you did.");
+                  ? "When you are finished, reply with one short sentence saying what you did."
+                  : "Run the check yourself with run_command before you finish, so you see what the fleet will see. As soon as it " +
+                    "passes, stop: reply with one short sentence saying what you did."));
         text.AppendLine(FleetPlanStore.Marker(plan.Id));
         return text.ToString();
     }
