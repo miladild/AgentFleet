@@ -138,6 +138,47 @@ internal sealed partial class PlanTools
                FleetPlanStore.ToMarkdown(plan);
     }
 
+    /// <summary>
+    /// propose_plan for a plan file the user pointed to: the steps come from the file exactly as written (see
+    /// PlanFile), then get the same review, store and approval as any other plan.
+    /// </summary>
+    public async Task<string> ProposePlanFromFileAsync(string planFile, CancellationToken cancellationToken)
+    {
+        PlanFileContent content;
+        try
+        {
+            content = PlanFile.Read(planFile);
+        }
+        catch (Exception exception) when (exception is FormatException or IOException or UnauthorizedAccessException)
+        {
+            return $"The plan file could not be read: {exception.Message} Use propose_plan with the steps instead, " +
+                   "or ask the user for the right file.";
+        }
+
+        string result = await ProposePlanAsync(
+            content.Title,
+            content.Goal,
+            content.WorkingDirectory,
+            JsonSerializer.SerializeToElement(content.Assumptions),
+            openQuestions: null,
+            JsonSerializer.SerializeToElement(content.Risks),
+            diagram: null,
+            JsonSerializer.SerializeToElement(content.Steps.Select(step => new
+            {
+                title = step.Title,
+                detail = step.Detail,
+                files = step.Files ?? [],
+                verify = step.Verify,
+                tier = step.Tier,
+                parallelGroup = step.ParallelGroup
+            })),
+            cancellationToken);
+
+        return result.StartsWith("Plan saved", StringComparison.Ordinal)
+            ? result
+            : result.Replace("call propose_plan again with the whole plan", "tell the user what to change in the plan file");
+    }
+
     /// <summary>The same review propose_plan does, without saving anything: for a plan written outside the fleet.</summary>
     public IReadOnlyList<string> Review(string? workingDirectory, JsonElement? steps)
     {

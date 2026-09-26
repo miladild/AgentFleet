@@ -174,9 +174,15 @@ internal static partial class PlanGate
         only read-only tools are available to you until the user approves a plan. Do not write files, run commands
         or edit code in this phase, not even as an example: describe the work in the plan instead.
 
-        If the conversation already holds a plan the user worked out (for example with GitHub Copilot earlier in the
-        chat), do not design a new one: keep its steps, their order and its decisions, read the files it names to
-        confirm them, and turn it into propose_plan steps with real checks and tiers.
+        If the user points to a plan file written in the fleet's plan format ("## Step 1: title" sections with
+        "- Tier:", "- Files:" and "- Check:" lines), call propose_plan with only title and planFile (the file's full
+        path) straight away: the fleet reads every step from the file exactly as written. If propose_plan says the
+        plan was not saved, tell the user what to change in the file; do not rewrite it yourself.
+        If the user brings a plan in another form (earlier in the chat, for example with GitHub Copilot, or in a file
+        that is not in that format, which you read first), do not design a new one: keep its steps, their order, its
+        decisions, its tiers, parallel groups and checks, and copy each step's instructions into detail in full,
+        because the machine that runs a step sees only that step. Read the files it names to confirm them, and add a
+        real check or a tier only where the plan has none.
 
         Work in this order:
         1. Explore. Use read_file, list_directory, find_files and search_files (and web_search or documentation
@@ -207,7 +213,8 @@ internal static partial class PlanGate
            spread over the machines instead of queuing on one.
            Add a Mermaid diagram only when the change affects how several parts fit together (a flowchart,
            sequenceDiagram or classDiagram, with every node label in double quotes); skip it for small tasks.
-           Keep the plan compact: at most eight steps, one or two sentences of detail each. Send each list as a
+           Keep a plan you design compact: at most eight steps, one or two sentences of detail each (a plan the user
+           brought keeps its own detail). Send each list as a
            real JSON array (steps as an array of objects), not as text.
         4. When propose_plan returns, stop. Tell the user in two or three sentences that the plan is ready to review
            and approve. Do not start the work. If it says the plan was NOT saved, fix what it names and call

@@ -137,6 +137,7 @@ set them in your user environment variables. For a Windows service set them on t
 | `FLEET_HEALTH_PROBE_TIMEOUT_SECONDS` | 3 | Health probe timeout (1 to 30) |
 | `FLEET_HEALTH_CACHE_SECONDS` | 10 | How often nodes are probed (1 to 300) |
 | `SHELL_EXECUTION_TIMEOUT_SECONDS` | 120 | How long one `run_command` may run |
+| `FLEET_PLAN_STEP_TOOL_ROUNDS` | 25 | How many rounds of tool calls one attempt at a plan step may make before it ends and the step's check decides (5 to 200) |
 | `FLEET_PLAN_CHEAP_ATTEMPTS` | 1 | How many of a plan step's three attempts run on a machine of the step's own tier before the rest go to the strongest machine |
 | `FLEET_CONTEXT_LENGTH` | 32768 | The most tokens of context a machine is asked for when it does not set `contextLength` |
 | `SANDBOX_*` | | The same settings as the `sandbox` section, used when the file does not give them |

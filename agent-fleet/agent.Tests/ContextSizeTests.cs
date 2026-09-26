@@ -55,7 +55,7 @@ public sealed class ContextSizeTests
         Assert.Equal(8192, small.AdditionalProperties!["num_ctx"]);
         Assert.Equal(0.2f, small.Temperature);
 
-        ChatOptions big = await client.WithContextAsync(Text(60_000), null, default); // about 20000 tokens plus room to answer
+        ChatOptions big = await client.WithContextAsync(Text(50_000), null, default); // about 20000 tokens plus room to answer
         Assert.Equal(24576, big.AdditionalProperties!["num_ctx"]);
         Assert.Equal(1, show.Calls); // The model's limit is looked up once.
     }
@@ -65,7 +65,7 @@ public sealed class ContextSizeTests
     {
         ContextSizeChatClient client = Client("{}", 32768, out _);
 
-        await client.WithContextAsync(Text(60_000), null, default);
+        await client.WithContextAsync(Text(50_000), null, default);
         ChatOptions next = await client.WithContextAsync(Text(100), null, default);
 
         Assert.Equal(24576, next.AdditionalProperties!["num_ctx"]);
@@ -86,7 +86,7 @@ public sealed class ContextSizeTests
     public async Task The_tool_list_counts_towards_what_a_request_needs()
     {
         ContextSizeChatClient client = Client("{}", 32768, out _);
-        AITool[] tools = Enumerable.Range(0, 30).Select(i => (AITool)AIFunctionFactory.Create(() => "x", $"tool_{i}", new string('d', 1000))).ToArray();
+        AITool[] tools = Enumerable.Range(0, 30).Select(i => (AITool)AIFunctionFactory.Create(() => "x", $"tool_{i}", new string('d', 800))).ToArray();
 
         ChatOptions sized = await client.WithContextAsync(Text(100), new ChatOptions { Tools = tools }, default);
 
@@ -101,6 +101,105 @@ public sealed class ContextSizeTests
         Assert.Equal(4096, (await client.WithContextAsync(Text(100), null, default)).MaxOutputTokens);
         Assert.Equal(ContextSizeChatClient.MaxAnswerTokens, (await client.WithContextAsync(Text(60_000), null, default)).MaxOutputTokens);
         Assert.Equal(100, (await client.WithContextAsync(Text(100), new ChatOptions { MaxOutputTokens = 100 }, default)).MaxOutputTokens);
+    }
+
+    // Answers with a prompt size the way Ollama reports it, one reply per call.
+    private sealed class Reports(params long[] promptTokens) : IChatClient
+    {
+        public readonly List<int> Sizes = [];
+        public Action<IReadOnlyList<ChatMessage>>? Seen;
+
+        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+        {
+            Seen?.Invoke(messages.ToList());
+            Sizes.Add((int)options!.AdditionalProperties!["num_ctx"]!);
+            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, $"answer {Sizes.Count}"))
+            {
+                Usage = new UsageDetails { InputTokenCount = promptTokens[Sizes.Count - 1] }
+            });
+        }
+
+        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            ChatResponse response = await GetResponseAsync(messages, options, cancellationToken);
+            yield return new ChatResponseUpdate(ChatRole.Assistant, [new TextContent(response.Text), new UsageContent(response.Usage!)]);
+        }
+
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+
+        public void Dispose()
+        {
+        }
+    }
+
+    private static ContextSizeChatClient Client(IChatClient inner) =>
+        new(inner, new HttpClient(new Show("{}")) { BaseAddress = new Uri("http://node:11434/") }, "m", 32768, NullLogger.Instance);
+
+    [Fact]
+    public async Task A_prompt_that_filled_the_window_is_asked_again_with_a_bigger_one_and_later_prompts_get_more_room()
+    {
+        // 10000 characters is 4000 tokens by estimate, so 8192 is asked for; Ollama says the prompt filled it.
+        var inner = new Reports(8000, 9000, 9000);
+        ContextSizeChatClient client = Client(inner);
+
+        ChatResponse answer = await client.GetResponseAsync(Text(10_000));
+
+        Assert.Equal([8192, 16384], inner.Sizes);
+        Assert.Equal("answer 2", answer.Text);
+        Assert.True(client.Scale > 2);
+
+        // The next request of the same size asks for the bigger window straight away.
+        await client.GetResponseAsync(Text(10_000));
+        Assert.Equal(16384, inner.Sizes[^1]);
+    }
+
+    [Fact]
+    public async Task A_prompt_with_room_to_spare_is_not_asked_again_and_a_streamed_one_teaches_the_next_request()
+    {
+        var calm = new Reports(3000);
+        await Client(calm).GetResponseAsync(Text(10_000));
+        Assert.Equal([8192], calm.Sizes);
+
+        var streamed = new Reports(8000, 9000);
+        ContextSizeChatClient client = Client(streamed);
+        await foreach (ChatResponseUpdate _ in client.GetStreamingResponseAsync(Text(10_000)))
+        {
+        }
+
+        Assert.Equal([8192], streamed.Sizes); // too late to ask again
+        await client.GetResponseAsync(Text(10_000));
+        Assert.Equal(16384, streamed.Sizes[^1]);
+    }
+
+    [Fact]
+    public async Task A_conversation_that_outgrows_the_window_loses_old_tool_output_but_never_its_task()
+    {
+        string task = "Implement the holidays. " + new string('t', 2_000);
+        List<ChatMessage> conversation =
+        [
+            new(ChatRole.System, "You carry out one plan step."),
+            new(ChatRole.User, task)
+        ];
+        for (int round = 0; round < 20; round++)
+        {
+            conversation.Add(new ChatMessage(ChatRole.Assistant, [new FunctionCallContent($"c{round}", "write_file", new Dictionary<string, object?> { ["path"] = "src/a.ts", ["content"] = new string('w', 3_000) })]));
+            conversation.Add(new ChatMessage(ChatRole.Tool, [new FunctionResultContent($"c{round}", new string('r', 4_000))]));
+        }
+
+        var inner = new Reports(10_000);
+        ContextSizeChatClient client = new(inner, new HttpClient(new Show("{}")) { BaseAddress = new Uri("http://node:11434/") }, "m", 32768, NullLogger.Instance);
+        IReadOnlyList<ChatMessage> sent = null!;
+        inner.Seen = messages => sent = messages;
+
+        await client.GetResponseAsync(conversation);
+
+        Assert.Equal(32768, inner.Sizes.Single());
+        Assert.True(ContextSizeChatClient.EstimateTokens(sent, null) + 4096 <= 32768);
+        Assert.Equal(conversation.Count, sent.Count); // every call keeps its result
+        Assert.Equal(task, sent[1].Text);
+        Assert.Equal(new string('r', 4_000), ((FunctionResultContent)sent[^1].Contents[0]).Result); // the latest turns stay whole
+        Assert.Contains("removed to keep this conversation", ((FunctionResultContent)sent[3].Contents[0]).Result!.ToString());
+        Assert.Equal(new string('r', 4_000), ((FunctionResultContent)conversation[3].Contents[0]).Result); // the caller's list is untouched
     }
 
     [Fact]
