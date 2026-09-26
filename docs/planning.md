@@ -39,6 +39,8 @@ steps, and checks each step with a real command instead of trusting itself.
      instructions.
    - For a parallel group, the runner waits until all first attempts finish, then runs checks one at a time. Retries
      also run sequentially. **The fleet runs every step's check itself**; only a pass marks the step done.
+   - An attempt ends after 25 rounds of tool calls (`FLEET_PLAN_STEP_TOOL_ROUNDS`) or 20 minutes, whichever comes
+     first, so a model going round in circles cannot hold a machine; the step's check then decides.
    - A failed check goes back to the model with the real output, up to three attempts. The first attempt runs on a machine
      of the step's own tier, which is what spreads a plan over your machines; after a failure the next attempts go to the
      strongest machine, because a small model rarely does better the second time (`FLEET_PLAN_CHEAP_ATTEMPTS=2` gives the
@@ -66,6 +68,52 @@ You can work a plan out with Copilot (or any chat model in VS Code) and have the
 
 The first way keeps Copilot's wording and needs no planning on your machines; the second lets the fleet check the plan
 against the code first.
+
+## A plan file
+
+A plan written as a Markdown file in the format below is read by the fleet itself, so every step keeps its instructions
+exactly as written. That matters: the machine that runs a step sees only that step, and a planner model asked to copy a
+long plan shortens it. Point the fleet at the file, for example `@fleet /plan carry out the plan in C:\src\board\PLAN.md`;
+the proposal comes back for approval as usual, after the same review as any plan.
+
+```markdown
+# Plan: a reliable, tested board
+
+Working directory: `C:\src\board`
+
+Goal: one paragraph on what the plan achieves.
+
+Decisions:
+- Tests use node:test through tsx: no new dependencies.
+
+## Step 1: Add a test runner
+
+- Tier: light
+- Files: `package.json`, `test/smoke.test.ts`
+- Check: `npm test`
+
+Everything after those lines is the step's instructions, kept as written: what to change, the names other steps rely
+on, the cases its test must cover.
+
+## Step 2: Holidays
+
+- Tier: heavy
+- Parallel group: core
+- Files: `src/server/marketHours.ts`, `test/marketHours.test.ts`
+- Check: `node --import tsx --test test/marketHours.test.ts`
+
+...
+```
+
+- `Working directory` is optional (the file's folder otherwise); so are `Goal`, `Decisions` (or `Assumptions`) and
+  `Risks`.
+- `Tier` is heavy, standard or light. Steps that share a `Parallel group` run at the same time on different machines:
+  give them different tiers and separate files.
+- `Check` is the command the fleet runs to decide whether the step worked. Name the files a step creates in `Files`.
+- Other `##` sections after the steps (notes, an appendix) are ignored.
+
+If the planner retypes a plan file instead of pointing at it, the fleet notices (the same number of steps as a plan file
+the user named or the planner read) and takes the steps from the file.
 
 ## Leaving it overnight
 
@@ -147,6 +195,13 @@ start of every request and a step's model could lose its task. A larger context 
 no longer fits runs partly on the processor and becomes much slower, so on a machine with a small card, lower its
 `contextLength` or give it a smaller model.
 
+A long step keeps growing: every tool call and its output stays in the conversation. When it would outgrow the most a
+machine may use, the fleet shortens the oldest tool outputs and the file contents of old calls, and keeps the
+instructions, the task and the latest turns whole; left to Ollama, the start of the conversation (the task) would go
+first. The size is estimated at 2.5 characters per token, the worst case measured on fleet traffic (tool calls full of
+paths and JSON). Ollama reports the real size of each prompt: when one turns out to have filled its window, the log
+says so, the request is asked again with a bigger window, and that machine's later requests are sized larger.
+
 ## What to expect from small local models
 
 They are noisy. Expect one to three attempts per step, occasionally a plan that needs a second proposal, and now and then
@@ -154,7 +209,7 @@ a step that blocks. That is what the retry loop and the checks are for. A block 
 confident wrong answer. The strongest machine plans; ordinary steps start on the cheaper machines, and a step that fails
 there moves to the strongest. Planning on a large model can take a few minutes, especially if the model does not fit in
 graphics memory. A worker model that describes what it would do ("I'll read the file...") instead of calling its tools
-is a sign it is too small for tool use: give that machine a model that handles tools well, such as `qwen2.5-coder:7b`.
+is a sign it is too small for tool use: give that machine a model that handles tools well, such as `ornith:9b`.
 
 ## Limits
 

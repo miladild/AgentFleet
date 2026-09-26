@@ -220,6 +220,7 @@ Dictionary<string, string> toolDescriptions = new(StringComparer.Ordinal)
         "support\" that language or framework. Not sandboxed - runs directly on the hub with the backend's own " +
         "permissions.",
     ["propose_plan"] = "Saves a plan for the user to review and approve before any change is made. Use it in plan mode after exploring the code. It does not start the work; the plan then waits for the user's approval. " +
+        "When the user points to a plan file in the fleet's plan format (\"## Step 1: title\" sections with \"- Tier:\", \"- Files:\" and \"- Check:\" lines), pass only title and planFile (its full path): the fleet reads the steps from the file exactly as written. " +
         "Arguments: title (short), goal (one or two sentences), workingDirectory (the project folder), assumptions (array of strings), openQuestions (array of strings, empty if none), " +
         "risks (array of strings), diagram (optional Mermaid source with every node label in double quotes), and steps: an array of objects, each with title, detail (specific enough for a smaller model to do without the rest of the conversation), " +
         "files (array of the files it touches), verify (a shell command that fails if the step did not work, such as \"dotnet build\" or \"node --test\"), tier (heavy, standard or light), and optional parallelGroup. " +
@@ -374,8 +375,11 @@ AITool proposePlanTool = AIFunctionFactory.Create(
         [Description("Array of strings: what could go wrong")] System.Text.Json.JsonElement? risks = null,
         string? diagram = null,
         [Description("Array of step objects, each with title, detail, files (array), verify and tier")] System.Text.Json.JsonElement? steps = null,
+        [Description("Full path of a plan file the user pointed to, written in the fleet's plan format (\"## Step 1: title\" sections with Tier, Files and Check lines). The fleet reads every step from the file exactly as written; leave steps empty.")] string? planFile = null,
         CancellationToken cancellationToken = default) =>
-        planTools.ProposePlanAsync(title, string.IsNullOrWhiteSpace(goal) ? title : goal, workingDirectory, assumptions, openQuestions, risks, diagram, steps, cancellationToken),
+        !string.IsNullOrWhiteSpace(planFile)
+            ? planTools.ProposePlanFromFileAsync(planFile, cancellationToken)
+            : planTools.ProposePlanAsync(title, string.IsNullOrWhiteSpace(goal) ? title : goal, workingDirectory, assumptions, openQuestions, risks, diagram, steps, cancellationToken),
     name: "propose_plan",
     description: toolDescriptions["propose_plan"]);
 
@@ -521,6 +525,13 @@ void RecordToolCall(FunctionInvocationContext context, string toolName, string r
     contextJournal.RecordToolExecution(context.CallContent?.CallId, toolName, arguments, result, isError);
 }
 
+// How many tool rounds one attempt at a plan step gets. Measured: a small worker wrote and ran the same test file for more
+// than ten minutes, and the hub once spent 34 rounds on one step. After the budget the attempt ends and the step's own
+// check decides; a failure goes to the next attempt with the real output, on the strongest machine.
+int planStepToolRounds = int.TryParse(builder.Configuration["FLEET_PLAN_STEP_TOOL_ROUNDS"], out int stepRounds) && stepRounds is >= 5 and <= 200
+    ? stepRounds
+    : 25;
+
 IChatClient agentClient = new ChatClientBuilder(fleetClient)
     // Outermost: the current tool list goes onto the request before anything looks for a tool by name.
     .Use(inner => new DynamicToolsChatClient(inner, toolRegistry, (messages, options, toolName) =>
@@ -554,6 +565,12 @@ IChatClient agentClient = new ChatClientBuilder(fleetClient)
                 }
             }
 
+            // A planner copying a plan file by hand shortens every step: read the steps from the file instead.
+            if (toolName == "propose_plan" && PlanFile.FindTranscribed(context.Messages, context.Arguments) is { } planFile)
+            {
+                context.Arguments["planFile"] = planFile;
+            }
+
             try
             {
                 object? result = await context.Function.InvokeAsync(context.Arguments, cancellationToken);
@@ -563,6 +580,12 @@ IChatClient agentClient = new ChatClientBuilder(fleetClient)
                 // again in one reply, and each proposal replaces the last, so a later, worse version won (measured: six
                 // proposals in one turn, the last a one-step plan). The plan itself is the answer the user sees.
                 if (toolName == "propose_plan" && result?.ToString()?.StartsWith("Plan saved", StringComparison.Ordinal) == true)
+                {
+                    context.Terminate = true;
+                }
+
+                // Iteration counts from 0: this ends the attempt after planStepToolRounds rounds of tool calls.
+                if (fromRunner && context.Iteration >= planStepToolRounds - 1)
                 {
                     context.Terminate = true;
                 }
