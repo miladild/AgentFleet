@@ -565,8 +565,11 @@ IChatClient agentClient = new ChatClientBuilder(fleetClient)
                 }
             }
 
-            // A planner copying a plan file by hand shortens every step: read the steps from the file instead.
-            if (toolName == "propose_plan" && PlanFile.FindTranscribed(context.Messages, context.Arguments) is { } planFile)
+            // A planner copying a plan file by hand shortens every step, and one has proposed a plan of its own instead of
+            // the file the user named: the steps come from the file.
+            if (toolName == "propose_plan" &&
+                (PlanFile.NamedByLatestRequest(context.Messages as IReadOnlyList<ChatMessage> ?? context.Messages.ToList(), context.Arguments) ??
+                 PlanFile.FindTranscribed(context.Messages, context.Arguments)) is { } planFile)
             {
                 context.Arguments["planFile"] = planFile;
             }
