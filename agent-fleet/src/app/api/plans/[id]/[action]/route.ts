@@ -1,7 +1,7 @@
 const BACKEND_URL = (process.env.AGENT_URL || "http://localhost:8000/").replace(/\/$/, "");
 
-// approve, reject and stop are POSTs; markdown and report are GETs. Only these actions are forwarded.
-const POST_ACTIONS = new Set(["approve", "reject", "stop"]);
+// approve, reject, stop and skip (?step=) are POSTs; markdown and report are GETs. Only these actions are forwarded.
+const POST_ACTIONS = new Set(["approve", "reject", "stop", "skip"]);
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string; action: string }> }) {
   const { id, action } = await params;

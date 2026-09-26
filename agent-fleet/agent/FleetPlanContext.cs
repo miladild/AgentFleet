@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 
 namespace AgentFleet;
@@ -102,6 +103,76 @@ internal static class FleetPlanContext
                 yield return path;
             }
         }
+    }
+
+    /// <summary>
+    /// A declared path such as "test/*.test.ts" names every file it matches. Measured: a step that ran the tests named
+    /// its files as that pattern, and the fleet looked for a file called "*.test.ts", so a check that passed all 22 tests
+    /// failed three times and blocked the plan.
+    /// </summary>
+    public static bool IsPattern(string path) => path.IndexOfAny(['*', '?']) >= 0;
+
+    /// <summary>Whether a declared path is there: a file, a folder, or for a pattern, at least one file it matches.</summary>
+    public static bool DeclaredExists(string declared) =>
+        IsPattern(declared) ? PatternFiles(declared).Any() : File.Exists(declared) || Directory.Exists(declared);
+
+    /// <summary>
+    /// Whether a declared path names this file: the file itself, a folder it is in, or a pattern it matches ("*" and "?"
+    /// stay inside one folder, "**" crosses folders).
+    /// </summary>
+    public static bool Names(string declared, string path)
+    {
+        StringComparison comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        string trimmed = Path.TrimEndingDirectorySeparator(declared);
+        if (IsPattern(trimmed))
+        {
+            return PatternRegex(trimmed).IsMatch(path.Replace('\\', '/'));
+        }
+
+        return string.Equals(trimmed, Path.TrimEndingDirectorySeparator(path), comparison) ||
+               path.StartsWith(trimmed + Path.DirectorySeparatorChar, comparison);
+    }
+
+    /// <summary>The files a pattern matches, looked for under the folder before its first wildcard.</summary>
+    public static IEnumerable<string> PatternFiles(string pattern)
+    {
+        int wildcard = pattern.IndexOfAny(['*', '?']);
+        int cut = pattern.LastIndexOfAny(['\\', '/'], Math.Max(0, wildcard));
+        if (cut <= 0)
+        {
+            return [];
+        }
+
+        Regex regex = PatternRegex(pattern);
+        return SnapshotFiles(pattern[..cut]).Where(file => regex.IsMatch(file.Replace('\\', '/'))).Order(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static Regex PatternRegex(string pattern)
+    {
+        string normalized = pattern.Replace('\\', '/');
+        var regex = new System.Text.StringBuilder("^");
+        for (int index = 0; index < normalized.Length; index++)
+        {
+            char character = normalized[index];
+            if (character == '*' && index + 1 < normalized.Length && normalized[index + 1] == '*')
+            {
+                // "**/" is any number of folders, none included.
+                bool slash = index + 2 < normalized.Length && normalized[index + 2] == '/';
+                regex.Append(slash ? "(?:.*/)?" : ".*");
+                index += slash ? 2 : 1;
+            }
+            else
+            {
+                regex.Append(character switch
+                {
+                    '*' => "[^/]*",
+                    '?' => "[^/]",
+                    _ => Regex.Escape(character.ToString())
+                });
+            }
+        }
+
+        return new Regex(regex.Append('$').ToString(), (OperatingSystem.IsWindows() ? RegexOptions.IgnoreCase : RegexOptions.None) | RegexOptions.CultureInvariant);
     }
 }
 
@@ -308,9 +379,11 @@ internal sealed class PlanContextRecorder
         steps = plan.Steps.Select(s => new { s.Id, s.Status, s.Attempts }).ToArray()
     };
 
-    // The step's declared files that exist inside the project folder, not through a link.
+    // The step's declared files that exist inside the project folder, not through a link; a pattern stands for the files it matches.
     private static IEnumerable<string> ProjectFiles(PlanRecord plan, PlanStep step) =>
-        FleetPlanContext.DeclaredPaths(plan, step).Where(File.Exists);
+        FleetPlanContext.DeclaredPaths(plan, step)
+            .SelectMany(path => FleetPlanContext.IsPattern(path) ? FleetPlanContext.PatternFiles(path).Take(20) : File.Exists(path) ? [path] : [])
+            .Distinct(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
 
     private static string MediaTypeFor(string path) => Path.GetExtension(path).ToLowerInvariant() switch
     {

@@ -253,12 +253,12 @@ export function PlanCard({ planId }: { planId: string }) {
           )}
         </div>
         <span className="shrink-0 flex items-center gap-2">
-          {plan.status !== "awaiting-approval" && plan.status !== "rejected" && (
+          {plan.status !== "rejected" && (
             <a
               href={`/live/${plan.id}`}
               target="_blank"
               rel="noreferrer"
-              title="Watch the run live in a page of its own"
+              title="Watch it live in a page of its own: the plan, then its run"
               className="text-[11px] px-2 py-0.5 rounded-full border border-cyan-400/50 text-cyan-300 hover:bg-cyan-400/10"
             >
               ◉ Live

@@ -384,6 +384,111 @@ public sealed class PlanContextTests : ContextTestBase
     }
 
     [Fact]
+    public async Task A_step_that_names_a_pattern_its_files_already_match_passes_on_its_check()
+    {
+        // Measured: "Run all tests" named test/*.test.ts, the fleet looked for a file called "*.test.ts", and a check that
+        // passed all 22 tests failed three times and blocked the plan.
+        Directory.CreateDirectory(Path.Combine(_project, "test"));
+        File.WriteAllText(Path.Combine(_project, "test", "app.test.ts"), "test");
+        PlanRecord plan = Approved(Plans, Step("Run all tests", "test/*.test.ts"));
+        var agent = new FakeStepAgent((_, _, _) => Task.FromResult("All 22 tests passed."));
+
+        await Runner(agent).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(PlanStatus.Done, Plans.Get(plan.Id)!.Status);
+        Assert.Single(agent.Calls);
+    }
+
+    [Fact]
+    public async Task A_pattern_nothing_matches_yet_needs_a_matching_file_and_names_the_files_it_matches()
+    {
+        PlanRecord plan = Approved(Plans, Step("Write the tests", "test/**/*.test.ts"));
+        int calls = 0;
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            // The first attempt writes nothing; the second writes a test in a sub-folder.
+            if (++calls == 2)
+            {
+                Directory.CreateDirectory(Path.Combine(_project, "test", "server"));
+                File.WriteAllText(Path.Combine(_project, "test", "server", "slug.test.ts"), "test");
+            }
+
+            return Task.FromResult("Done.");
+        });
+
+        await Runner(agent).RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Plans.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.Equal(2, agent.Calls.Count);
+        Assert.Contains(after.Events!, e => e.Kind == RunEventKind.CheckFailed && e.Detail.Contains("*.test.ts"));
+        Assert.DoesNotContain(after.Events!, e => e.Kind == RunEventKind.StepDone && e.Detail.Contains("does not name"));
+    }
+
+    [Fact]
+    public void A_pattern_names_the_files_it_matches_and_a_single_star_stays_in_its_folder()
+    {
+        string tests = Path.Combine(_project, "test");
+        Assert.True(FleetPlanContext.Names(Path.Combine(tests, "*.test.ts"), Path.Combine(tests, "app.test.ts")));
+        Assert.False(FleetPlanContext.Names(Path.Combine(tests, "*.test.ts"), Path.Combine(tests, "server", "app.test.ts")));
+        Assert.True(FleetPlanContext.Names(Path.Combine(tests, "**", "*.test.ts"), Path.Combine(tests, "app.test.ts")));
+        Assert.True(FleetPlanContext.Names(Path.Combine(tests, "**", "*.test.ts"), Path.Combine(tests, "server", "app.test.ts")));
+        Assert.False(FleetPlanContext.Names(Path.Combine(tests, "*.test.ts"), Path.Combine(tests, "app.ts")));
+        Assert.True(FleetPlanContext.Names(tests, Path.Combine(tests, "app.test.ts")));
+        Assert.False(FleetPlanContext.Names(Path.Combine(_project, "a.txt"), Path.Combine(_project, "a.txt.bak")));
+    }
+
+    [Fact]
+    public async Task A_check_that_never_finishes_blocks_the_plan_before_any_attempt_and_says_why()
+    {
+        File.WriteAllText(Path.Combine(_project, "package.json"), """{ "scripts": { "dev": "tsx watch src/index.ts" } }""");
+        PlanRecord plan = Plans.Approve(Plans.Create("Run it", "Run the project", _project, [], [], [], null, null,
+            [new PlanStepInput("Start the development server", "npm run dev", ["src/index.ts"], "npm run dev", "standard")]).Id)!;
+        var agent = new FakeStepAgent((_, _, _) => Task.FromResult("Started."));
+
+        await Runner(agent).RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Plans.Get(plan.Id)!;
+        Assert.Empty(agent.Calls);
+        Assert.Equal(PlanStatus.Blocked, after.Status);
+        Assert.Equal(0, after.Steps[0].Attempts);
+        PlanRunEvent blocked = Assert.Single(after.Events!, e => e.Kind == RunEventKind.PlanBlocked);
+        Assert.Contains("does not exit on its own", blocked.Detail);
+        Assert.Contains("Skip the step", blocked.Detail);
+    }
+
+    [Fact]
+    public async Task A_skipped_step_counts_as_done_and_the_plan_goes_on_with_the_next_one()
+    {
+        PlanRecord plan = Approved(Plans, Step("Write a", "a.txt"), Step("Write b", "b.txt"));
+        Plans.Update(plan.Id, current => current with { Status = PlanStatus.Blocked });
+
+        Assert.Equal(PlanStatus.Blocked, Plans.SkipStep(plan.Id, 1)!.Status);
+        PlanRecord resumed = Plans.Approve(plan.Id)!;
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            File.WriteAllText(Path.Combine(_project, "b.txt"), "b");
+            return Task.FromResult("Wrote b.");
+        });
+        await Runner(agent).RunPlanAsync(resumed.Id, default);
+
+        PlanRecord after = Plans.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.Contains("(2 of 2)", Assert.Single(agent.Calls).Prompt);
+        Assert.StartsWith("Skipped by the user", after.Steps[0].Note);
+        Assert.Contains(after.Events!, e => e.Kind == RunEventKind.StepSkipped && e.StepId == 1);
+    }
+
+    [Fact]
+    public void Only_a_stopped_or_blocked_plan_can_skip_a_step()
+    {
+        PlanRecord plan = Approved(Plans, Step("Write a", "a.txt"));
+
+        Assert.Equal(StepStatus.Pending, Plans.SkipStep(plan.Id, 1)!.Steps[0].Status);
+        Assert.Null(Plans.SkipStep(plan.Id, 9));
+    }
+
+    [Fact]
     public async Task A_file_that_already_existed_is_not_required_to_be_created_so_a_removal_step_can_pass()
     {
         File.WriteAllText(File1, "old");

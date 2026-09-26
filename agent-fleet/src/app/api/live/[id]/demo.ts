@@ -1,4 +1,4 @@
-import type { LiveEvent } from "./route";
+import type { LiveEvent } from "../record";
 
 // /live/demo: a made-up plan that runs on a loop of two and a half minutes, so the live view can be seen, and its
 // cost measured, without a real plan running. Nothing here touches the backend.
@@ -38,13 +38,13 @@ export function demoPayload(after: number) {
       const id = (cycleStart + second) * 10 + step.id;
       const node = failAt !== null && second > failAt ? "hub" : step.node;
       if (second === step.start || (failAt !== null && second === failAt + 1)) {
-        events.push({ id, at: at(second), step: step.id, kind: "route", node, text: `routed to ${node} (${step.tier})` });
+        events.push({ id, at: at(second), step: step.id, kind: "route", node, text: `model call on ${node} (${step.tier})` });
       } else if ((second - step.start) % 4 === 1) {
         const action = ACTIONS[(second + step.id) % ACTIONS.length];
         const target = action === "run_command" ? step.verify : step.files[(second / 4) % step.files.length | 0];
         events.push({ id, at: at(second), step: step.id, kind: "tool-call", node: null, text: `${action} ${target}` });
       } else if ((second - step.start) % 4 === 2) {
-        events.push({ id, at: at(second), step: step.id, kind: "tool-result", node: null, text: "Exit code: 0 --- stdout --- ok", ok: true });
+        events.push({ id, at: at(second), step: step.id, kind: "tool-result", node: null, text: "exit 0 · ok", ok: true });
       } else if ((second - step.start) % 8 === 3) {
         events.push({ id, at: at(second), step: step.id, kind: "assistant-output", node, text: `Working on ${step.title.toLowerCase()}.` });
       }

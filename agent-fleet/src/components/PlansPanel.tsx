@@ -123,7 +123,7 @@ export function PlansPanel() {
           href="/live"
           target="_blank"
           rel="noreferrer"
-          title="Watch the running plan live, in a page of its own"
+          title="Watch the fleet live in a page of its own: a plan being worked out, or one running"
           className="rounded-full px-4 py-2 text-sm font-medium bg-neutral-800 text-cyan-300 border border-cyan-500/40 hover:bg-neutral-700 transition-colors"
         >
           ◉ Live
@@ -227,7 +227,7 @@ export function PlansPanel() {
                         </span>
                       </span>
                     </button>
-                    {plan.status !== "awaiting-approval" && plan.status !== "rejected" && (
+                    {plan.status !== "rejected" && (
                       <a
                         href={`/live/${plan.id}`}
                         target="_blank"

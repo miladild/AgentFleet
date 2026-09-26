@@ -34,9 +34,10 @@ const fleetToolsUrl = () => `${backendBase()}/api/fleet-tools`;
 // The web UI, for the live view of a plan (see webUiBase).
 const webBase = () => webUiBase(backendBase(), vscode.workspace.getConfiguration("agentFleet").get<string>("webUrl", ""));
 
-// The live view in VS Code's own Simple Browser, beside the code; the system browser if that is turned off.
-async function watchPlanLive(planId?: string): Promise<void> {
-  const url = `${webBase()}/live${planId ? `/${planId}` : ""}`;
+// The live view in VS Code's own Simple Browser, beside the code; the system browser if that is turned off. A plan's
+// own page, a conversation's (its plan being worked out, then the plan), or whatever the fleet is doing.
+async function watchPlanLive(planId?: string, contextId?: string): Promise<void> {
+  const url = `${webBase()}/live${planId ? `/${planId}` : contextId ? `?context=${encodeURIComponent(contextId)}` : ""}`;
   try {
     await vscode.commands.executeCommand("simpleBrowser.show", url);
   } catch {
@@ -196,6 +197,7 @@ function showPlanProposal(stream: vscode.ChatResponseStream, resultText: string)
   stream.markdown(`\n\n---\n\n${markdown}\n\n`);
   stream.button({ command: "agentFleet.approvePlan", title: "Approve and run", arguments: [id] });
   stream.button({ command: "agentFleet.rejectPlan", title: "Reject", arguments: [id] });
+  stream.button({ command: "agentFleet.watchPlan", title: "Watch it live", arguments: [id] });
 }
 
 async function planAction(planId: string, action: "approve" | "reject" | "stop"): Promise<Response | null> {
@@ -252,7 +254,7 @@ async function showStatusInChat(stream: vscode.ChatResponseStream): Promise<void
     stream.button({ command: "agentFleet.approvePlan", title: "Approve and run", arguments: [plan.id] });
     stream.button({ command: "agentFleet.rejectPlan", title: "Reject", arguments: [plan.id] });
   }
-  if (plan.status !== "awaiting-approval" && plan.status !== "rejected") {
+  if (plan.status !== "rejected") {
     stream.button({ command: "agentFleet.watchPlan", title: "Watch it live", arguments: [plan.id] });
   }
   stream.button({ command: "agentFleet.showPlan", title: "Open the report", arguments: [plan.id] });
@@ -1184,6 +1186,11 @@ const handler: vscode.ChatRequestHandler = async (request, chatContext, stream, 
   } else if (request.command === "plan") {
     stream.progress("Planning: the strongest machine is reading the code. Nothing is changed until you approve the plan.");
   }
+  // While the strongest machine works out a plan there is nothing in the chat for minutes: the live view shows the
+  // files it reads as it goes, then the plan, then its run.
+  if (planMode) {
+    stream.button({ command: "agentFleet.watchPlan", title: "Watch it live", arguments: [null, contextId] });
+  }
 
   // Every VS Code Language Model Tool currently available - this includes tools
   // from any configured MCP server (VS Code surfaces MCP-provided tools through
@@ -1434,7 +1441,9 @@ export function activate(context: vscode.ExtensionContext) {
       if (choice === "Watch it live") await watchPlanLive(planId);
       if (choice === "Show status") await showPlanStatus(planId);
     }),
-    vscode.commands.registerCommand("agentFleet.watchPlan", (planId?: string) => watchPlanLive(typeof planId === "string" ? planId : undefined)),
+    vscode.commands.registerCommand("agentFleet.watchPlan", (planId?: string | null, contextId?: string) =>
+      watchPlanLive(typeof planId === "string" ? planId : undefined, typeof contextId === "string" ? contextId : undefined),
+    ),
     vscode.commands.registerCommand("agentFleet.rejectPlan", async (planId: string) => {
       const res = await planAction(planId, "reject");
       if (res?.ok) void vscode.window.showInformationMessage("Plan rejected. Nothing was changed.");

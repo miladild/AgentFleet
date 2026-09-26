@@ -1002,6 +1002,30 @@ app.MapPost("/api/plans/{id}/approve", (string id, bool exportToProject = false)
     }
 });
 
+// A blocked plan the user carries past one step: the step counts as done without its check, and with resume the
+// plan is approved again at once and goes on with the next step.
+app.MapPost("/api/plans/{id}/skip", (string id, int step, bool resume = false) =>
+{
+    PlanRecord? plan = planStore.Get(id);
+    if (plan is null || plan.Steps.All(candidate => candidate.Id != step))
+    {
+        return Results.NotFound();
+    }
+
+    if (plan.Status != PlanStatus.Blocked)
+    {
+        return Results.BadRequest(new { error = $"This plan is {plan.Status.Replace('-', ' ')}; only a stopped or blocked plan can skip a step." });
+    }
+
+    PlanRecord? skipped = planStore.SkipStep(id, step);
+    if (resume && skipped?.Status == PlanStatus.Blocked)
+    {
+        skipped = planStore.Approve(id) ?? skipped;
+    }
+
+    return skipped is null ? Results.NotFound() : Results.Json(skipped);
+});
+
 app.MapPost("/api/plans/{id}/reject", (string id) =>
 {
     PlanRecord? plan = planStore.Get(id);
@@ -1200,8 +1224,9 @@ app.MapGet("/api/contexts/{id}/events", (string id, int? limit, string? kind) =>
         return Results.NotFound();
     }
 
+    // kind may list several ("route,assistant-output"), so a caller can leave out the tool results that hold whole files.
     return Results.Json(kind is { Length: > 0 }
-        ? contextStore.EventsOfKinds(id, [kind], limit ?? 100)
+        ? contextStore.EventsOfKinds(id, kind.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), limit ?? 100)
         : contextStore.RecentEvents(id, limit ?? 100));
 });
 

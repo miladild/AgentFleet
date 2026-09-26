@@ -3,13 +3,14 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { PlanStep } from "../PlanCard";
 import { useLiveFeed, type LiveNode, type LivePlan, type LogLine, type StepActivity } from "./useLiveFeed";
+import { blockOf, stepFailures, stepTiers, type Why } from "./why";
 
 // ---------- colours and helpers ----------
 
 const PALETTE = ["#bb9af7", "#7dcfff", "#9ece6a", "#ff9e64", "#e0af68", "#2ac3de", "#ff4fa3", "#73daca"];
 
 /** Each machine keeps one colour everywhere: its card, its badge on a step and its name in the log. */
-function useMachineColors(nodes: LiveNode[]) {
+export function useMachineColors(nodes: LiveNode[]) {
   return useMemo(() => {
     const map = new Map<string, string>();
     nodes.forEach((node, index) => map.set(node.name, PALETTE[index % PALETTE.length]));
@@ -35,10 +36,13 @@ const TIERS: Record<string, { bars: number; hint: string }> = {
 
 const NO_SIBLINGS: number[] = [];
 
-function TierMeter({ tier }: { tier: string }) {
+export function TierMeter({ tier, planned }: { tier: string; planned?: string }) {
   const known = TIERS[tier] ?? { bars: 0, hint: tier };
+  // A retry runs on the heavy tier whatever the step was planned for: the arrow says it was raised.
+  const raised = planned && planned !== tier;
   return (
-    <span className={`tier ${tier}`} title={known.hint}>
+    <span className={`tier ${tier}${raised ? " raised" : ""}`} title={raised ? `Planned as ${planned}; retried on ${tier}. ${known.hint}` : known.hint}>
+      {raised && <b>↑</b>}
       {[1, 2, 3].map((bar) => (
         <i key={bar} className={bar <= known.bars ? "on" : ""} />
       ))}
@@ -47,7 +51,7 @@ function TierMeter({ tier }: { tier: string }) {
   );
 }
 
-function hhmmss(ms: number) {
+export function hhmmss(ms: number) {
   return new Date(ms).toLocaleTimeString([], { hour12: false });
 }
 
@@ -59,7 +63,7 @@ function duration(ms: number) {
   return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${m}:${String(s).padStart(2, "0")}`;
 }
 
-function useReducedMotion() {
+export function useReducedMotion() {
   const [reduced, setReduced] = useState(false);
   useEffect(() => {
     const query = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -191,7 +195,7 @@ function useTransitions(steps: PlanStep[]) {
 
 // ---------- pieces ----------
 
-function Clock({ from, until }: { from: number | null; until: number | null }) {
+export function Clock({ from, until }: { from: number | null; until: number | null }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (until !== null) return;
@@ -208,6 +212,34 @@ function Clock({ from, until }: { from: number | null; until: number | null }) {
   );
 }
 
+/** approve, reject, stop or skip a step, with the confirmation each needs; true while one is on its way. */
+function usePlanAction(planId: string) {
+  const [acting, setActing] = useState(false);
+  async function act(action: "stop" | "approve" | "reject" | "skip", step?: PlanStep) {
+    const question =
+      action === "stop"
+        ? "Stop this plan? Finished steps stay done; you can resume it later."
+        : action === "reject"
+          ? "Reject this plan? It will not run."
+          : action === "skip" && step
+            ? `Skip step ${step.id} (${step.title})? It counts as done without its check, and the plan goes on with the next step.`
+            : null;
+    if (question && !window.confirm(question)) return;
+    setActing(true);
+    try {
+      const query = action === "skip" && step ? `?step=${step.id}&resume=true` : "";
+      const res = await fetch(`/api/plans/${planId}/${action}${query}`, { method: "POST" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        window.alert(body.error ?? `Could not ${action} the plan.`);
+      }
+    } finally {
+      setActing(false);
+    }
+  }
+  return [acting, act] as const;
+}
+
 function stageStatus(stage: Stage) {
   if (stage.some((step) => step.status === "failed")) return "failed";
   if (stage.some((step) => step.status === "running")) return "running";
@@ -221,27 +253,19 @@ function TopBar({
   nodes,
   colorOf,
   busyNodes,
+  following,
 }: {
   plan: LivePlan;
   stages: Stage[];
   nodes: LiveNode[];
   colorOf: (name: string | null | undefined) => string;
   busyNodes: Set<string>;
+  following: boolean;
 }) {
-  const [acting, setActing] = useState(false);
+  const [acting, act] = usePlanAction(plan.id);
   const done = plan.steps.filter((step) => step.status === "done").length;
   const started = plan.approvedUtc ? Date.parse(plan.approvedUtc) : null;
   const finished = plan.status === "done" || plan.status === "blocked" || plan.status === "rejected" ? Date.parse(plan.updatedUtc) : null;
-
-  async function act(action: "stop" | "approve") {
-    if (action === "stop" && !window.confirm("Stop this plan? Finished steps stay done; you can resume it later.")) return;
-    setActing(true);
-    try {
-      await fetch(`/api/plans/${plan.id}/${action}`, { method: "POST" });
-    } finally {
-      setActing(false);
-    }
-  }
 
   return (
     <div className="live-bar">
@@ -274,10 +298,10 @@ function TopBar({
           ■ stop
         </button>
       )}
-      {plan.id !== "demo" && plan.status === "blocked" && (
-        <button type="button" className="mod" disabled={acting} onClick={() => act("approve")}>
-          ▶ approve and resume
-        </button>
+      {following && (
+        <span className="mod hide-narrow follow" title="This page follows the fleet: a new plan, or one being worked out, shows here by itself">
+          ◎ following
+        </span>
       )}
       <a className="mod hide-narrow" href="/live?pick" title="Other plans">≡</a>
     </div>
@@ -289,6 +313,8 @@ const StepNode = memo(function StepNode({
   siblings,
   activity,
   color,
+  failure,
+  tierNow,
   selected,
   burst,
   glitch,
@@ -299,6 +325,8 @@ const StepNode = memo(function StepNode({
   siblings: number[];
   activity: StepActivity | undefined;
   color: string;
+  failure: Why | undefined;
+  tierNow: string | undefined;
   selected: boolean;
   burst: boolean;
   glitch: boolean;
@@ -307,21 +335,27 @@ const StepNode = memo(function StepNode({
 }) {
   const { step } = placed;
   const node = activity?.node ?? null;
+  const skipped = step.status === "done" && step.note?.startsWith("Skipped by the user");
   const footer =
     step.status === "running"
       ? activity?.lastAction ?? "thinking…"
-      : step.status === "done"
-        ? `passed · ${step.attempts} attempt${step.attempts === 1 ? "" : "s"}`
-        : step.status === "failed"
-          ? step.note ?? "check failed"
-          : step.verify
-            ? `check: ${step.verify}`
-            : "waiting";
+      : skipped
+        ? "skipped by you, not checked"
+        : step.status === "done"
+          ? step.attempts > 1
+            ? `passed on attempt ${step.attempts}`
+            : "passed its check"
+          : step.status === "failed"
+            ? failure?.short ?? step.note ?? "check failed"
+            : step.verify
+              ? `check: ${step.verify}`
+              : "waiting";
+  const glyph = skipped ? "⤼" : GLYPH[step.status] ?? "○";
   return (
     <div
       role="button"
       tabIndex={0}
-      className={`live-node ${step.status}${selected ? " selected" : ""}${glitch ? " fresh" : ""}`}
+      className={`live-node ${step.status}${skipped ? " skipped" : ""}${selected ? " selected" : ""}${glitch ? " fresh" : ""}`}
       style={{ left: placed.x, top: placed.y, width: NODE_W, height: NODE_H }}
       onClick={() => onSelect(step.id)}
       onKeyDown={(event) => event.key === "Enter" && onSelect(step.id)}
@@ -330,7 +364,7 @@ const StepNode = memo(function StepNode({
     >
       <div className="head">
         <span className="num">#{step.id}</span>
-        <TierMeter tier={step.tier} />
+        <TierMeter tier={tierNow ?? step.tier} planned={step.tier} />
         {siblings.length > 0 && (
           <span
             className="with"
@@ -339,19 +373,21 @@ const StepNode = memo(function StepNode({
             ⇉ with {siblings.map((id) => `#${id}`).join(" ")}
           </span>
         )}
-        {step.status === "running" ? <span className="glyph"><span className="ring" /></span> : <span className="glyph">{GLYPH[step.status] ?? "○"}</span>}
+        {step.status === "running" ? <span className="glyph"><span className="ring" /></span> : <span className="glyph">{glyph}</span>}
       </div>
       <div className="name">{step.title}</div>
       <div className="foot">
-        {node && (step.status === "running" || step.status === "done") && (
+        {node && (step.status === "running" || step.status === "done") && !skipped && (
           <span className="live-chip" style={{ ["--m" as string]: color }}>{node}</span>
         )}
-        <span className="act" title={footer}>{footer}</span>
-        <span className="tries" title={`${step.attempts} of 3 attempts used`}>
-          {[0, 1, 2].map((index) => (
-            <i key={index} className={index < step.attempts ? "used" : ""} />
-          ))}
+        <span className="act" title={failure && step.status === "failed" ? `${failure.short}\n\n${failure.hint}` : footer}>
+          {footer}
         </span>
+        {(step.attempts > 1 || step.status === "failed") && (
+          <span className="tries" title={`${step.attempts} of 3 attempts used`}>
+            ↻ {step.attempts}/3
+          </span>
+        )}
       </div>
       {burst && <span className="burst" />}
     </div>
@@ -367,11 +403,15 @@ function Pipeline({
   onSelect,
   onHover,
   reducedMotion,
+  failures,
+  tiers,
 }: {
   steps: PlanStep[];
   stages: Stage[];
   activity: Map<number, StepActivity>;
   colorOf: (name: string | null | undefined) => string;
+  failures: Map<number, Why>;
+  tiers: Map<number, string>;
   selected: number | null;
   onSelect: (id: number) => void;
   onHover: (id: number | null, element: HTMLElement | null) => void;
@@ -387,14 +427,18 @@ function Pipeline({
     return () => observer.disconnect();
   }, []);
 
-  const vertical = size.width < 640 || size.height > size.width * 1.15;
+  // A narrow pane (VS Code's browser beside the code) stacks the steps and scrolls rather than shrinking them to fit.
+  const vertical = size.width < 760 || size.height > size.width * 1.15;
   const graph = useMemo(() => layout(stages, vertical), [stages, vertical]);
   // The steps each step runs alongside, worked out once per plan so the step cards are not redrawn for nothing.
   const siblingsOf = useMemo(
     () => new Map(stages.flatMap((stage) => stage.map((step) => [step.id, stage.filter((other) => other.id !== step.id).map((other) => other.id)] as const))),
     [stages],
   );
-  const scale = Math.max(0.5, Math.min(1.15, (size.width - 8) / graph.width, (size.height - 8) / graph.height));
+  const fitWidth = (size.width - 8) / graph.width;
+  const scale = vertical
+    ? Math.max(0.5, Math.min(1, fitWidth))
+    : Math.max(0.5, Math.min(1.15, fitWidth, (size.height - 8) / graph.height));
   const { burst, glitch } = useTransitions(steps);
   const edgeClass = (edge: Edge) =>
     edge.to.step.status === "running" && edge.from.step.status === "done"
@@ -429,6 +473,8 @@ function Pipeline({
               siblings={siblingsOf.get(placed.step.id) ?? NO_SIBLINGS}
               activity={activity.get(placed.step.id)}
               color={colorOf(activity.get(placed.step.id)?.node)}
+              failure={failures.get(placed.step.id)}
+              tierNow={tiers.get(placed.step.id)}
               selected={selected === placed.step.id}
               burst={burst.has(placed.step.id)}
               glitch={glitch.has(placed.step.id)}
@@ -506,7 +552,21 @@ function Machines({
   );
 }
 
-function Inspector({ plan, step, activity, log }: { plan: LivePlan; step: PlanStep | null; activity: StepActivity | undefined; log: LogLine[] }) {
+function Inspector({
+  plan,
+  step,
+  activity,
+  log,
+  failure,
+  tierNow,
+}: {
+  plan: LivePlan;
+  step: PlanStep | null;
+  activity: StepActivity | undefined;
+  log: LogLine[];
+  failure: Why | undefined;
+  tierNow: string | undefined;
+}) {
   if (!step) {
     return (
       <div className="live-inspector">
@@ -531,9 +591,18 @@ function Inspector({ plan, step, activity, log }: { plan: LivePlan; step: PlanSt
         #{step.id} {step.title}
       </h3>
       <div>
-        <span className="live-glow-text">{step.status}</span> · <TierMeter tier={step.tier} /> tier · {step.attempts} of 3 attempts
+        <span className="live-glow-text">{step.status}</span> · <TierMeter tier={tierNow ?? step.tier} planned={step.tier} /> tier · {step.attempts} of 3 attempts
         {activity?.node ? ` · on ${activity.node}` : ""} · {activity?.toolCalls ?? 0} tool calls
       </div>
+      {step.status === "failed" && failure && (
+        <>
+          <div className="label">why it stopped</div>
+          <div className="live-why">
+            <b>{failure.short}</b>
+            <span>{failure.hint}</span>
+          </div>
+        </>
+      )}
       {step.files.length > 0 && (
         <>
           <div className="label">files</div>
@@ -593,7 +662,7 @@ function HoverCard({ step, anchor, log, activity }: { step: PlanStep; anchor: DO
   );
 }
 
-function LogPane({
+export function LogPane({
   log,
   steps,
   filter,
@@ -682,10 +751,151 @@ function LogPane({
   );
 }
 
+// ---------- what needs the user ----------
+
+/**
+ * The plan's state when it needs the user: waiting for approval, blocked at a step (why, and what to do), stopped, or
+ * rejected. Nothing while it runs or once it is done.
+ */
+function PlanBanner({ plan, onInspect }: { plan: LivePlan; onInspect: (id: number) => void }) {
+  const [acting, act] = usePlanAction(plan.id);
+  const block = useMemo(() => blockOf(plan), [plan]);
+  if (plan.id === "demo") return null;
+
+  if (plan.status === "awaiting-approval") {
+    return (
+      <div className="live-banner accent">
+        <div className="head">
+          <span className="icon">◆</span>
+          <b>WAITING FOR YOUR APPROVAL</b>
+          <span className="muted">{plan.steps.length} steps · nothing has changed yet</span>
+        </div>
+        <div className="hint">Read the steps below (click one for its instructions and check). Approving starts the run on your machines.</div>
+        <div className="actions">
+          <button type="button" className="primary" disabled={acting} onClick={() => act("approve")}>
+            ▶ approve and run
+          </button>
+          <button type="button" disabled={acting} onClick={() => act("reject")}>
+            ✕ reject
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (plan.status === "rejected") {
+    return (
+      <div className="live-banner dim">
+        <div className="head">
+          <span className="icon">✕</span>
+          <b>REJECTED</b>
+          <span className="muted">this plan will not run</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!block) return null;
+  const { step, stopped, why, tiers } = block;
+  const endless = why.short.includes("never finishes");
+  return (
+    <div className={`live-banner ${stopped ? "warn" : "bad"}`}>
+      <div className="head">
+        <span className="icon">{stopped ? "■" : "⚠"}</span>
+        <b>{stopped ? "STOPPED" : "BLOCKED"}</b>
+        {step && (
+          <span>
+            at{" "}
+            <button type="button" className="link" onClick={() => onInspect(step.id)}>
+              #{step.id} {step.title}
+            </button>
+          </span>
+        )}
+        {!stopped && step && (
+          <span className="muted">
+            {step.attempts} of 3 attempts{tiers.length > 0 ? ` · ${tiers.join(" → ")}` : ""}
+          </span>
+        )}
+      </div>
+      <div className="why">{why.short}</div>
+      <div className="hint">{why.hint}</div>
+      <div className="actions">
+        {stopped ? (
+          <button type="button" className="primary" disabled={acting} onClick={() => act("approve")}>
+            ▶ resume
+          </button>
+        ) : (
+          <>
+            {!endless && (
+              <button type="button" className="primary" disabled={acting} onClick={() => act("approve")} title="Three fresh attempts at this step, then the rest of the plan">
+                ↻ retry step {step?.id}
+              </button>
+            )}
+            {step && (
+              <button type="button" className={endless ? "primary" : ""} disabled={acting} onClick={() => act("skip", step)} title="Count this step as done without its check, and go on">
+                ⤼ skip step {step.id} and go on
+              </button>
+            )}
+          </>
+        )}
+        {step && (
+          <button type="button" disabled={acting} onClick={() => onInspect(step.id)}>
+            ▤ details
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export type LiveCurrent =
+  | { kind: "plan"; planId: string; status: string; title: string; contextId: string | null }
+  | { kind: "planning"; contextId: string; title: string; ended: boolean }
+  | { kind: "none" };
+
+/**
+ * Something newer in this plan's conversation (a plan being worked out, or a newer plan), checked every ten seconds
+ * while this plan is not running, so a page left open on an old plan shows what came next.
+ */
+function useNewer(plan: LivePlan | null, following: boolean): LiveCurrent | null {
+  const [newer, setNewer] = useState<LiveCurrent | null>(null);
+  const contextId = plan?.contextId ?? null;
+  const planId = plan?.id ?? null;
+  const quiet = !!plan && plan.status !== "running" && plan.status !== "approved";
+  useEffect(() => {
+    if (following || !contextId || !quiet) {
+      setNewer(null);
+      return;
+    }
+    let stopped = false;
+    const check = () => {
+      if (document.hidden) return;
+      fetch(`/api/live/current?context=${contextId}`, { cache: "no-store" })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((current: LiveCurrent | null) => {
+          if (stopped || !current) return;
+          const differs = current.kind === "planning" ? !current.ended : current.kind === "plan" && current.planId !== planId;
+          setNewer(differs ? current : null);
+        })
+        .catch(() => {});
+    };
+    check();
+    const timer = setInterval(check, 10_000);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [contextId, planId, quiet, following]);
+  return newer;
+}
+
 // ---------- the page ----------
 
-/** A plan as it runs: the pipeline, the machines doing the work and the log, updated every two seconds. */
-export function LiveRun({ planId }: { planId: string }) {
+/**
+ * A plan as it runs: the pipeline, the machines doing the work and the log, updated every two seconds. following: the
+ * page is /live, which moves on by itself to whatever the fleet does next.
+ */
+export function LiveRun({ planId, following = false }: { planId: string; following?: boolean }) {
   const { plan, nodes, activity, log, error, connected } = useLiveFeed(planId);
   const colorOf = useMachineColors(nodes);
   const reducedMotion = useReducedMotion();
@@ -693,6 +903,7 @@ export function LiveRun({ planId }: { planId: string }) {
   const [filter, setFilter] = useState<number | "errors" | null>(null);
   const [hover, setHover] = useState<{ id: number; rect: DOMRect } | null>(null);
   const [hidden, setHidden] = useState(false);
+  const newer = useNewer(plan, following);
 
   useEffect(() => {
     const onVisibility = () => setHidden(document.hidden);
@@ -706,6 +917,8 @@ export function LiveRun({ planId }: { planId: string }) {
 
   const steps = useMemo(() => plan?.steps ?? [], [plan?.steps]);
   const stages = useMemo(() => stagesOf(steps), [steps]);
+  const failures = useMemo(() => (plan ? stepFailures(plan) : new Map<number, Why>()), [plan]);
+  const tiers = useMemo(() => stepTiers(plan?.events), [plan?.events]);
   const busyNodes = useMemo(
     () => new Set(steps.filter((step) => step.status === "running").map((step) => activity.get(step.id)?.node).filter((name): name is string => !!name)),
     [steps, activity],
@@ -725,10 +938,14 @@ export function LiveRun({ planId }: { planId: string }) {
   const hoverStep = hover ? steps.find((step) => step.id === hover.id) ?? null : null;
   const live = plan.status === "running" || plan.status === "approved";
   const done = steps.filter((step) => step.status === "done").length;
+  const inspect = (id: number) => {
+    setSelected(id);
+    setFilter(id);
+  };
 
   return (
     <div className={`live-root${hidden ? " live-paused" : ""}`}>
-      <TopBar plan={plan} stages={stages} nodes={nodes} colorOf={colorOf} busyNodes={busyNodes} />
+      <TopBar plan={plan} stages={stages} nodes={nodes} colorOf={colorOf} busyNodes={busyNodes} following={following} />
       <div className="live-progress" aria-hidden="true">
         <div className="fill" style={{ transform: `scaleX(${steps.length ? done / steps.length : 0})` }} />
         {live && !reducedMotion && <div className="shine" />}
@@ -741,11 +958,27 @@ export function LiveRun({ planId }: { planId: string }) {
             {!connected && <span style={{ color: "var(--red)" }}>reconnecting…</span>}
             <span>{plan.workingDirectory}</span>
           </header>
+          {newer && newer.kind !== "none" && (
+            <a className="live-banner info compact" href={newer.kind === "planning" ? `/live?context=${newer.contextId}` : `/live/${newer.planId}`}>
+              <span className="icon">◉</span>
+              {newer.kind === "planning" ? (
+                <span>a new plan is being worked out in this conversation</span>
+              ) : (
+                <span>
+                  newer in this conversation: <b>{newer.title}</b> ({newer.status.replace("-", " ")})
+                </span>
+              )}
+              <span className="go">watch ▸</span>
+            </a>
+          )}
+          <PlanBanner plan={plan} onInspect={inspect} />
           <Pipeline
             steps={steps}
             stages={stages}
             activity={activity}
             colorOf={colorOf}
+            failures={failures}
+            tiers={tiers}
             selected={selected}
             onSelect={(id) => {
               setSelected((current) => (current === id ? null : id));
@@ -774,7 +1007,14 @@ export function LiveRun({ planId }: { planId: string }) {
                 </button>
               )}
             </header>
-            <Inspector plan={plan} step={selectedStep} activity={selectedStep ? activity.get(selectedStep.id) : undefined} log={log} />
+            <Inspector
+              plan={plan}
+              step={selectedStep}
+              activity={selectedStep ? activity.get(selectedStep.id) : undefined}
+              log={log}
+              failure={selectedStep ? failures.get(selectedStep.id) : undefined}
+              tierNow={selectedStep ? tiers.get(selectedStep.id) : undefined}
+            />
           </section>
         </div>
       </div>

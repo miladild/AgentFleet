@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { Plan, PlanRunEvent } from "../PlanCard";
+import { failureLine } from "./why";
 
 export type LiveEvent = {
   id: number;
@@ -11,6 +12,8 @@ export type LiveEvent = {
   node: string | null;
   text: string;
   ok?: boolean;
+  tool?: string;
+  target?: string;
 };
 
 export type LiveNode = { name: string; model: string; ready: boolean };
@@ -48,12 +51,31 @@ const RUN_TONE: Record<string, LogLine["tone"]> = {
   "plan-blocked": "bad",
   "parallel-fallback": "warn",
   "work-restored": "warn",
+  "step-skipped": "warn",
   waiting: "warn",
   stopped: "warn",
   "parallel-started": "accent",
   "run-started": "accent",
   resumed: "accent",
 };
+
+// A line of the run log in words: which attempt, on which tier, and the part of the detail that matters.
+function runText(event: PlanRunEvent): string {
+  const firstLine = (event.detail ?? "").split("\n").find((line) => line.trim())?.trim() ?? "";
+  const tail = (text: string) => (text ? ` · ${text.slice(0, 200)}` : "");
+  switch (event.kind) {
+    case "attempt-started":
+      return `attempt ${event.attempt ?? "?"} on ${event.tier ?? "?"}${tail(firstLine)}`;
+    case "attempt-ended":
+      return `attempt ${event.attempt ?? "?"} ended${tail(firstLine)}`;
+    case "check-failed":
+      return `✖ check failed on attempt ${event.attempt ?? "?"}${tail(failureLine(event.detail ?? ""))}`;
+    case "check-passed":
+      return `✔ check passed${tail(firstLine)}`;
+    default:
+      return `${event.kind.replace(/-/g, " ")}${tail(firstLine)}`;
+  }
+}
 
 function recordTone(event: LiveEvent): LogLine["tone"] {
   if (event.kind === "verification" || event.kind === "tool-result") return event.ok === false ? "bad" : event.kind === "verification" ? "good" : "dim";
@@ -171,14 +193,13 @@ export function useLiveFeed(planId: string) {
       };
     });
     (plan?.events ?? []).forEach((event: PlanRunEvent, index) => {
-      const firstLine = (event.detail ?? "").split("\n").find((line) => line.trim()) ?? "";
       lines.push({
         key: `p${index}`,
         at: Date.parse(event.atUtc),
         step: event.stepId,
         node: event.node,
         kind: event.kind,
-        text: `${event.kind.replace(/-/g, " ")}${firstLine ? ` · ${firstLine.slice(0, 200)}` : ""}`,
+        text: runText(event),
         tone: RUN_TONE[event.kind] ?? "info",
       });
     });

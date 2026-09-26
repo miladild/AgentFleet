@@ -245,6 +245,12 @@ internal sealed partial class PlanRunner
                         .Where(candidate => candidate.Status != StepStatus.Done)
                         .ToList();
 
+                    if (BlockedByEndlessCheck(current, remainingGroupSteps))
+                    {
+                        await RecordChangedFilesAsync(planId);
+                        return;
+                    }
+
                     if (remainingGroupSteps.Count > 1)
                     {
                         string? fallbackReason = await ParallelFallbackReasonAsync(current, remainingGroupSteps, runCancellation.Token);
@@ -285,7 +291,7 @@ internal sealed partial class PlanRunner
                 }
 
                 runCancellation.Token.ThrowIfCancellationRequested();
-                if (!await RunStepAsync(current, step, runCancellation.Token))
+                if (BlockedByEndlessCheck(current, [step]) || !await RunStepAsync(current, step, runCancellation.Token))
                 {
                     await RecordChangedFilesAsync(planId);
                     return;
@@ -791,21 +797,11 @@ internal sealed partial class PlanRunner
             return [];
         }
 
-        var named = new HashSet<string>(before.Comparer);
-        foreach (PlanStep other in plan.Steps)
-        {
-            named.UnionWith(FleetPlanContext.DeclaredPaths(plan, other));
-        }
-
-        // A step that names a folder ("test/") names what it puts in it.
-        StringComparison comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-        string[] folders = named
-            .Where(Directory.Exists)
-            .Select(folder => Path.EndsInDirectorySeparator(folder) ? folder : folder + Path.DirectorySeparatorChar)
-            .ToArray();
+        // A step that names a folder ("test/") or a pattern ("test/*.test.ts") names what it puts there.
+        string[] named = plan.Steps.SelectMany(other => FleetPlanContext.DeclaredPaths(plan, other)).ToArray();
         string root = plan.WorkingDirectory ?? string.Empty;
         return FleetPlanContext.SnapshotFiles(plan.WorkingDirectory)
-            .Where(file => !before.Contains(file) && !named.Contains(file) && !folders.Any(folder => file.StartsWith(folder, comparison)))
+            .Where(file => !before.Contains(file) && !named.Any(declared => FleetPlanContext.Names(declared, file)))
             .OrderBy(file => file, StringComparer.OrdinalIgnoreCase)
             .Take(10)
             .Select(file => Path.GetRelativePath(root, file))
@@ -835,7 +831,7 @@ internal sealed partial class PlanRunner
             $"{plan.Id}:{step.Id}",
             // Without a project folder on disk there is nothing to check against (and nowhere the model could create files).
             !string.IsNullOrWhiteSpace(plan.WorkingDirectory) && Directory.Exists(plan.WorkingDirectory)
-                ? FleetPlanContext.DeclaredPaths(plan, step).Where(path => !File.Exists(path) && !Directory.Exists(path)).ToArray()
+                ? FleetPlanContext.DeclaredPaths(plan, step).Where(path => !FleetPlanContext.DeclaredExists(path)).ToArray()
                 : []);
 
     private string[]? FilesToCreate(PlanRecord plan, PlanStep step) =>
@@ -854,16 +850,44 @@ internal sealed partial class PlanRunner
         }
     }
 
-    private void AddBlockedEvent(string planId, PlanStep step)
+    private void AddBlockedEvent(string planId, PlanStep step, string? reason = null)
     {
+        reason ??= $"Step {step.Id} ({step.Title}) did not pass after {MaxAttemptsPerStep} attempts.";
         if (_recorder is not null && ContextFor(planId) is { } contextId && _store.Get(planId) is { } blockedPlan)
         {
-            _recorder.StepBlocked(contextId, blockedPlan, step, $"Step {step.Id} ({step.Title}) did not pass after {MaxAttemptsPerStep} attempts.");
+            _recorder.StepBlocked(contextId, blockedPlan, step, reason);
         }
 
-        _store.AddEvent(planId, step.Id, null, RunEventKind.PlanBlocked,
-            detail: $"Step {step.Id} ({step.Title}) did not pass after {MaxAttemptsPerStep} attempts.");
+        _store.AddEvent(planId, step.Id, null, RunEventKind.PlanBlocked, detail: reason);
         _logger.LogWarning("Plan {PlanId} is blocked at step {StepId} ({Title}).", planId, step.Id, step.Title);
+    }
+
+    // A check that never exits (a dev server, a watcher) fails every attempt at its time limit, however good the work.
+    // Measured: a plan checked "Start the development server" with `npm run dev`. The plan stops there before any
+    // attempt, saying why, so the user can skip the step or change its check. Plans saved since PlanReview refuses
+    // such checks do not get here.
+    private bool BlockedByEndlessCheck(PlanRecord plan, IEnumerable<PlanStep> steps)
+    {
+        foreach (PlanStep step in steps)
+        {
+            if (step.Status == StepStatus.Done || string.IsNullOrWhiteSpace(step.Verify) ||
+                PlanReview.NeverFinishes(step.Verify, plan.WorkingDirectory) is not { } what)
+            {
+                continue;
+            }
+
+            _store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, step.Id, s => s with
+            {
+                Status = StepStatus.Failed,
+                Note = "Its check never finishes, so it was not run."
+            }) with { Status = PlanStatus.Blocked });
+            AddBlockedEvent(plan.Id, step,
+                $"Step {step.Id} ({step.Title}): its check `{step.Verify}` runs {what}, which does not exit on its own, so it could never pass. " +
+                "Skip the step, or change its check to one that finishes (its tests, the build) and approve the plan again.");
+            return true;
+        }
+
+        return false;
     }
 
     private sealed record ModelAttemptResult(int StepId, string Summary, string? Failure, bool ShouldVerify, bool Transient = false);
