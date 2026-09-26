@@ -248,7 +248,10 @@ else {
             & $nssm set $FrontendName AppDirectory $web | Out-Null
             & $nssm set $FrontendName AppStdout $frontendLog | Out-Null
             & $nssm set $FrontendName AppStderr $frontendLog | Out-Null
-            & $nssm set $FrontendName Start SERVICE_AUTO_START | Out-Null
+            # A little after boot, and again if it stops: the web UI runs from the source folder, which can be on a disk
+            # that comes up after the services start (a USB drive).
+            & $nssm set $FrontendName Start SERVICE_DELAYED_AUTO_START | Out-Null
+            sc.exe failure $FrontendName reset= 86400 actions= restart/5000/restart/30000/restart/60000 | Out-Null
         }
         Write-Ok "Service $FrontendName registered"
     }
