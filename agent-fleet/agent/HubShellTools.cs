@@ -14,6 +14,8 @@ namespace AgentFleet;
 /// </summary>
 internal static class HubShellTools
 {
+    private static readonly Encoding Utf8 = new UTF8Encoding(false);
+
     public static Task<string> RunGitCommandAsync(
         string repositoryPath,
         string arguments,
@@ -49,6 +51,10 @@ internal static class HubShellTools
             WorkingDirectory = string.IsNullOrWhiteSpace(workingDirectory) ? Environment.CurrentDirectory : workingDirectory,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            // Node, npm, git and dotnet write UTF-8; read with the console's code page, node's test marks came back
+            // as "Γ£û" instead of "✖" and a model had to guess which tests failed.
+            StandardOutputEncoding = Utf8,
+            StandardErrorEncoding = Utf8,
             UseShellExecute = false,
             CreateNoWindow = true,
         };

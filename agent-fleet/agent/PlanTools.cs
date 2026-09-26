@@ -340,9 +340,7 @@ internal sealed partial class PlanTools
         {
             string result = await _runCommand(step.Verify, plan.WorkingDirectory, cancellationToken);
             passed = result.StartsWith("Exit code: 0", StringComparison.Ordinal);
-            output = result.Length > MaxVerifyOutputCharacters
-                ? "..." + result[^MaxVerifyOutputCharacters..]
-                : result;
+            output = ShortenCheckOutput(result);
             restored.AddRange(await RestoreUnnamedDeletionsAsync(plan, cancellationToken));
         }
 
@@ -756,6 +754,42 @@ internal sealed partial class PlanTools
         string text = item.Trim().TrimEnd('.').ToLowerInvariant();
         return text is "" or "-" or "n/a" or "na" or "no" or "nothing" or "null" || text.StartsWith("none", StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// A long check output as the next attempt sees it. Only the end fits, but the end of a test run is the detail of
+    /// its last failure: with four holiday tests failing, the retry was shown one of them and fixed only that. So the
+    /// lines that name failures and totals, from the whole output, come before the end.
+    /// </summary>
+    internal static string ShortenCheckOutput(string result)
+    {
+        if (result.Length <= MaxVerifyOutputCharacters)
+        {
+            return result;
+        }
+
+        var summary = new StringBuilder();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (string line in result.Split('\n'))
+        {
+            string text = line.Trim();
+            if (text.Length is > 0 and <= 200 && !text.StartsWith("at ", StringComparison.Ordinal) &&
+                FailureOrTotalLine().IsMatch(text) && seen.Add(text) &&
+                summary.Length + text.Length < MaxCheckSummaryCharacters)
+            {
+                summary.Append(text).Append('\n');
+            }
+        }
+
+        string end = "..." + result[^MaxVerifyOutputCharacters..];
+        return summary.Length == 0 ? end : $"Lines naming failures and totals:\n{summary}\nThe end of the output:\n{end}";
+    }
+
+    private const int MaxCheckSummaryCharacters = 1500;
+
+    // node:test and TAP (✖, "not ok", "ℹ fail 4"), jest and vitest ("Tests: 4 failed"), dotnet test ("Failed!"),
+    // pytest ("FAILED"), tsc ("error TS2345").
+    [GeneratedRegex(@"✖|✗|\bnot ok\b|\bfail(?:ed|ing|ures?|s)?\b|\berror\b|^(?:#|ℹ)\s*(?:tests|pass|fail)\b|\bTests?:", RegexOptions.IgnoreCase)]
+    private static partial Regex FailureOrTotalLine();
 
     [GeneratedRegex(@"^\s*(?:[-*•]|\d+[.)])\s+")]
     private static partial Regex LeadingBullet();
