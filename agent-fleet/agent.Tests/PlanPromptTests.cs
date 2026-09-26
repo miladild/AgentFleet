@@ -38,6 +38,16 @@ public sealed class PlanPromptTests : PlanTestBase
         Assert.Contains("expected 3 got 2", prompt);
         Assert.Contains("an earlier step wrote", prompt);
         Assert.DoesNotContain("keeps the process alive", prompt);
+        Assert.DoesNotContain("the test can be the mistake", prompt);
+    }
+
+    [Fact]
+    public void A_retry_of_a_step_that_writes_its_own_test_says_the_test_can_be_wrong()
+    {
+        PlanRecord plan = Store.Approve(NewPlan(new PlanStepInput("holidays", "d", ["src/marketHours.ts", "test/marketHours.test.ts"], "node --test", "heavy")).Id)!;
+
+        Assert.Contains("the test can be the mistake", PlanRunner.BuildPrompt(plan, plan.Steps[0], 2, "Exit code: 1\n✖ session"));
+        Assert.DoesNotContain("the test can be the mistake", PlanRunner.BuildPrompt(plan, plan.Steps[0], 1, null));
     }
 
     [Theory]
