@@ -17,7 +17,10 @@ public sealed class PlanFileTests : PlanTestBase
 
     private static readonly FakeValidator Valid = new(code => new DiagramCheck(true, true, code, null));
 
-    private string Sample(string workingDirectory) => $$"""
+    // Line endings normalised: the source file has CRLF on a Windows checkout (CI) and LF elsewhere.
+    private string Sample(string workingDirectory) => SampleText(workingDirectory).ReplaceLineEndings("\n");
+
+    private static string SampleText(string workingDirectory) => $$"""
         # Plan: a reliable, tested board
 
         Working directory: `{{workingDirectory}}`
