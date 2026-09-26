@@ -941,6 +941,14 @@ internal sealed partial class PlanRunner
             text.AppendLine(lastFailure);
             text.AppendLine("Look at what is already on disk (read_file, list_directory) and fix the cause instead of starting over. " +
                 "The cause can be in a file an earlier step wrote: if the output points there, fix that file too.");
+
+            // Measured: the hub's own test built "10:00 New York" as 10:00 UTC and expected "open"; two retries changed
+            // the code, which was right, and never the test.
+            if (step.Files.Any(file => file.Contains("test", StringComparison.OrdinalIgnoreCase) || file.Contains("spec", StringComparison.OrdinalIgnoreCase)))
+            {
+                text.AppendLine("This step writes its own test, so the test can be the mistake: for each failing test, compare what it " +
+                    "sets up and expects with this step's instructions before you change the code.");
+            }
             if (lastFailure.Contains("timeout", StringComparison.OrdinalIgnoreCase) ||
                 lastFailure.Contains("ran out of time", StringComparison.OrdinalIgnoreCase))
             {
