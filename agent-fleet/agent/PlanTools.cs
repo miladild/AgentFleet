@@ -11,7 +11,8 @@ namespace AgentFleet;
 /// own verify command passes (the command comes from the approved plan, not from the
 /// model), steps go in order except within an approved parallel group, and nothing can be completed before the user approves.
 /// </summary>
-internal sealed record StepCompletion(bool Done, string Message, string? Output = null);
+/// <param name="Restored">Files the fleet put back from git because the step deleted them and no step names them.</param>
+internal sealed record StepCompletion(bool Done, string Message, string? Output = null, string? Restored = null);
 
 internal sealed partial class PlanTools
 {
@@ -331,6 +332,8 @@ internal sealed partial class PlanTools
         }) with { Status = PlanStatus.Running })!;
         step = plan.Steps.First(candidate => candidate.Id == stepId);
 
+        // Before the check (the model's own test runs may have deleted something the check needs) and after it.
+        List<string> restored = [.. await RestoreUnnamedDeletionsAsync(plan, cancellationToken)];
         bool passed = true;
         string? output = null;
         if (step.Verify is not null)
@@ -340,6 +343,17 @@ internal sealed partial class PlanTools
             output = result.Length > MaxVerifyOutputCharacters
                 ? "..." + result[^MaxVerifyOutputCharacters..]
                 : result;
+            restored.AddRange(await RestoreUnnamedDeletionsAsync(plan, cancellationToken));
+        }
+
+        string? restoredNote = restored.Count == 0
+            ? null
+            : $"The fleet put back {string.Join(", ", restored.Distinct(StringComparer.OrdinalIgnoreCase))} from git: deleted while this " +
+              "step ran, and no step of the plan names it. Tests and checks must not delete project files; a test that needs a " +
+              "file of its own writes it under the system's temp folder.";
+        if (restoredNote is not null && !passed)
+        {
+            output = $"{output}\n\n{restoredNote}";
         }
 
         if (passed && requiredFiles is { Count: > 0 })
@@ -398,7 +412,80 @@ internal sealed partial class PlanTools
         reply.Append(next is null
             ? "All steps are done. Give the user a short summary of what changed."
             : $"Next: step {next.Id}, {next.Title}.");
-        return new StepCompletion(true, reply.ToString(), output);
+        return new StepCompletion(true, reply.ToString(), output, restoredNote);
+    }
+
+    /// <summary>
+    /// Tracked files deleted while the plan runs that no step of it names, put back from git. Measured: a test a model
+    /// wrote removed the project's config/watchlist.json in its cleanup, so every run of the check deleted it. Works in a
+    /// git working tree only; elsewhere, and when git is missing, it does nothing. Returns the files put back.
+    /// </summary>
+    internal async Task<IReadOnlyList<string>> RestoreUnnamedDeletionsAsync(PlanRecord plan, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(plan.WorkingDirectory) || !Directory.Exists(plan.WorkingDirectory))
+        {
+            return [];
+        }
+
+        try
+        {
+            string? root = Stdout(await _runCommand("git rev-parse --show-toplevel", plan.WorkingDirectory, cancellationToken))?.Trim();
+            string? status = Stdout(await _runCommand("git -c core.quotepath=off status --porcelain=v1 --untracked-files=no", plan.WorkingDirectory, cancellationToken));
+            if (string.IsNullOrWhiteSpace(root) || status is null)
+            {
+                return [];
+            }
+
+            var named = new HashSet<string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+            foreach (PlanStep step in plan.Steps)
+            {
+                named.UnionWith(FleetPlanContext.DeclaredPaths(plan, step).Select(path => Path.TrimEndingDirectorySeparator(path)));
+            }
+
+            var restored = new List<string>();
+            foreach (string line in status.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            {
+                string entry = line.TrimEnd('\r');
+                if (entry.Length < 4 || (entry[0] != 'D' && entry[1] != 'D') || entry.Contains(" -> ", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                string relative = entry[3..].Trim().Trim('"');
+                string full = Path.GetFullPath(Path.Combine(root, relative));
+                if (named.Contains(full) || named.Any(folder => full.StartsWith(folder + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)))
+                {
+                    continue;
+                }
+
+                string restore = await _runCommand($"git checkout HEAD -- \"{relative}\"", root, cancellationToken);
+                if (restore.StartsWith("Exit code: 0", StringComparison.Ordinal))
+                {
+                    restored.Add(RelativeTo(plan.WorkingDirectory, full));
+                }
+            }
+
+            return restored;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return [];
+        }
+    }
+
+    // The stdout part of a command result, or null when the command did not succeed.
+    private static string? Stdout(string result)
+    {
+        if (!result.StartsWith("Exit code: 0", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        const string StdoutMarker = "--- stdout ---";
+        int start = result.IndexOf(StdoutMarker, StringComparison.Ordinal);
+        string body = start < 0 ? string.Empty : result[(start + StdoutMarker.Length)..];
+        int stderrAt = body.IndexOf("--- stderr ---", StringComparison.Ordinal);
+        return (stderrAt >= 0 ? body[..stderrAt] : body).Trim('\r', '\n');
     }
 
     /// <summary>

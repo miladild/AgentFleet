@@ -323,7 +323,7 @@ public sealed class PlanContextTests : ContextTestBase
         PlanRecord plan = Approved(Plans, Step("Write the tests", "a.txt"));
         int checks = 0;
         var tools = new PlanTools(Plans, Valid, (command, _, _) =>
-            Task.FromResult(command == "git status --short" || ++checks > 1 ? "Exit code: 0\n--- stdout ---\nok" : "Exit code: 1\n--- stdout ---\nunexpected file found"), Journal);
+            Task.FromResult(command.StartsWith("git ", StringComparison.Ordinal) || ++checks > 1 ? "Exit code: 0\n--- stdout ---\nok" : "Exit code: 1\n--- stdout ---\nunexpected file found"), Journal);
         var agent = new FakeStepAgent((_, _, _) =>
         {
             File.WriteAllText(File1, "the real file");
