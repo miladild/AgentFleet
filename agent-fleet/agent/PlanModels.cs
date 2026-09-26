@@ -53,6 +53,7 @@ internal static class RunEventKind
     public const string ParallelFallback = "parallel-fallback";
     public const string Waiting = "waiting";
     public const string WorkRestored = "work-restored";
+    public const string StepSkipped = "step-skipped";
 }
 
 /// <summary>
@@ -100,7 +101,8 @@ internal sealed record PlanSummary(
     string Status,
     int StepsDone,
     int StepsTotal,
-    DateTimeOffset UpdatedUtc);
+    DateTimeOffset UpdatedUtc,
+    string? ContextId = null);
 
 /// <summary>What the model supplies for one step when it proposes a plan.</summary>
 internal sealed record PlanStepInput(

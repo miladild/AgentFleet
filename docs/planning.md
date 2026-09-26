@@ -63,18 +63,30 @@ steps, and checks each step with a real command instead of trusting itself.
 
 ## Watching it live
 
-`http://localhost:3000/live` opens the running plan in a page of its own (or lists the plans when none is running);
-`/live/<plan id>` opens one plan. In the web UI, the **Live** button next to **Plans**, the **Live** link on a plan and
-the **live** badge on a session that carried a plan open it; in VS Code, **Watch it live** under `@fleet /status`, after
-approving a plan, or the command **Agent Fleet: Watch the running plan live** opens it in VS Code's Simple Browser
-(`agentFleet.webUrl` sets the web UI's address when it is not on the backend's machine at port 3000).
+`http://localhost:3000/live` follows the fleet in a page of its own: a plan that is running, else a plan being worked
+out, else one waiting for approval, else the newest plan. When that changes, the page changes with it.
+`/live?context=<conversation id>` follows one conversation, `/live/<plan id>` shows one plan, and `/live?pick` lists the
+plans. In the web UI, the **Live** button next to **Plans**, the **Live** link on a plan and the **live** badge on a
+session that carried a plan open it. In VS Code, **Watch it live** appears as soon as `@fleet /plan` starts, under a
+proposed plan, under `@fleet /status` and after approving; the command **Agent Fleet: Watch the running plan live**
+opens it too. It opens in VS Code's Simple Browser (`agentFleet.webUrl` sets the web UI's address when it is not on the
+backend's machine at port 3000).
 
-- **Pipeline.** The steps from left to right, a parallel group stacked in one column. A running step glows and shows
-  the machine working on it and its latest tool call; data flows along the edges into it. Hover a step for its latest
-  lines, click it for its instructions, its check and the output of its last check.
+- **Planning.** While the strongest machine works out a plan, the page shows it at the centre of a map: every file,
+  folder and search it goes through lands around it, the latest one lit, with what it last said underneath and how
+  long it has been thinking. Once it proposes the plan, the page shows the plan. When it answers in the chat without
+  a plan (it had a question, or the request was not for one), the page says so and shows the answer.
+- **Pipeline.** The steps from left to right, a parallel group stacked in one column (top to bottom in a narrow pane).
+  A running step glows and shows the machine working on it and its latest tool call; data flows along the edges into
+  it. A retried step shows its attempts (`↻ 2/3`) and an arrow on its tier when the retry moved it to the heavy
+  tier. Hover a step for its latest lines, click it for its instructions, its check and the output of its last check.
+- **What needs you.** A plan waiting for approval has **approve and run** and **reject** at the top. A blocked plan
+  says at which step, after which attempts on which tiers, and why in plain words (the check's failing line, a check
+  that never finishes, a file that was never created), with **retry** (three fresh attempts at that step),
+  **skip the step and go on** (it counts as done without its check) and **details**. A stopped plan offers **resume**.
 - **Machines.** Each machine, what it is working on, and its tool calls over the last two minutes.
-- **Log.** Everything the machines do, as a terminal: routing, tool calls and results, what the model said, checks and
-  the runner's own events. Filter it by step, or to errors only.
+- **Log.** Everything the machines do, as a terminal: model calls, tool calls and results, what the model said, and
+  the runner's own events with the attempt and tier. Filter it by step, or to errors only.
 
 It asks the web server for news every two seconds while the plan runs (every fifteen once it has stopped), and not at
 all while the tab is hidden; each answer carries only what is new, cut down to a line per event. Animations move only
@@ -210,7 +222,13 @@ parsed, failed validation, or could not be checked because the web app was unava
 
 Each step's check is run by the fleet, and one more rule is enforced by code: if a step names a file that did not exist when
 it started, that file must exist when it finishes, even if the check passes. (`node --test` exits successfully when there are
-no tests at all, so a model that never wrote the test file would otherwise be waved through.)
+no tests at all, so a model that never wrote the test file would otherwise be waved through.) A step may name a pattern,
+such as `test/*.test.ts` (`*` stays inside one folder, `**` crosses folders): it counts once any file matches it.
+
+A check must finish by itself. A plan whose check starts a server or a watcher (`npm run dev`, `npm start`, `vite`,
+`nodemon`, anything with `--watch`; an npm script is looked up in `package.json`) is not saved, and the planner is told
+to check the step with its tests or the build instead. A plan saved before that rule stops at such a step before
+spending any attempt on it, and says why; skip the step from the live view and start the server yourself.
 
 The runner also notices **scratch files**: files a step created that no step of the plan names (a model that writes `test-x.js`
 next to the real test, which `node --test` then runs). A failing step is told about them so it can clean up, and the run log

@@ -83,6 +83,16 @@ internal static partial class PlanReview
                 continue;
             }
 
+            if (NeverFinishes(verify, root) is { } endless)
+            {
+                problems.Add(
+                    $"Step {number} ({step.Title}): its check \"{Clip(verify)}\" runs {endless}, which does not exit on its own, so the fleet " +
+                    "would stop it at its time limit and the step would fail every attempt. Check the step with something that finishes: its " +
+                    "tests, the build or the typecheck (a test can start the server, call it and stop it). A plan cannot leave a server " +
+                    "running; tell the user the command that starts it instead.");
+                continue;
+            }
+
             if (root is null)
             {
                 continue;
@@ -113,6 +123,103 @@ internal static partial class PlanReview
         }
 
         return problems;
+    }
+
+    // npm scripts that by convention start something that keeps running.
+    private static readonly HashSet<string> ServerScripts = new(StringComparer.OrdinalIgnoreCase) { "dev", "start", "serve", "watch", "preview" };
+
+    /// <summary>
+    /// What in a check keeps running instead of finishing (a dev server, a watcher), or null. An npm, yarn, pnpm or bun
+    /// script is looked up in the project's package.json. Measured: a planner checked "Start the development server" with
+    /// `npm run dev` (tsx watch), which can never pass.
+    /// </summary>
+    public static string? NeverFinishes(string command, string? root) => NeverFinishes(command, root, depth: 0);
+
+    private static string? NeverFinishes(string command, string? root, int depth)
+    {
+        foreach (string segment in CommandSeparators().Split(command))
+        {
+            List<string> words = Tokens().Matches(segment).Select(match => match.Value.Trim('"', '\'')).Where(word => word.Length > 0).ToList();
+            if (words.Count > 0 && words[0].ToLowerInvariant() is "npx" or "bunx")
+            {
+                words.RemoveAt(0);
+            }
+
+            if (words.Count == 0)
+            {
+                continue;
+            }
+
+            if (words.Any(word => word.Equals("--watch", StringComparison.OrdinalIgnoreCase) || word.Equals("--watchAll", StringComparison.OrdinalIgnoreCase)))
+            {
+                return "a watcher (--watch)";
+            }
+
+            string program = Path.GetFileNameWithoutExtension(words[0]).ToLowerInvariant();
+            string? second = words.Count > 1 ? words[1].ToLowerInvariant() : null;
+            switch (program)
+            {
+                case "npm" or "yarn" or "pnpm" or "bun":
+                    string? script = second is "run" or "run-script" ? words.ElementAtOrDefault(2) : second;
+                    if (script is null)
+                    {
+                        break;
+                    }
+
+                    if (ServerScripts.Contains(script))
+                    {
+                        return $"the \"{script}\" script, which by convention starts a server or a watcher";
+                    }
+
+                    if (depth == 0 && ScriptBody(root, script) is { } body && NeverFinishes(body, root, depth + 1) is { } inside)
+                    {
+                        return $"the \"{script}\" script ({inside})";
+                    }
+
+                    break;
+                case "nodemon" or "live-server" or "http-server" or "webpack-dev-server" or "ts-node-dev" or "serve" or "uvicorn" or "gunicorn":
+                    return $"{program}, a server or a watcher";
+                case "next" when second is "dev" or "start":
+                case "vite" when second is null or "dev" or "serve" or "preview":
+                case "webpack" or "ng" when second == "serve":
+                case "tsx" when second == "watch":
+                case "dotnet" when second == "watch":
+                case "flask" when second == "run":
+                case "rails" when second is "s" or "server":
+                    return $"{program}{(second is null ? string.Empty : " " + second)}, a server or a watcher";
+                case "tsc" when words.Contains("-w"):
+                    return "a watcher (tsc -w)";
+                case "php" when words.Contains("serve", StringComparer.OrdinalIgnoreCase):
+                case "python" or "python3" or "py" when words.Contains("http.server", StringComparer.OrdinalIgnoreCase):
+                    return "a web server";
+            }
+        }
+
+        return null;
+    }
+
+    private static string? ScriptBody(string? root, string script)
+    {
+        try
+        {
+            string path = Path.Combine(root ?? string.Empty, "package.json");
+            if (root is null || !File.Exists(path))
+            {
+                return null;
+            }
+
+            using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+            return document.RootElement.TryGetProperty("scripts", out var scripts) &&
+                   scripts.ValueKind == System.Text.Json.JsonValueKind.Object &&
+                   scripts.TryGetProperty(script, out var body) &&
+                   body.ValueKind == System.Text.Json.JsonValueKind.String
+                ? body.GetString()
+                : null;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+        {
+            return null;
+        }
     }
 
     // The program the check starts with, after any leading "cd folder &&".

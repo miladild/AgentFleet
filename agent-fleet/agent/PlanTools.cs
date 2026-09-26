@@ -356,8 +356,8 @@ internal sealed partial class PlanTools
 
         if (passed && requiredFiles is { Count: > 0 })
         {
-            // A named folder ("test/") counts once it exists.
-            string[] missing = requiredFiles.Where(path => !File.Exists(path) && !Directory.Exists(path)).ToArray();
+            // A named folder ("test/") counts once it exists, a pattern ("test/*.test.ts") once a file matches it.
+            string[] missing = requiredFiles.Where(path => !FleetPlanContext.DeclaredExists(path)).ToArray();
             if (missing.Length > 0)
             {
                 string shown = string.Join(", ", missing.Select(path => RelativeTo(plan.WorkingDirectory, path)));
@@ -434,11 +434,7 @@ internal sealed partial class PlanTools
                 return [];
             }
 
-            var named = new HashSet<string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
-            foreach (PlanStep step in plan.Steps)
-            {
-                named.UnionWith(FleetPlanContext.DeclaredPaths(plan, step).Select(path => Path.TrimEndingDirectorySeparator(path)));
-            }
+            string[] named = plan.Steps.SelectMany(step => FleetPlanContext.DeclaredPaths(plan, step)).ToArray();
 
             var restored = new List<string>();
             foreach (string line in status.Split('\n', StringSplitOptions.RemoveEmptyEntries))
@@ -451,7 +447,7 @@ internal sealed partial class PlanTools
 
                 string relative = entry[3..].Trim().Trim('"');
                 string full = Path.GetFullPath(Path.Combine(root, relative));
-                if (named.Contains(full) || named.Any(folder => full.StartsWith(folder + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)))
+                if (named.Any(declared => FleetPlanContext.Names(declared, full)))
                 {
                     continue;
                 }
@@ -537,11 +533,9 @@ internal sealed partial class PlanTools
                 return [];
             }
 
-            StringComparison comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
             string[] unfinished = plan.Steps
                 .Where(step => step.Status != StepStatus.Done)
                 .SelectMany(step => FleetPlanContext.DeclaredPaths(plan, step))
-                .Select(path => Path.TrimEndingDirectorySeparator(path))
                 .ToArray();
             var changedNow = new HashSet<string>(state.Changed, OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
             bool committed = !string.Equals(state.Head, snapshot.Head, StringComparison.Ordinal);
@@ -549,8 +543,7 @@ internal sealed partial class PlanTools
             var restored = new List<string>();
             foreach ((string path, byte[] contents) in snapshot.Files)
             {
-                bool named = unfinished.Any(declared => string.Equals(declared, path, comparison) ||
-                                                         path.StartsWith(declared + Path.DirectorySeparatorChar, comparison));
+                bool named = unfinished.Any(declared => FleetPlanContext.Names(declared, path));
                 bool discarded = !File.Exists(path) || (!committed && !changedNow.Contains(path));
                 if (named || !discarded)
                 {

@@ -37,6 +37,40 @@ public sealed class PlanReviewTests : IDisposable
     }
 
     [Fact]
+    public void A_check_that_starts_a_server_or_a_watcher_is_refused()
+    {
+        // Measured: "Start the development server" was checked with `npm run dev` (tsx watch), which can never pass.
+        string problem = Assert.Single(Review(Step("start it", "npm run dev", "src/index.js")));
+        Assert.Contains("does not exit on its own", problem);
+        Assert.Contains("\"dev\" script", problem);
+    }
+
+    [Theory]
+    [InlineData("npm start", true)]
+    [InlineData("npx vite", true)]
+    [InlineData("npx vite build", false)]
+    [InlineData("npx jest --watchAll", true)]
+    [InlineData("npx jest --watchAll=false", false)]
+    [InlineData("npx tsc -w", true)]
+    [InlineData("npx tsc --noEmit", false)]
+    [InlineData("cd src && dotnet watch test", true)]
+    [InlineData("dotnet test", false)]
+    [InlineData("python -m http.server 8000", true)]
+    [InlineData("node --test test/slug.test.js", false)]
+    public void Servers_and_watchers_are_told_from_checks_that_finish(string check, bool endless) =>
+        Assert.Equal(endless, PlanReview.NeverFinishes(check, _project) is not null);
+
+    [Fact]
+    public void An_npm_script_is_read_from_package_json()
+    {
+        File.WriteAllText(Path.Combine(_project, "package.json"),
+            """{ "scripts": { "test": "node --import tsx --test \"test/**/*.test.ts\"", "test:watch": "node --test --watch" } }""");
+
+        Assert.Null(PlanReview.NeverFinishes("npm test", _project));
+        Assert.Contains("--watch", PlanReview.NeverFinishes("npm run test:watch", _project));
+    }
+
+    [Fact]
     public void A_sentence_is_not_a_check()
     {
         string problem = Assert.Single(Review(Step("slug", "File src/slug.js should exist with a slugify function", "src/slug.js")));

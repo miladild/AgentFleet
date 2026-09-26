@@ -153,7 +153,8 @@ internal sealed partial class FleetPlanStore
                     plan.Status,
                     plan.Steps.Count(step => step.Status == StepStatus.Done),
                     plan.Steps.Count,
-                    plan.UpdatedUtc))
+                    plan.UpdatedUtc,
+                    plan.ContextId))
                 .ToList();
         }
     }
@@ -256,6 +257,40 @@ internal sealed partial class FleetPlanStore
         }
 
         return approved;
+    }
+
+    /// <summary>
+    /// The user's call on a stopped or blocked plan: the step counts as done without its check (its work was done by
+    /// hand, or its check is what is wrong), so approving the plan again carries on with the next step. Null when there
+    /// is no such plan or step; the plan unchanged when it is not stopped or blocked, or the step is already done.
+    /// </summary>
+    public PlanRecord? SkipStep(string id, int stepId)
+    {
+        bool skipped = false;
+        PlanRecord? result = Update(id, plan =>
+        {
+            PlanStep? step = plan.Steps.FirstOrDefault(candidate => candidate.Id == stepId);
+            if (plan.Status != PlanStatus.Blocked || step is null || step.Status == StepStatus.Done)
+            {
+                return plan;
+            }
+
+            skipped = true;
+            PlanRecord changed = FleetPlanStoreSteps.With(plan, stepId, s => s with
+            {
+                Status = StepStatus.Done,
+                Note = "Skipped by the user: its check was not run.",
+                CompletedUtc = DateTimeOffset.UtcNow
+            });
+            return changed.Steps.All(s => s.Status == StepStatus.Done) ? changed with { Status = PlanStatus.Done } : changed;
+        });
+
+        if (skipped)
+        {
+            result = AddEvent(id, stepId, null, RunEventKind.StepSkipped, detail: "Skipped by the user: its check was not run.") ?? result;
+        }
+
+        return result is null || result.Steps.All(step => step.Id != stepId) ? null : result;
     }
 
     public PlanRecord? Reject(string id) =>
