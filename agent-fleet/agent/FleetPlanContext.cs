@@ -277,7 +277,7 @@ internal sealed class PlanContextRecorder
     }
 
     /// <summary>The step passed: record its files, leave the handoff for the next step, checkpoint.</summary>
-    public void StepDone(string contextId, PlanRecord plan, PlanStep step, long? verificationEventId, string? node)
+    public void StepDone(string contextId, PlanRecord plan, PlanStep step, long? verificationEventId, string? node, bool skipped = false)
     {
         try
         {
@@ -311,7 +311,7 @@ internal sealed class PlanContextRecorder
                 Version: 1,
                 ContextId: contextId,
                 TaskId: next is null ? FleetPlanContext.PlanTaskId(plan.Id) : FleetPlanContext.StepTaskId(plan.Id, next.Id),
-                FromAgent: $"step {step.Id}{(node is null ? string.Empty : $" on {node}")}",
+                FromAgent: skipped ? $"step {step.Id}, skipped by the user" : $"step {step.Id}{(node is null ? string.Empty : $" on {node}")}",
                 ToAgent: next?.Title,
                 CreatedAtUtc: DateTimeOffset.UtcNow,
                 Goal: fresh.Goal,
@@ -323,9 +323,11 @@ internal sealed class PlanContextRecorder
                 CompletedWork: fresh.Steps.Where(s => s.Status == StepStatus.Done)
                     .Select(s => $"{s.Id}. {s.Title}{(string.IsNullOrWhiteSpace(s.Note) ? string.Empty : $": {ContextText.Clip(s.Note, 200)}")}").ToList(),
                 ArtifactIds: artifactIds,
-                VerificationEvidence: [step.Verify is null
-                    ? $"Step {step.Id} had no automatic check."
-                    : $"Step {step.Id}: `{step.Verify}` passed."],
+                VerificationEvidence: [skipped
+                    ? $"Step {step.Id} was skipped by the user and its check was NOT run: do not assume its work is there, check the files it names."
+                    : step.Verify is null
+                        ? $"Step {step.Id} had no automatic check."
+                        : $"Step {step.Id}: `{step.Verify}` passed."],
                 OpenQuestions: fresh.OpenQuestions,
                 Risks: fresh.Risks,
                 NextAction: next is null

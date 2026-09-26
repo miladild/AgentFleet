@@ -1017,7 +1017,7 @@ app.MapPost("/api/plans/{id}/skip", (string id, int step, bool resume = false) =
         return Results.BadRequest(new { error = $"This plan is {plan.Status.Replace('-', ' ')}; only a stopped or blocked plan can skip a step." });
     }
 
-    PlanRecord? skipped = planStore.SkipStep(id, step);
+    PlanRecord? skipped = planRunner.SkipStep(id, step);
     if (resume && skipped?.Status == PlanStatus.Blocked)
     {
         skipped = planStore.Approve(id) ?? skipped;

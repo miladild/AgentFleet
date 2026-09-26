@@ -74,6 +74,22 @@ export function stepTiers(events: PlanRunEvent[] | null | undefined): Map<number
   return byStep;
 }
 
+/**
+ * Each step's attempts in its latest run, from the run log. The stored count added up across a block and a retry
+ * ("4 of 3"); a step waiting for its turn again keeps the stored count, which a resume set back to nought.
+ */
+export function withRunAttempts(plan: LivePlan): LivePlan {
+  const latest = new Map<number, number>();
+  for (const event of plan.events ?? []) {
+    if (event.kind === "attempt-started" && event.stepId !== null && event.attempt) latest.set(event.stepId, event.attempt);
+  }
+  if (latest.size === 0) return plan;
+  return {
+    ...plan,
+    steps: plan.steps.map((step) => (step.status !== "pending" && latest.has(step.id) ? { ...step, attempts: latest.get(step.id)! } : step)),
+  };
+}
+
 export type Block = {
   step: PlanStep | null;
   stopped: boolean;

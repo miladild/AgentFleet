@@ -90,6 +90,7 @@ internal sealed partial class PlanRunner
     private readonly PlanContextRecorder? _recorder;
     private readonly FleetContextJournal? _journal;
     private readonly ConcurrentDictionary<string, string> _contexts = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, Dictionary<int, string>> _lastFailures = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string[]> _filesToCreate = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, HashSet<string>> _filesAtStart = new(StringComparer.Ordinal);
     private readonly Channel<string> _queue = Channel.CreateUnbounded<string>();
@@ -206,13 +207,15 @@ internal sealed partial class PlanRunner
 
         try
         {
-            // A step left "running" or "failed" by an interrupted or blocked run gets another go.
+            // A step left "running" or "failed" by an interrupted or blocked run gets another go: three fresh attempts,
+            // the first of which is told what went wrong last time (each attempt is a new conversation with the model).
             bool continuing = plan.Steps.Any(step => step.Status is StepStatus.Running or StepStatus.Failed or StepStatus.Done);
+            _lastFailures[planId] = LastFailures(plan);
             _store.Update(planId, current => current with
             {
                 Status = PlanStatus.Running,
                 Steps = current.Steps
-                    .Select(step => step.Status is StepStatus.Running or StepStatus.Failed ? step with { Status = StepStatus.Pending } : step)
+                    .Select(step => step.Status is StepStatus.Running or StepStatus.Failed ? step with { Status = StepStatus.Pending, Attempts = 0 } : step)
                     .ToList()
             });
             _store.AddEvent(
@@ -291,7 +294,8 @@ internal sealed partial class PlanRunner
                 }
 
                 runCancellation.Token.ThrowIfCancellationRequested();
-                if (BlockedByEndlessCheck(current, [step]) || !await RunStepAsync(current, step, runCancellation.Token))
+                if (BlockedByEndlessCheck(current, [step]) ||
+                    !await RunStepAsync(current, step, runCancellation.Token, previousFailure: LastFailure(planId, step.Id)))
                 {
                     await RecordChangedFilesAsync(planId);
                     return;
@@ -322,12 +326,54 @@ internal sealed partial class PlanRunner
         }
         finally
         {
+            _lastFailures.TryRemove(planId, out _);
             _active.TryRemove(planId, out _);
             _contexts.TryRemove(planId, out _);
         }
     }
 
     private string? ContextFor(string planId) => _contexts.TryGetValue(planId, out string? id) ? id : null;
+
+    // What last went wrong with each unfinished step, from the run log, which survives a restart. Measured: a step
+    // retried after its plan blocked started from nothing, with only a short excerpt of its failure in the durable
+    // record, because the attempt count and the failure lived in the run that had ended.
+    private static Dictionary<int, string> LastFailures(PlanRecord plan)
+    {
+        var failures = new Dictionary<int, string>();
+        foreach (PlanRunEvent runEvent in plan.Events ?? [])
+        {
+            if (runEvent.StepId is { } stepId && !string.IsNullOrWhiteSpace(runEvent.Detail) &&
+                runEvent.Kind is RunEventKind.CheckFailed or RunEventKind.ModelFailed or RunEventKind.TimedOut &&
+                plan.Steps.Any(step => step.Id == stepId && step.Status != StepStatus.Done))
+            {
+                failures[stepId] = runEvent.Detail;
+            }
+        }
+
+        return failures;
+    }
+
+    private string? LastFailure(string planId, int stepId) =>
+        _lastFailures.TryGetValue(planId, out Dictionary<int, string>? failures) && failures.TryGetValue(stepId, out string? failure) ? failure : null;
+
+    /// <summary>
+    /// The user's call on a stopped or blocked plan (see <see cref="FleetPlanStore.SkipStep"/>), written into the
+    /// plan's record too: the next step's handoff says the step was skipped and its check never ran, instead of the
+    /// last handoff, which still pointed at the skipped step.
+    /// </summary>
+    public PlanRecord? SkipStep(string planId, int stepId)
+    {
+        PlanRecord? before = _store.Get(planId);
+        PlanRecord? after = _store.SkipStep(planId, stepId);
+        PlanStep? step = after?.Steps.FirstOrDefault(candidate => candidate.Id == stepId);
+        bool skipped = before?.Steps.FirstOrDefault(candidate => candidate.Id == stepId)?.Status != StepStatus.Done && step?.Status == StepStatus.Done;
+        if (skipped && _recorder is not null && after is not null && step is not null && (ContextFor(planId) ?? _recorder.ResolveContext(after)) is { } contextId)
+        {
+            _recorder.StepDone(contextId, after, step, verificationEventId: null, node: null, skipped: true);
+        }
+
+        return after;
+    }
 
     private void FinishInContext(string planId, string status, string note)
     {
@@ -606,7 +652,7 @@ internal sealed partial class PlanRunner
         // then verifies each step in order. Any retries run sequentially, so escalations to heavy
         // cannot pile onto the same machine and project-wide checks cannot race ongoing edits.
         ModelAttemptResult[] firstAttempts = await Task.WhenAll(steps.Select(step =>
-            RunModelAttemptAsync(plan, step, 1, null, step.Tier, parallelGroup: true, cancellationToken: cancellationToken)));
+            RunModelAttemptAsync(plan, step, 1, LastFailure(plan.Id, step.Id), step.Tier, parallelGroup: true, cancellationToken: cancellationToken)));
 
         var retry = new List<(int StepId, string Failure)>();
         foreach (ModelAttemptResult attempt in firstAttempts.OrderBy(result => result.StepId))
@@ -687,7 +733,9 @@ internal sealed partial class PlanRunner
             StartedUtc = s.StartedUtc ?? startedUtc
         }));
         _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.AttemptStarted, tier,
-            detail: attempt > 1 && !string.IsNullOrWhiteSpace(lastFailure) ? "Retrying with the previous failure." : string.Empty);
+            detail: string.IsNullOrWhiteSpace(lastFailure)
+                ? string.Empty
+                : attempt > 1 ? "Retrying with the previous failure." : "Picking up after the stop, with the last failure.");
 
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         using var attemptCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -958,10 +1006,12 @@ internal sealed partial class PlanRunner
                 ? $"After every step in this parallel group has finished editing, the runner checks this step with: {step.Verify}"
                 : $"When you stop, your work is checked automatically by running: {step.Verify}");
 
-        if (attempt > 1 && !string.IsNullOrWhiteSpace(lastFailure))
+        if (!string.IsNullOrWhiteSpace(lastFailure))
         {
             text.AppendLine();
-            text.AppendLine($"Attempt {attempt}. The previous attempt did not pass. What went wrong:");
+            text.AppendLine(attempt > 1
+                ? $"Attempt {attempt}. The previous attempt did not pass. What went wrong:"
+                : "This step was tried before and did not pass, and the plan stopped here; the user has asked for another go. What went wrong the last time:");
             text.AppendLine(lastFailure);
             text.AppendLine("Look at what is already on disk (read_file, list_directory) and fix the cause instead of starting over. " +
                 "The cause can be in a file an earlier step wrote: if the output points there, fix that file too.");
