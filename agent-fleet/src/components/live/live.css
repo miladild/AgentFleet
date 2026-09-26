@@ -40,6 +40,13 @@
   overflow: hidden;
 }
 
+/* Thin scroll bars in the theme's colours instead of the system's grey ones with arrows. */
+.live-root,
+.live-root * {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-2) transparent;
+}
+
 /* A faint CRT: static, so it costs nothing after the first paint. */
 .live-root::after {
   content: "";
@@ -277,16 +284,33 @@
   color: var(--muted);
 }
 .live-node .num { color: var(--fg); font-weight: 700; }
-.live-node .tier {
-  padding: 0 5px;
-  border-radius: 4px;
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  border: 1px solid currentColor;
+/* The tier as a strength meter and its name: three bars for heavy, two for standard, one for light. */
+.live-root .tier {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 10.5px;
+  cursor: help;
 }
-.live-node .tier.heavy { color: var(--magenta); }
-.live-node .tier.standard { color: var(--cyan); }
-.live-node .tier.light { color: var(--green); }
+.live-root .tier i {
+  width: 3px;
+  height: 9px;
+  margin-right: 0;
+  border-radius: 1px;
+  background: currentColor;
+  opacity: 0.22;
+}
+.live-root .tier i:last-of-type { margin-right: 4px; }
+.live-root .tier i.on { opacity: 1; }
+.live-root .tier.heavy { color: var(--magenta); }
+.live-root .tier.standard { color: var(--cyan); }
+.live-root .tier.light { color: var(--green); }
+.live-node .with {
+  color: var(--fg-dim);
+  font-size: 10.5px;
+  cursor: help;
+  white-space: nowrap;
+}
 .live-node .glyph { margin-left: auto; font-size: 13px; }
 .live-node .name {
   color: var(--fg);
@@ -454,6 +478,8 @@
   gap: 10px;
   color: var(--fg-dim);
 }
+/* Flex children shrink by default: every block of a long step squeezed into a sliver with a scroll bar of its own. */
+.live-inspector > * { flex-shrink: 0; }
 .live-inspector h3 { color: var(--fg); font-size: 13px; }
 .live-inspector .label { color: var(--muted); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; }
 .live-inspector pre {

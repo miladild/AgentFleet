@@ -25,7 +25,27 @@ function useMachineColors(nodes: LiveNode[]) {
 }
 
 const GLYPH: Record<string, string> = { pending: "○", running: "◐", done: "✔", failed: "✖" };
-const TIER_LABEL: Record<string, string> = { heavy: "HEAVY", standard: "STD", light: "LIGHT" };
+
+// A tier as a strength meter and its name, with what it means on hover.
+const TIERS: Record<string, { bars: number; hint: string }> = {
+  heavy: { bars: 3, hint: "Heavy: the strongest machine, for hard or risky work" },
+  standard: { bars: 2, hint: "Standard: a mid-size model, for ordinary work" },
+  light: { bars: 1, hint: "Light: a small, quick model, for small edits" },
+};
+
+const NO_SIBLINGS: number[] = [];
+
+function TierMeter({ tier }: { tier: string }) {
+  const known = TIERS[tier] ?? { bars: 0, hint: tier };
+  return (
+    <span className={`tier ${tier}`} title={known.hint}>
+      {[1, 2, 3].map((bar) => (
+        <i key={bar} className={bar <= known.bars ? "on" : ""} />
+      ))}
+      {tier}
+    </span>
+  );
+}
 
 function hhmmss(ms: number) {
   return new Date(ms).toLocaleTimeString([], { hour12: false });
@@ -266,6 +286,7 @@ function TopBar({
 
 const StepNode = memo(function StepNode({
   placed,
+  siblings,
   activity,
   color,
   selected,
@@ -275,6 +296,7 @@ const StepNode = memo(function StepNode({
   onHover,
 }: {
   placed: Placed;
+  siblings: number[];
   activity: StepActivity | undefined;
   color: string;
   selected: boolean;
@@ -308,8 +330,15 @@ const StepNode = memo(function StepNode({
     >
       <div className="head">
         <span className="num">#{step.id}</span>
-        <span className={`tier ${step.tier}`}>{TIER_LABEL[step.tier] ?? step.tier}</span>
-        {step.parallelGroup && <span title="Parallel group">⫘ {step.parallelGroup}</span>}
+        <TierMeter tier={step.tier} />
+        {siblings.length > 0 && (
+          <span
+            className="with"
+            title={`Runs at the same time as ${siblings.map((id) => `step ${id}`).join(" and ")}, on another machine (parallel group "${step.parallelGroup}")`}
+          >
+            ⇉ with {siblings.map((id) => `#${id}`).join(" ")}
+          </span>
+        )}
         {step.status === "running" ? <span className="glyph"><span className="ring" /></span> : <span className="glyph">{GLYPH[step.status] ?? "○"}</span>}
       </div>
       <div className="name">{step.title}</div>
@@ -360,6 +389,11 @@ function Pipeline({
 
   const vertical = size.width < 640 || size.height > size.width * 1.15;
   const graph = useMemo(() => layout(stages, vertical), [stages, vertical]);
+  // The steps each step runs alongside, worked out once per plan so the step cards are not redrawn for nothing.
+  const siblingsOf = useMemo(
+    () => new Map(stages.flatMap((stage) => stage.map((step) => [step.id, stage.filter((other) => other.id !== step.id).map((other) => other.id)] as const))),
+    [stages],
+  );
   const scale = Math.max(0.5, Math.min(1.15, (size.width - 8) / graph.width, (size.height - 8) / graph.height));
   const { burst, glitch } = useTransitions(steps);
   const edgeClass = (edge: Edge) =>
@@ -392,6 +426,7 @@ function Pipeline({
             <StepNode
               key={placed.step.id}
               placed={placed}
+              siblings={siblingsOf.get(placed.step.id) ?? NO_SIBLINGS}
               activity={activity.get(placed.step.id)}
               color={colorOf(activity.get(placed.step.id)?.node)}
               selected={selected === placed.step.id}
@@ -496,8 +531,8 @@ function Inspector({ plan, step, activity, log }: { plan: LivePlan; step: PlanSt
         #{step.id} {step.title}
       </h3>
       <div>
-        <span className={`live-glow-text`}>{step.status}</span> · {step.tier} · {step.attempts} of 3 attempts
-        {activity?.node ? ` · ${activity.node}` : ""} · {activity?.toolCalls ?? 0} tool calls
+        <span className="live-glow-text">{step.status}</span> · <TierMeter tier={step.tier} /> tier · {step.attempts} of 3 attempts
+        {activity?.node ? ` · on ${activity.node}` : ""} · {activity?.toolCalls ?? 0} tool calls
       </div>
       {step.files.length > 0 && (
         <>

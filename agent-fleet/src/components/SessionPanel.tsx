@@ -12,6 +12,7 @@ type SessionSummary = {
 };
 
 const ACTIVE_SESSION_KEY = "fleet-active-session";
+const RESUME_WITHIN_MS = 12 * 60 * 60 * 1000;
 const AUTOSAVE_DEBOUNCE_MS = 800;
 
 function deriveTitle(messages: readonly unknown[]): string {
@@ -80,8 +81,8 @@ export function SessionPanel() {
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Initial load: fetch the session list, then resume whichever session was
-  // active last (if any, and if it still exists), so a page reload doesn't
-  // silently drop you into a blank chat.
+  // active last (if any, if it still exists, and if it was used in the last
+  // twelve hours), so a page reload doesn't silently drop you into a blank chat.
   useEffect(() => {
     fetch("/api/sessions")
       .then((res) => res.json())
@@ -98,8 +99,11 @@ export function SessionPanel() {
 
     fetch(`/api/sessions/${lastId}`)
       .then((res) => (res.ok ? res.json() : null))
-      .then((data: { id: string; messages: unknown[] } | null) => {
-        if (!data) {
+      .then((data: { id: string; messages: unknown[]; updatedAtUtc?: string } | null) => {
+        // An old conversation is not resumed: the page opened days later on "which model are you?" answered by a
+        // model the machine no longer runs. It stays in the list, one click away.
+        const stale = data?.updatedAtUtc ? Date.now() - Date.parse(data.updatedAtUtc) > RESUME_WITHIN_MS : false;
+        if (!data || stale) {
           localStorage.removeItem(ACTIVE_SESSION_KEY);
           return;
         }
