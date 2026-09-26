@@ -81,6 +81,16 @@ public sealed class HubFileSystemToolsTests : IDisposable
     }
 
     [Fact]
+    public async Task EditFile_does_not_add_a_byte_order_mark_to_a_file_without_one()
+    {
+        string file = Write("package.json", "{\n  \"name\": \"café\"\n}\n");
+
+        await HubFileSystemTools.EditFileAsync(file, "\"name\"", "\"title\"", null, default);
+
+        Assert.Equal("{\n  \"title\": \"café\"\n}\n", Encoding.UTF8.GetString(File.ReadAllBytes(file)));
+    }
+
+    [Fact]
     public async Task ReadFile_returns_a_line_range_with_a_header()
     {
         string file = Write("lines.txt", "l1\nl2\nl3\nl4\nl5\n");

@@ -164,4 +164,28 @@ public sealed class OvernightTests
         health.Forget();
         Assert.NotEqual("slow", (await health.GetNodeAsync("hub", forceProbe: true)).Failure);
     }
+
+    [Fact]
+    public async Task A_parallel_group_waits_out_a_machines_short_rest_but_not_a_slow_machine()
+    {
+        static NodeHealthSnapshot[] Health(bool ready, string? failure) =>
+            [new("worker", "m", ready, ready, DateTimeOffset.UtcNow, failure)];
+
+        var probes = new List<bool>();
+        bool recovered = await PlanRunner.WaitOutShortRestAsync(forceProbe =>
+        {
+            probes.Add(forceProbe);
+            return Task.FromResult(probes.Count < 3 ? Health(false, "request_failed") : Health(true, null));
+        }, TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(1), default);
+        Assert.True(recovered);
+        Assert.Equal([false, true, true], probes);
+
+        int slowChecks = 0;
+        Assert.False(await PlanRunner.WaitOutShortRestAsync(_ => { slowChecks++; return Task.FromResult(Health(false, "slow")); },
+            TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(1), default));
+        Assert.Equal(1, slowChecks);
+
+        Assert.False(await PlanRunner.WaitOutShortRestAsync(_ => Task.FromResult(Health(false, "request_failed")),
+            TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(5), default));
+    }
 }

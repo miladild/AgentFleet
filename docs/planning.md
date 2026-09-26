@@ -31,7 +31,8 @@ steps, and checks each step with a real command instead of trusting itself.
    run that group concurrently.
    - A group runs concurrently only when every step names files, paths stay inside the project and do not overlap, the
      steps use distinct configured tiers, and each tier has a ready node. Otherwise the run log says why it fell back
-     to sequential execution.
+     to sequential execution. A machine resting for a minute after one failed request is waited for (up to 75 seconds)
+     rather than costing the whole group its parallel run.
    - Each step goes to a machine of the tier the plan chose, in a fresh session that sees only the goal, the assumptions,
      the step itself, a summary of earlier steps, and bounded context from the files named by that step. The runner reads
      up to eight project-local text files (32 KiB each, 48,000 characters total) before each attempt. Missing, binary,
@@ -116,8 +117,10 @@ on, the cases its test must cover.
 - `Check` is the command the fleet runs to decide whether the step worked. Name the files a step creates in `Files`.
 - Other `##` sections after the steps (notes, an appendix) are ignored.
 
-If the planner retypes a plan file instead of pointing at it, the fleet notices (the same number of steps as a plan file
-the user named or the planner read) and takes the steps from the file.
+When your message names a file in this format, the fleet checks it first and tells the planner to hand it over
+straight away, rather than reading around the project (which took a planner 13 file reads and 101 seconds). If the
+planner retypes a plan file instead of pointing at it, the fleet notices (the same number of steps as a plan file the
+user named or the planner read) and takes the steps from the file.
 
 ## Leaving it overnight
 

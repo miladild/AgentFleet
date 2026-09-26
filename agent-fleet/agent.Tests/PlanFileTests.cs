@@ -151,6 +151,36 @@ public sealed class PlanFileTests : PlanTestBase
     }
 
     [Fact]
+    public void A_plan_file_the_latest_request_names_is_pointed_out_until_the_planner_proposes_it()
+    {
+        string file = Path.Combine(_project, "PLAN.md");
+        File.WriteAllText(file, Sample(_project));
+        string notes = Path.Combine(_project, "NOTES.md");
+        File.WriteAllText(notes, "# Notes\n\nNo steps here.");
+
+        List<ChatMessage> asked = [new(ChatRole.User, $"Look at {notes} and carry out the plan in {file}.")];
+        Assert.Equal((file, 3), PlanFile.NamedInLatestRequest(asked));
+        Assert.Contains($"names {file}, a plan file in the fleet's format with 3 steps", PlanGate.PlanFileNote(file, 3));
+
+        // Reading around does not end it; proposing does, and a later request without the file does not bring it back.
+        List<ChatMessage> reading =
+        [
+            .. asked,
+            new(ChatRole.Assistant, [new FunctionCallContent("c1", "read_file", new Dictionary<string, object?> { ["path"] = file })]),
+            new(ChatRole.Tool, [new FunctionResultContent("c1", "...")])
+        ];
+        Assert.Equal((file, 3), PlanFile.NamedInLatestRequest(reading));
+        List<ChatMessage> proposed =
+        [
+            .. reading,
+            new(ChatRole.Assistant, [new FunctionCallContent("c2", "propose_plan", new Dictionary<string, object?> { ["planFile"] = file })])
+        ];
+        Assert.Null(PlanFile.NamedInLatestRequest(proposed));
+        Assert.Null(PlanFile.NamedInLatestRequest([.. proposed, new(ChatRole.User, "make step 2 standard instead")]));
+        Assert.Null(PlanFile.NamedInLatestRequest([new(ChatRole.User, $"Summarise {notes}")]));
+    }
+
+    [Fact]
     public async Task A_plan_file_that_would_fail_is_not_saved_and_the_user_is_told_what_to_change()
     {
         string file = Path.Combine(_project, "PLAN.md");
