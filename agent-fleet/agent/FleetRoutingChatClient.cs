@@ -567,14 +567,23 @@ internal sealed class FleetRoutingChatClient : IChatClient
 
         switch (gate.Phase)
         {
-            case PlanPhase.Planning when filtered?.Instructions is not null:
+            case PlanPhase.Planning:
+                string instructions = PlanGate.PlanningInstructions(gate.Plan, MachinesByTier());
+                if (PlanFile.NamedInLatestRequest(messages) is { } named)
+                {
+                    instructions += "\n\n" + PlanGate.PlanFileNote(named.Path, named.Steps);
+                }
+
+                if (filtered?.Instructions is null)
+                {
+                    return (Prepend(instructions, messages), filtered);
+                }
+
                 // Swap the agent's instructions out rather than adding to them (see PlanningInstructions).
                 // Clone first: with no tools the filter hands back the caller's own options object.
                 ChatOptions planning = filtered.Clone();
-                planning.Instructions = PlanGate.PlanningInstructions(gate.Plan, MachinesByTier());
+                planning.Instructions = instructions;
                 return (messages, planning);
-            case PlanPhase.Planning:
-                return (Prepend(PlanGate.PlanningInstructions(gate.Plan, MachinesByTier()), messages), filtered);
             case PlanPhase.Executing:
                 return (Prepend(PlanGate.MonitorDirective(gate.Plan!), messages), filtered);
             default:

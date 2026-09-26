@@ -106,12 +106,20 @@ internal static class HubFileSystemTools
             return "Error: oldText and newText are identical, so there is nothing to change.";
         }
 
+        byte[] bytes = await File.ReadAllBytesAsync(resolved, cancellationToken);
         Encoding encoding;
         string content;
-        using (var reader = new StreamReader(resolved, detectEncodingFromByteOrderMarks: true))
+        using (var reader = new StreamReader(new MemoryStream(bytes), detectEncodingFromByteOrderMarks: true))
         {
             content = await reader.ReadToEndAsync(cancellationToken);
             encoding = reader.CurrentEncoding;
+        }
+
+        // With no byte order mark the reader still reports Encoding.UTF8, which writes one: package.json came back
+        // from an edit starting with one, and JSON.parse refuses that. Keep a file's mark only when it had one.
+        if (!bytes.AsSpan().StartsWith(encoding.Preamble))
+        {
+            encoding = new UTF8Encoding(false);
         }
 
         // Models write \n; a Windows file is usually \r\n, and an exact match would

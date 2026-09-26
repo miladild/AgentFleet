@@ -168,6 +168,12 @@ internal static partial class PlanGate
         $"You are a careful software planner working on the user's own machine, which runs {HubPlatform.Name}: use " +
         "paths in that machine's own style exactly as given, never rewrite them into another style.\n\n" + PlanningDirective(existing, machines);
 
+    /// <summary>Added while the user's latest message names a plan file in the fleet's format (see PlanFile.NamedInLatestRequest).</summary>
+    public static string PlanFileNote(string path, int steps) =>
+        $"The user's message names {path}, a plan file in the fleet's format with {steps} steps. Call propose_plan now " +
+        "with a short title and planFile set to exactly that path, and nothing else: do not read the project's files " +
+        "first, the fleet reads every step from the file as written.";
+
     public static string PlanningDirective(PlanRecord? existing, string? machines = null) =>
         """
         Plan mode is on and no plan has been approved yet. You can look around, but you cannot change anything:

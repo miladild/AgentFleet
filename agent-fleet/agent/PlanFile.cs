@@ -95,28 +95,63 @@ internal static partial class PlanFile
         {
             foreach (string path in MentionedFiles(message))
             {
-                if (!seen.Add(path))
+                if (seen.Add(path) && TryReadFleetPlan(path)?.Steps.Count == proposed)
                 {
-                    continue;
-                }
-
-                try
-                {
-                    PlanFileContent plan = Read(path);
-                    int withFields = plan.Steps.Count(step => step.Verify is not null || step.Tier is not null);
-                    if (plan.Steps.Count == proposed && withFields * 2 >= plan.Steps.Count)
-                    {
-                        return path;
-                    }
-                }
-                catch (Exception exception) when (exception is FormatException or IOException or UnauthorizedAccessException)
-                {
-                    // Not a plan file: keep looking.
+                    return path;
                 }
             }
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// The fleet-format plan file the user's latest message names, until the planner has proposed a plan for it.
+    /// Measured: told to hand such a file over straight away, the planner still read 13 of the project's files first
+    /// (101 s on the hub), and a weaker planner can loop there and never propose.
+    /// </summary>
+    public static (string Path, int Steps)? NamedInLatestRequest(IReadOnlyList<ChatMessage> messages)
+    {
+        int latest = -1;
+        for (int index = messages.Count - 1; index >= 0 && latest < 0; index--)
+        {
+            if (messages[index].Role == ChatRole.User)
+            {
+                latest = index;
+            }
+        }
+
+        if (latest < 0 || messages.Skip(latest + 1).SelectMany(message => message.Contents)
+                .Any(content => content is FunctionCallContent { Name: "propose_plan" }))
+        {
+            return null;
+        }
+
+        foreach (string path in MentionedFiles(messages[latest]).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (TryReadFleetPlan(path) is { } plan)
+            {
+                return (path, plan.Steps.Count);
+            }
+        }
+
+        return null;
+    }
+
+    // A plan file in the fleet's format: at least half its steps carry a tier or a check.
+    private static PlanFileContent? TryReadFleetPlan(string path)
+    {
+        try
+        {
+            PlanFileContent plan = Read(path);
+            int withFields = plan.Steps.Count(step => step.Verify is not null || step.Tier is not null);
+            return withFields * 2 >= plan.Steps.Count ? plan : null;
+        }
+        catch (Exception exception) when (exception is FormatException or IOException or UnauthorizedAccessException)
+        {
+            // Not a plan file.
+            return null;
+        }
     }
 
     // Markdown files named in what the user wrote, and files the planner read.

@@ -365,15 +365,50 @@ internal sealed partial class PlanRunner
                 return $"tier '{tier}' has no configured node";
             }
 
-            NodeHealthSnapshot[] health = await Task.WhenAll(candidates.Select(node =>
-                _healthMonitor.GetNodeAsync(node.Name, cancellationToken)));
-            if (!health.Any(snapshot => snapshot.Ready))
+            bool ready = await WaitOutShortRestAsync(
+                forceProbe => Task.WhenAll(candidates.Select(node => _healthMonitor.GetNodeAsync(node.Name, cancellationToken, forceProbe))),
+                ShortRestWait,
+                TimeSpan.FromSeconds(5),
+                cancellationToken);
+            if (!ready)
             {
                 return $"no node in tier '{tier}' is ready";
             }
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// A machine that fails one request rests for a minute (see ResilientChatClient). Measured: a worker dropped one
+    /// request as step 1 ended, and the group of three that started 18 s later ran one step at a time for its whole
+    /// length. So a tier that is out only for that short rest is waited for before the group gives up on running in
+    /// parallel; a machine that is slow or unreachable is not.
+    /// </summary>
+    internal static readonly TimeSpan ShortRestWait = TimeSpan.FromSeconds(75);
+
+    internal static async Task<bool> WaitOutShortRestAsync(
+        Func<bool, Task<NodeHealthSnapshot[]>> check,
+        TimeSpan wait,
+        TimeSpan poll,
+        CancellationToken cancellationToken)
+    {
+        DateTimeOffset giveUp = DateTimeOffset.UtcNow + wait;
+        for (bool again = false; ; again = true)
+        {
+            NodeHealthSnapshot[] health = await check(again);
+            if (health.Any(snapshot => snapshot.Ready))
+            {
+                return true;
+            }
+
+            if (!health.Any(snapshot => snapshot.Failure == "request_failed") || DateTimeOffset.UtcNow >= giveUp)
+            {
+                return false;
+            }
+
+            await Task.Delay(poll, cancellationToken);
+        }
     }
 
     private static string? ParallelFileOverlapReason(PlanRecord plan, IReadOnlyList<PlanStep> steps)
