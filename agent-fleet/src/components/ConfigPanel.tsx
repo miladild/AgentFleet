@@ -20,6 +20,8 @@ type FleetConfigNode = {
   /** The most tokens of context this machine is asked for; null means the fleet's default. */
   contextLength?: number | null;
   api?: string | null;
+  caveman?: string | null;
+  ponytail?: string | null;
 };
 
 type FleetConfigData = {
@@ -44,6 +46,8 @@ const NODE_ROLES: { value: string; label: string; hint: string }[] = [
   { value: "light", label: "Light", hint: "quick questions, trivial edits" },
   { value: "vision", label: "Vision", hint: "reads images and screenshots" },
 ];
+
+const STYLE_LEVELS = ["off", "lite", "full", "ultra"] as const;
 
 const NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
@@ -209,7 +213,7 @@ function AddMachine({ nodes, onAdd, saving }: { nodes: FleetConfigNode[]; onAdd:
       return setError("That machine already serves this model in this role.");
     }
     const hint = NODE_ROLES.find((r) => r.value === role)?.hint ?? "";
-    const ok = await onAdd(withRole({ name: trimmed, url, model, purpose: hint, tier: "standard", vision: false, fallback: false }, role));
+    const ok = await onAdd(withRole({ name: trimmed, url, model, purpose: hint, tier: "standard", vision: false, fallback: false, caveman: "off", ponytail: "off" }, role));
     if (ok) {
       setAddress("");
       setModels(null);
@@ -482,6 +486,31 @@ function MachineCard({
                 (slow answers); raise it for long files.
               </span>
             </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-[10px] uppercase tracking-wide text-neutral-500 mb-0.5">Caveman response style</label>
+              <select
+                value={node.caveman ?? "off"}
+                onChange={(e) => onChange({ ...node, caveman: e.target.value })}
+                aria-label="Caveman response style"
+                className="text-xs px-2 py-1 rounded bg-neutral-900 border border-neutral-700 text-neutral-200"
+              >
+                {STYLE_LEVELS.map((level) => <option key={level} value={level}>{level[0].toUpperCase() + level.slice(1)}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-[10px] uppercase tracking-wide text-neutral-500 mb-0.5">Ponytail coding style</label>
+              <select
+                value={node.ponytail ?? "off"}
+                onChange={(e) => onChange({ ...node, ponytail: e.target.value })}
+                aria-label="Ponytail coding style"
+                className="text-xs px-2 py-1 rounded bg-neutral-900 border border-neutral-700 text-neutral-200"
+              >
+                {STYLE_LEVELS.map((level) => <option key={level} value={level}>{level[0].toUpperCase() + level.slice(1)}</option>)}
+              </select>
+            </div>
+            <p className="col-span-2 text-[10px] text-neutral-600">Caveman controls reply brevity; Ponytail controls coding minimalism. Lite is light, Full is stronger, and Ultra is strongest. The selected style follows a request through fallback, so match levels across machines for consistent handoffs.</p>
           </div>
           <p className="text-[10px] text-neutral-600">Machine {index + 1}</p>
         </div>

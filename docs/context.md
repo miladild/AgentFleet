@@ -53,6 +53,17 @@ built the same way every time, in this order:
 The block is capped (about 4500 characters), and the least important sections are dropped first. A chat with nothing pinned
 and no plan gets no block at all, so ordinary conversations cost nothing extra.
 
+## Errors and recovery
+
+Failures stay in the same context as the work. Model, routing, tool and verification errors record their source and machine;
+a failed stream also records any text produced before it stopped. The next retry or fallback receives the useful failure
+details with the original task. When a plan step eventually passes, its handoff to the next step still includes earlier
+failed attempts as well as the passing check, with links to the source events.
+
+If a streamed answer stops partway through, the chat marks it as incomplete and points to **Context**. The Context timeline
+shows the failure and partial answer; its preview shows what the next agent will receive, and **What agents actually
+received** shows the blocks already delivered to each machine.
+
 ## Pinning a decision
 
 A pinned decision is handed to every agent that continues the work, on any machine, after any restart.

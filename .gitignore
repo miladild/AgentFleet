@@ -44,3 +44,7 @@ frontend-service.log
 
 # Development-run data (npm run dev): conversations and plans
 agent-fleet/data/
+
+# Playwright reports and traces
+agent-fleet/playwright-report/
+agent-fleet/test-results/

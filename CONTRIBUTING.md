@@ -19,15 +19,20 @@ For Linux and macOS, install the .NET 9 SDK, Node.js 20+ with npm, and Ollama fi
 ## Tests
 
 ```powershell
-cd agent-fleet\agent.Tests
-dotnet test
+dotnet test agent-fleet\agent.Tests
+cd agent-fleet
+npm ci
+npm run typecheck
+npx playwright install chromium   # once per Playwright version
+npm run test:e2e
 ```
 
 Keep them green. New backend behavior should come with a test; the existing ones show the style (small, one behavior each,
-named for what should happen). The web UI is checked by hand in a browser, so say what you clicked in your pull request.
+named for what should happen). Playwright tests open the web UI on loopback, use mocked fleet APIs, and do not need a
+running backend or Ollama. Run `npm run test:e2e -- --ui` to use Playwright's interactive runner.
 
-Type-check the web UI with `npm run typecheck` in `agent-fleet`. In `vscode-fleet`, `npm test` compiles the extension and
-runs the tests of the parts that do not need VS Code (`test/`); the rest is checked by hand in VS Code.
+In `vscode-fleet`, `npm test` compiles the extension and runs the tests of the parts that do not need VS Code (`test/`);
+the rest is checked by hand in VS Code.
 
 ## Running a second copy beside a real install
 
@@ -38,13 +43,14 @@ $env:ASPNETCORE_URLS = 'http://localhost:8010'
 $env:FLEET_CONFIG_PATH = "$PWD\scratch-config.json"
 dotnet run --project agent-fleet\agent
 
-$env:NEXT_DIST_DIR = '.next-dev'; $env:AGENT_URL = 'http://localhost:8010'; $env:PORT = '3005'
+$env:AGENT_URL = 'http://localhost:8010'; $env:PORT = '3005'
 node agent-fleet\scripts\serve.mjs dev
 ```
 
-`NEXT_DIST_DIR` keeps the dev server's build output apart from the installed web UI's. Next.js rewrites
-`agent-fleet/tsconfig.json` and `agent-fleet/next-env.d.ts` to mention that folder when you build or run with it: put those two
-files back (`git checkout` them) before committing, or `npm run typecheck` will look for a folder that no longer exists.
+The dev wrapper uses `.next-dev` by default, separate from the production `.next` output. Playwright uses the same
+separate directory. Next.js updates `agent-fleet/tsconfig.json` and `agent-fleet/next-env.d.ts` to point at generated types
+there; inspect those changes and restore generated-only edits before committing. If you invoke `next dev` directly, set
+`NEXT_DIST_DIR=.next-dev` yourself.
 
 ## Making a release
 

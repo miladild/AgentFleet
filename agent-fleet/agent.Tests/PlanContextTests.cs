@@ -82,6 +82,39 @@ public sealed class PlanContextTests : ContextTestBase
     }
 
     [Fact]
+    public void A_recovered_check_failure_and_runtime_error_are_in_the_next_agents_handoff()
+    {
+        PlanRecord plan = Approved(Plans, Step("Fix the check", "a.txt"), Step("Continue the work", "b.txt"));
+        var recorder = new PlanContextRecorder(Store, Plans, NullLogger.Instance);
+        string contextId = recorder.ResolveContext(plan)!;
+        recorder.RunStarted(contextId, plan, continuing: false);
+        PlanStep first = plan.Steps[0];
+        string taskId = FleetPlanContext.StepTaskId(plan.Id, first.Id);
+
+        using (Scope(contextId, taskId))
+        {
+            Journal.RecordError("worker1", "tool", "run_command returned exit code 1");
+        }
+
+        recorder.CheckResult(contextId, plan, first, attempt: 1, passed: false, output: "expected output was missing", node: "worker1");
+        long passed = recorder.CheckResult(contextId, plan, first, attempt: 2, passed: true, output: "all good", node: "hub")!.Value;
+        recorder.StepDone(contextId, plan, first, passed, "hub");
+
+        string nextTask = FleetPlanContext.StepTaskId(plan.Id, plan.Steps[1].Id);
+        using (Scope(contextId, nextTask))
+        {
+            string? injected = Journal.BuildInjection("worker2");
+            Assert.Contains("run_command returned exit code 1", injected);
+            Assert.Contains("FAILED check - expected output was missing", injected);
+            Assert.Contains("check` passed", injected);
+        }
+
+        HandoffEnvelope handoff = Store.ListHandoffs(contextId, 10).Single().Envelope;
+        Assert.Contains(Store.EventsOfKinds(contextId, [FleetContextEventKind.Error], 10).Single().Id, handoff.SourceEventIds);
+        Assert.Contains(Store.EventsOfKinds(contextId, [FleetContextEventKind.Verification], 10).Single(e => ContextText.Bool(e.Payload, "passed") == false).Id, handoff.SourceEventIds);
+    }
+
+    [Fact]
     public async Task A_file_changed_outside_the_plan_between_steps_is_flagged_to_the_next_agent_and_noted()
     {
         PlanRecord plan = Approved(Plans, Step("Create a", "a.txt"), Step("Unrelated work", "b.txt"), Step("Use a", "c.txt"));

@@ -33,6 +33,8 @@ public sealed class FleetConfigStoreTests : IDisposable
         Assert.Contains("127.0.0.1", node.Url);
         Assert.True(node.Fallback);
         Assert.Equal(FleetTiers.Heavy, node.Tier);
+        Assert.Equal("off", node.Caveman);
+        Assert.Equal("off", node.Ponytail);
         Assert.True(File.Exists(ConfigPath));
         Assert.DoesNotContain("192.168.", File.ReadAllText(ConfigPath));
     }
@@ -93,6 +95,26 @@ public sealed class FleetConfigStoreTests : IDisposable
     }
 
     [Fact]
+    public void Machine_style_levels_normalize_persist_and_reach_the_node_prompt()
+    {
+        WriteConfig("""[{"name":"a","url":"http://h:1/v1","model":"m","purpose":"","caveman":"FULL","ponytail":"lite"}]""");
+
+        FleetConfigStore store = Open();
+        FleetNodeConfig savedNode = Assert.Single(store.Current.Nodes);
+        FleetNodeDefinition node = Assert.Single(FleetOptions.Load(new ConfigurationBuilder().Build(), store).Nodes);
+        string prompt = Assert.IsType<string>(AgentStylePrompt.Build(node));
+
+        Assert.Equal("full", savedNode.Caveman);
+        Assert.Equal("lite", savedNode.Ponytail);
+        Assert.Contains("Caveman full", prompt);
+        Assert.Contains("Ponytail lite", prompt);
+
+        FleetConfig reopened = Open().Current;
+        Assert.Equal("full", Assert.Single(reopened.Nodes).Caveman);
+        Assert.Equal("lite", Assert.Single(reopened.Nodes).Ponytail);
+    }
+
+    [Fact]
     public void The_first_heavy_node_becomes_the_fallback_when_none_is_marked()
     {
         WriteConfig("""[{"name":"a","url":"http://h:1/v1","model":"m","purpose":"","tier":"light"},{"name":"b","url":"http://h:2/v1","model":"m","purpose":"","tier":"heavy"}]""");
@@ -119,6 +141,8 @@ public sealed class FleetConfigStoreTests : IDisposable
     [InlineData("""[{"name":"a","url":"not a url","model":"m","purpose":""}]""", "invalid URL")]
     [InlineData("""[{"name":"a","url":"http://h:1/v1","model":"","purpose":""}]""", "must have a model")]
     [InlineData("""[{"name":"a","url":"http://h:1/v1","model":"m","purpose":"","tier":"huge"}]""", "tier")]
+    [InlineData("""[{"name":"a","url":"http://h:1/v1","model":"m","purpose":"","caveman":"brief"}]""", "caveman")]
+    [InlineData("""[{"name":"a","url":"http://h:1/v1","model":"m","purpose":"","ponytail":"maximum"}]""", "ponytail")]
     [InlineData("""[{"name":"a","url":"http://h:1/v1","model":"m","purpose":"","fallback":true},{"name":"b","url":"http://h:2/v1","model":"m","purpose":"","fallback":true}]""", "Exactly one node")]
     [InlineData("""[{"name":"eyes","url":"http://h:1/v1","model":"m","purpose":"","vision":true}]""", "at least one text node")]
     [InlineData("[]", "at least one text node")]

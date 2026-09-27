@@ -151,7 +151,9 @@ internal sealed class FleetConfigStore
             .Select(node => node with
             {
                 Url = NormalizeUrl(node.Url),
-                Api = string.IsNullOrWhiteSpace(node.Api) ? null : node.Api.Trim().ToLowerInvariant()
+                Api = string.IsNullOrWhiteSpace(node.Api) ? null : node.Api.Trim().ToLowerInvariant(),
+                Caveman = AgentStylePrompt.Normalize(node.Caveman),
+                Ponytail = AgentStylePrompt.Normalize(node.Ponytail)
             })
             .Select(node => node.Vision
                 ? node with { Tier = null, Fallback = false }
@@ -247,6 +249,16 @@ internal sealed class FleetConfigStore
             if (node.Api is not (null or "ollama" or "openai"))
             {
                 throw new InvalidOperationException($"Node '{node.Name}' has api '{node.Api}': it must be ollama (the default) or openai.");
+            }
+
+            if (!AgentStylePrompt.IsValid(node.Caveman))
+            {
+                throw new InvalidOperationException($"Node '{node.Name}' has caveman '{node.Caveman}': choose off, lite, full, or ultra.");
+            }
+
+            if (!AgentStylePrompt.IsValid(node.Ponytail))
+            {
+                throw new InvalidOperationException($"Node '{node.Name}' has ponytail '{node.Ponytail}': choose off, lite, full, or ultra.");
             }
 
             if (!node.Vision && !FleetTiers.All.Contains(node.Tier!, StringComparer.Ordinal))

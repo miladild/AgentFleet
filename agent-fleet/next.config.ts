@@ -5,8 +5,7 @@ import type { NextConfig } from "next";
 const standalone = process.env.FLEET_STANDALONE === "1";
 
 const nextConfig: NextConfig = {
-  // Lets a dev server run next to the production service without both writing into
-  // the same .next folder: set NEXT_DIST_DIR=.next-dev for the dev one.
+  // Dev defaults to .next-dev so it cannot replace assets from the production build.
   distDir: process.env.NEXT_DIST_DIR || ".next",
   typescript: { ignoreBuildErrors: false },
   serverExternalPackages: ["@copilotkit/runtime"],

@@ -35,6 +35,8 @@ internal static class FleetTiers
 /// "ollama" (default): Ollama's native API, which is what lets the fleet set the context size. "openai": any
 /// OpenAI-compatible server (LM Studio, vLLM, llama.cpp), which gets requests the way it expects and sets its own size.
 /// </param>
+/// <param name="Caveman">Optional concise-response preset: off, lite, full, or ultra.</param>
+/// <param name="Ponytail">Optional minimal-coding preset: off, lite, full, or ultra.</param>
 internal sealed record FleetNodeConfig(
     string Name,
     string Url,
@@ -44,7 +46,9 @@ internal sealed record FleetNodeConfig(
     bool Vision = false,
     bool Fallback = false,
     int? ContextLength = null,
-    string? Api = null);
+    string? Api = null,
+    string? Caveman = null,
+    string? Ponytail = null);
 
 internal sealed record FleetToolConfig(bool Enabled);
 
