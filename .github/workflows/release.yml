@@ -1,9 +1,10 @@
 name: Release
 
-# Push a version tag (git tag v0.1.0 && git push origin v0.1.0) to build the downloads and publish them as a
-# GitHub Release. Run it by hand (Actions > Release > Run workflow) to build them without publishing.
+# Bumping agent-fleet/package.json on main builds and publishes that version. Pushing a v* tag also publishes;
+# Run it by hand (Actions > Release > Run workflow) to build without publishing.
 on:
   push:
+    branches: [main]
     tags: ['v*']
   workflow_dispatch:
 
@@ -11,7 +12,93 @@ permissions:
   contents: read
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      build: ${{ steps.release.outputs.build }}
+      publish: ${{ steps.release.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check whether this version needs a release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          version="$(jq -r .version agent-fleet/package.json)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "Invalid fleet version: $version" >&2; exit 1; }
+          tag="v$version"
+          build=false
+          publish=false
+
+          api_status() {
+            curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "$GITHUB_API_URL/repos/$GH_REPO/$1"
+          }
+
+          case "$EVENT_NAME" in
+            workflow_dispatch)
+              build=true
+              ;;
+            push)
+              if [[ "$EVENT_REF" == refs/tags/v* ]]; then
+                [[ "$REF_NAME" == "$tag" ]] || { echo "Tag $REF_NAME does not match package version $version." >&2; exit 1; }
+                should_publish=true
+              elif [[ "$EVENT_REF" == refs/heads/main ]]; then
+                if [[ "$PUSH_BEFORE" =~ ^0+$ ]]; then
+                  echo 'No previous main version to compare; skipping release.'
+                else
+                  previous_version="$(git show "$PUSH_BEFORE:agent-fleet/package.json" | jq -r .version)"
+                  if [[ "$previous_version" == "$version" ]]; then
+                    echo "Fleet version remains $version; no release needed."
+                  else
+                    should_publish=true
+                  fi
+                fi
+              fi
+              ;;
+          esac
+
+          if [[ "${should_publish:-false}" == true ]]; then
+            release_status="$(api_status "releases/tags/$tag")"
+            case "$release_status" in
+              200) echo "Release $tag already exists; skipping." ;;
+              404)
+                if [[ "$EVENT_REF" == refs/heads/main ]]; then
+                  tag_status="$(api_status "git/ref/tags/$tag")"
+                  case "$tag_status" in
+                    200) echo "Tag $tag already exists without a release; skipping automatic publication." ;;
+                    404) build=true; publish=true ;;
+                    *) echo "GitHub tag lookup failed with HTTP $tag_status." >&2; exit 1 ;;
+                  esac
+                else
+                  build=true
+                  publish=true
+                fi
+                ;;
+              *) echo "GitHub release lookup failed with HTTP $release_status." >&2; exit 1 ;;
+            esac
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: prepare
+    if: needs.prepare.outputs.build == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -41,8 +128,10 @@ jobs:
 
       - name: Build the downloads
         shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: >
-          ./scripts/Build-Release.ps1 -Runtime ${{ matrix.runtime }} -OutDir dist
+          ./scripts/Build-Release.ps1 -Runtime ${{ matrix.runtime }} -Version $env:RELEASE_VERSION -OutDir dist
           ${{ matrix.extension && '-Extension' || '' }}
 
       - uses: actions/upload-artifact@v4
@@ -56,8 +145,8 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [prepare, build]
+    if: needs.prepare.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -70,11 +159,13 @@ jobs:
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           cat dist/SHA256SUMS-*.txt > dist/SHA256SUMS.txt
           rm dist/SHA256SUMS-*.txt
-          gh release create "$GITHUB_REF_NAME" dist/* \
+          gh release create "v$RELEASE_VERSION" dist/* \
             --repo "$GITHUB_REPOSITORY" \
-            --title "Agent Fleet $GITHUB_REF_NAME" \
+            --target "$GITHUB_SHA" \
+            --title "Agent Fleet v$RELEASE_VERSION" \
             --generate-notes \
             --notes "Downloads: AgentFleet-*-win-x64.zip (Windows) or AgentFleet-*-linux-x64.tar.gz (Linux) for the fleet, agent-fleet-chat-*.vsix for VS Code. See README.md inside the download to start it. Needs Node.js 20+ and Ollama; no .NET or build tools."
