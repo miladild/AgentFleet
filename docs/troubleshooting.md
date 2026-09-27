@@ -52,6 +52,17 @@ rules to the named peer IPs. `-RestrictOllamaRules` remains accepted for compati
   the most it may use is M", give that machine a larger `contextLength` (if its memory allows) or a model with a longer
   window. A machine set to `"api": "openai"` chooses its own size, which may be small.
 
+## The page says “This page couldn’t load” or has no styling
+
+A successful response from `/` only means the server returned HTML. If the browser shows Next.js's generic error page, open
+the browser console and check whether `/_next/static/...` files return 404. That points to a missing or mixed web build,
+not a stopped backend.
+
+Development and production must use separate Next.js output directories. `scripts/serve.mjs dev` and Playwright use
+`.next-dev`; production uses `.next`. If you invoke `next dev` directly, set `NEXT_DIST_DIR=.next-dev`. To restore the
+production UI, run `npm run build` from `agent-fleet`, then restart the web UI process or service. The backend does not
+need a restart for a missing front-end chunk.
+
 ## The backend will not start
 
 Look at the end of the log (`logs\agent-<date>.log` next to the program) or run it in a terminal (`npm run dev:agent`).

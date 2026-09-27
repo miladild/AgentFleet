@@ -8,6 +8,7 @@
     "dev:ui": "node scripts/serve.mjs dev",
     "build": "next build",
     "start": "node scripts/serve.mjs start",
+    "test:e2e": "playwright test",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit"
   },
@@ -24,6 +25,7 @@
     "zod": "^3.24.4"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",

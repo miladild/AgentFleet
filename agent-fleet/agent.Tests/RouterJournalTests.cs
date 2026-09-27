@@ -12,6 +12,8 @@ public sealed class RouterJournalTests : ContextTestBase
     private sealed class RecordingClient : IChatClient
     {
         public List<IReadOnlyList<ChatMessage>> Calls { get; } = [];
+        public bool FailAfterFirstChunk { get; set; }
+        public bool FailBeforeFirstChunk { get; set; }
 
         public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
         {
@@ -25,7 +27,17 @@ public sealed class RouterJournalTests : ContextTestBase
             [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
             Calls.Add(messages.ToList());
+            if (FailBeforeFirstChunk)
+            {
+                throw new HttpRequestException("worker is offline");
+            }
+
             yield return new ChatResponseUpdate(ChatRole.Assistant, "hel");
+            if (FailAfterFirstChunk)
+            {
+                throw new IOException("worker stream disconnected");
+            }
+
             yield return new ChatResponseUpdate(ChatRole.Assistant, "lo");
             await Task.CompletedTask;
         }
@@ -155,5 +167,92 @@ public sealed class RouterJournalTests : ContextTestBase
         Assert.Equal(task, route.TaskId);
         Assert.Equal("plan step (heavy)", ContextText.String(route.Payload, "reason"));
         Assert.Equal("heavy", ContextText.String(route.Payload, "tier"));
+    }
+
+    [Fact]
+    public async Task A_partial_stream_failure_is_recorded_and_given_to_the_next_call()
+    {
+        string id = NewContextId();
+        using IDisposable scope = Scope(id);
+        _node.FailAfterFirstChunk = true;
+
+        string firstReply = await Ask("first request");
+        Assert.StartsWith("hel", firstReply);
+        Assert.Contains("partial, not a complete answer", firstReply);
+        Assert.Contains("Open Context for the error details", firstReply);
+
+        FleetContextEvent error = Assert.Single(Store.EventsOfKinds(id, [FleetContextEventKind.Error], 10));
+        Assert.Equal("stream", ContextText.String(error.Payload, "source"));
+        Assert.Equal("worker stream disconnected", ContextText.String(error.Payload, "message"));
+        Assert.Equal("hel", ContextText.String(error.Payload, "partialOutput"));
+
+        _node.FailAfterFirstChunk = false;
+        await Ask("continue after the disconnect");
+
+        IReadOnlyList<ChatMessage> received = _node.Calls[^1];
+        ChatMessage context = Assert.Single(received, message => message.Role == ChatRole.System);
+        Assert.Contains("worker stream disconnected", context.Text);
+        Assert.Contains("Partial output before failure: hel", context.Text);
+        Assert.Contains(Store.EventsOfKinds(id, [FleetContextEventKind.ContextAssembled], 10), delivery =>
+            ContextText.String(delivery.Payload, "text")!.Contains("worker stream disconnected"));
+    }
+
+    [Fact]
+    public async Task A_pre_response_failover_is_visible_and_attributed_to_the_machine_that_answered()
+    {
+        string id = NewContextId();
+        using IDisposable scope = Scope(id);
+        IConfiguration configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["FLEET_CONFIG_PATH"] = Path.Combine(Root, "failover.config.json"),
+                ["FLEET_PLANS_DIR"] = Path.Combine(Root, "plans"),
+                ["HUB_OLLAMA_MODEL"] = "test-model"
+            })
+            .Build();
+        var configStore = new FleetConfigStore(configuration);
+        FleetNodeConfig workerConfig = new("worker", "http://127.0.0.1:11434/v1", "test-model", "worker", FleetTiers.Standard);
+        configStore.Save(configStore.Current with { Nodes = [configStore.Current.Nodes[0], workerConfig] });
+        FleetOptions options = FleetOptions.Load(configuration, configStore);
+        FleetNodeDefinition hub = options.Nodes.Single(node => node.Fallback);
+        FleetNodeDefinition worker = options.Nodes.Single(node => node.Name == "worker");
+        var health = new FleetHealthMonitor(options, new Factory());
+        var fallbackRaw = new RecordingClient();
+        var workerRaw = new RecordingClient { FailBeforeFirstChunk = true };
+        IChatClient fallback = new ResilientChatClient(fallbackRaw, hub, health, NullLogger.Instance, journal: Journal);
+        IChatClient workerClient = new ResilientChatClient(workerRaw, worker, health, NullLogger.Instance, fallback, Journal, hub);
+        var router = new FleetRoutingChatClient(
+            new RecordingClient(),
+            [new FleetRouteTarget(hub, fallback), new FleetRouteTarget(worker, workerClient)],
+            health,
+            new FleetModeService(configStore),
+            new FleetPlanModeService(configStore),
+            new FleetPlanStore(configuration),
+            new HashSet<string>(),
+            new FleetActivityLog(),
+            NullLogger.Instance,
+            Journal);
+        var optionsForWorker = new ChatOptions
+        {
+            AdditionalProperties = new AdditionalPropertiesDictionary { [FleetRoutingChatClient.RunnerTierKey] = FleetTiers.Standard }
+        };
+        var reply = new StringBuilder();
+        await foreach (ChatResponseUpdate update in router.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "do the work")], optionsForWorker))
+        {
+            reply.Append(update.Text);
+        }
+
+        Assert.Contains("hello", reply.ToString());
+        Assert.Contains("via hub", reply.ToString());
+        Assert.Contains(Assert.Single(fallbackRaw.Calls), message =>
+            message.Role == ChatRole.System && message.Text.Contains("worker is offline"));
+        Assert.Contains(Store.EventsOfKinds(id, [FleetContextEventKind.Error], 10), e => ContextText.String(e.Payload, "source") == "failover");
+        Assert.Contains(Store.EventsOfKinds(id, [FleetContextEventKind.Route], 10), e =>
+            e.Node == "hub" && ContextText.String(e.Payload, "phase") == "fallback");
+        FleetContextEvent addedContext = Assert.Single(Store.EventsOfKinds(id, [FleetContextEventKind.ContextAssembled], 10),
+            e => ContextText.Bool(e.Payload, "supplemental") == true);
+        Assert.Equal("hub", addedContext.Node);
+        Assert.Contains("worker is offline", ContextText.String(addedContext.Payload, "text"));
+        Assert.Equal("hub", ContextText.String(Assert.Single(Store.EventsOfKinds(id, [FleetContextEventKind.AssistantOutput], 10)).Payload, "node"));
     }
 }

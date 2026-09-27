@@ -9,28 +9,36 @@
       "model": "qwen3-coder:30b",
       "purpose": "This machine. The strongest model: hard coding work, planning, and the fallback when another machine is down.",
       "tier": "heavy",
-      "fallback": true
+      "fallback": true,
+      "caveman": "off",
+      "ponytail": "off"
     },
     {
       "name": "worker1",
       "url": "http://192.168.1.21:11434/v1",
       "model": "qwen2.5-coder:7b",
       "purpose": "A second machine for ordinary coding work: bug fixes, small features, running plan steps.",
-      "tier": "standard"
+      "tier": "standard",
+      "caveman": "off",
+      "ponytail": "off"
     },
     {
       "name": "worker2",
       "url": "http://192.168.1.22:11434/v1",
       "model": "llama3.2:3b",
       "purpose": "A small, fast model for quick questions and trivial edits.",
-      "tier": "light"
+      "tier": "light",
+      "caveman": "off",
+      "ponytail": "off"
     },
     {
       "name": "eyes",
       "url": "http://192.168.1.21:11434/v1",
       "model": "qwen2.5vl:7b",
       "purpose": "Reads screenshots and images. Only used when a message contains an image.",
-      "vision": true
+      "vision": true,
+      "caveman": "off",
+      "ponytail": "off"
     }
   ],
   "tools": {

@@ -34,12 +34,17 @@ internal sealed class FleetContextJournal
 
     public FleetRequestIdentity? Current => _requestContext.Current;
 
+    public string? ActualNode => _requestContext.ActualNode;
+
     public IDisposable Push(FleetRequestIdentity identity) => _requestContext.Push(identity);
 
-    public void RecordRoute(string node, string? tier, string phase, string reason) =>
+    public void RecordRoute(string node, string? tier, string phase, string reason)
+    {
+        _requestContext.SetActualNode(node);
         Try("route", identity => Store.AppendEvent(
             identity.ContextId, FleetContextEventKind.Route, new { node, tier, phase, reason, surface = identity.Surface },
             identity.TaskId, actor: "router", agent: "fleet", node: node));
+    }
 
     public void RecordAssistantOutput(string? node, string text, int toolCalls) =>
         Try("assistant output", identity =>
@@ -55,6 +60,46 @@ internal sealed class FleetContextJournal
                 new { text = Clip(text, MaxAssistantCharacters), length = text.Length, toolCalls, node },
                 identity.TaskId, actor: "assistant", agent: "fleet", node: node);
         });
+
+    public long? RecordError(string? node, string source, string message, string? partialOutput = null)
+    {
+        FleetRequestIdentity? identity = Current;
+        if (identity is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return Store.AppendEvent(
+                identity.ContextId,
+                FleetContextEventKind.Error,
+                new { source, message = Clip(message, 1200), partialOutput = Clip(partialOutput, 1200) },
+                identity.TaskId, actor: "fleet", agent: "fleet-router", node: node);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Could not record an error in context {ContextId}.", identity.ContextId);
+            return null;
+        }
+    }
+
+    /// <summary>Records an extra system note that a model received after the main context was assembled.</summary>
+    public void RecordContextAddition(string? node, string text, IReadOnlyList<long>? eventIds = null) =>
+        Try("context addition", identity => Store.AppendEvent(
+            identity.ContextId,
+            FleetContextEventKind.ContextAssembled,
+            new
+            {
+                node,
+                taskId = identity.TaskId,
+                text = Clip(text, MaxInjectedCharacters),
+                eventIds = eventIds ?? [],
+                artifactIds = Array.Empty<string>(),
+                truncated = false,
+                supplemental = true
+            },
+            identity.TaskId, actor: "fleet", agent: "context-assembler", node: node));
 
     /// <summary>A tool call that the backend ran, with what it was given and what came back.</summary>
     public void RecordToolExecution(string? callId, string name, string argumentsJson, string result, bool isError) =>
@@ -77,6 +122,14 @@ internal sealed class FleetContextJournal
                     isError
                 },
                 identity.TaskId, actor: "tool", agent: "fleet");
+            if (isError)
+            {
+                Store.AppendEvent(
+                    identity.ContextId,
+                    FleetContextEventKind.Error,
+                    new { source = "tool", tool = name, message = Clip(result, MaxToolResultCharacters) },
+                    identity.TaskId, actor: "tool", agent: "fleet");
+            }
         });
 
     /// <summary>Pins a decision or constraint so it is handed to every agent that continues this work.</summary>
@@ -115,12 +168,12 @@ internal sealed class FleetContextJournal
     /// The durable context to put in front of the model for this call, or null when there is none worth
     /// sending. What was handed over is recorded, so the inspector can show exactly what an agent received.
     /// </summary>
-    public string? BuildInjection(string? node)
+    public string? BuildInjection(string? node, string? stylePrompt = null)
     {
         FleetRequestIdentity? identity = Current;
         if (identity is null)
         {
-            return null;
+            return stylePrompt;
         }
 
         try
@@ -131,6 +184,11 @@ internal sealed class FleetContextJournal
             if (client is not null)
             {
                 preview = preview with { Text = string.IsNullOrWhiteSpace(preview.Text) ? client : $"{preview.Text}\n\n{client}" };
+            }
+
+            if (!string.IsNullOrWhiteSpace(stylePrompt))
+            {
+                preview = preview with { Text = string.IsNullOrWhiteSpace(preview.Text) ? stylePrompt : $"{preview.Text}\n\n{stylePrompt}" };
             }
 
             if (string.IsNullOrWhiteSpace(preview.Text))
@@ -155,7 +213,11 @@ internal sealed class FleetContextJournal
         catch (Exception exception)
         {
             _logger.LogWarning(exception, "Could not assemble the durable context for {ContextId}.", identity.ContextId);
-            return null;
+            long? errorEvent = RecordError(null, "context assembly", exception.Message);
+            string warning = "Fleet could not load durable context for this call. Do not assume earlier decisions, checks, or handoffs were included; inspect the current files and ask the user if needed.";
+            string delivered = string.IsNullOrWhiteSpace(stylePrompt) ? warning : $"{warning}\n\n{stylePrompt}";
+            RecordContextAddition(node, delivered, errorEvent is { } id ? [id] : []);
+            return delivered;
         }
     }
 

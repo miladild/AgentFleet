@@ -49,7 +49,7 @@ type Inspection = {
   pinned?: ContextEvent[] | null;
 };
 
-type Delivery = { id: number; node: string | null; atUtc: string; payload: { text?: string; eventIds?: number[]; taskId?: string | null } };
+type Delivery = { id: number; node: string | null; atUtc: string; payload: { text?: string; eventIds?: number[]; taskId?: string | null; supplemental?: boolean } };
 
 const short = (text: unknown, limit = 140) => {
   const value = String(text ?? "").replace(/\s+/g, " ").trim();
@@ -78,7 +78,7 @@ function describe(e: ContextEvent): string {
     case "plan-transition":
       return `${p.to}: ${short(p.note, 120)}`;
     case "error":
-      return short(p.message);
+      return `${[p.source, p.tool].filter(Boolean).join(" / ") || "error"}: ${short(p.message)}${p.partialOutput ? ` (partial output: ${short(p.partialOutput, 120)})` : ""}`;
     case "artifact-published":
     case "artifact-diverged":
       return short(p.path);
@@ -301,6 +301,9 @@ export function ContextPanel() {
                       </div>
                       <div className="text-neutral-400">Next: {short(data.handoffs[0].envelope.nextAction, 220)}</div>
                       <div className="text-neutral-400">Done when: {short(data.handoffs[0].envelope.completionCondition, 160)}</div>
+                      {data.handoffs[0].envelope.verificationEvidence.map((evidence, i) => (
+                        <div key={i} className="text-neutral-400">Check: {short(evidence, 220)}</div>
+                      ))}
                       {data.handoffs[0].envelope.completedWork.map((w, i) => (
                         <div key={i} className="text-neutral-500">- {short(w, 160)}</div>
                       ))}
@@ -348,7 +351,7 @@ export function ContextPanel() {
                         <li key={d.id}>
                           <details>
                             <summary className="cursor-pointer text-[11px] text-neutral-400">
-                              {new Date(d.atUtc).toLocaleTimeString()} - {d.node ?? "?"} - {d.payload.eventIds?.length ?? 0} events
+                              {new Date(d.atUtc).toLocaleTimeString()} - {d.node ?? "?"} - {d.payload.supplemental ? "additional note" : `${d.payload.eventIds?.length ?? 0} events`}
                             </summary>
                             <pre className="mt-1 text-[10px] text-neutral-400 whitespace-pre-wrap bg-neutral-950 border border-neutral-800 rounded p-2 max-h-40 overflow-y-auto">
                               {d.payload.text}

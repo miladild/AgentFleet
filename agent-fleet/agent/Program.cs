@@ -119,7 +119,9 @@ FleetRoutingChatClient BuildRouter(FleetConfig config)
             node,
             healthMonitor,
             loggerFactory.CreateLogger($"AgentFleet.Node.{node.Name}"),
-            fallback);
+            fallback,
+            contextJournal,
+            fallback is null ? null : fallbackNode);
 
     IChatClient fallbackClient = BuildNodeClient(fallbackNode, null);
 
@@ -522,7 +524,27 @@ void RecordToolCall(FunctionInvocationContext context, string toolName, string r
         arguments = "(arguments could not be serialised)";
     }
 
-    contextJournal.RecordToolExecution(context.CallContent?.CallId, toolName, arguments, result, isError);
+    contextJournal.RecordToolExecution(context.CallContent?.CallId, toolName, arguments, result, isError || ToolReturnedError(result));
+}
+
+bool ToolReturnedError(string result)
+{
+    string output = result.TrimStart();
+    if (output.StartsWith("Error:", StringComparison.OrdinalIgnoreCase) ||
+        output.StartsWith("Failed:", StringComparison.OrdinalIgnoreCase))
+    {
+        return true;
+    }
+
+    const string exitCodePrefix = "Exit code:";
+    if (output.StartsWith(exitCodePrefix, StringComparison.OrdinalIgnoreCase))
+    {
+        int end = output.IndexOfAny(['\r', '\n']);
+        string value = (end < 0 ? output[exitCodePrefix.Length..] : output[exitCodePrefix.Length..end]).Trim();
+        return int.TryParse(value, out int exitCode) && exitCode != 0;
+    }
+
+    return false;
 }
 
 // How many tool rounds one attempt at a plan step gets. Measured: a small worker wrote and ran the same test file for more
@@ -776,7 +798,7 @@ app.MapGet("/api/fleet-config", () =>
     return Results.Json(new
     {
         triageModel = config.TriageModel,
-        nodes = config.Nodes.Select(node => new { node.Name, node.Url, node.Model, node.Purpose, node.Tier, node.Vision, node.Fallback, node.ContextLength, node.Api }),
+        nodes = config.Nodes.Select(node => new { node.Name, node.Url, node.Model, node.Purpose, node.Tier, node.Vision, node.Fallback, node.ContextLength, node.Api, node.Caveman, node.Ponytail }),
         tools = ToolsPayload(config),
         mcpServers = config.McpServerMap,
         // What actually happened at the last startup, which can differ from the saved
@@ -884,16 +906,23 @@ app.MapPut("/api/fleet-config", async (FleetConfigUpdateRequest request, Cancell
         {
             TriageModel = request.TriageModel?.Trim() is { Length: > 0 } triageModel ? triageModel : current.TriageModel,
             Nodes = request.Nodes is { Count: > 0 }
-                ? request.Nodes.Select(node => new FleetNodeConfig(
-                    node.Name.Trim(),
-                    node.Url.Trim(),
-                    node.Model.Trim(),
-                    node.Purpose,
-                    node.Tier,
-                    node.Vision,
-                    node.Fallback,
-                    node.ContextLength,
-                    node.Api)).ToList()
+                ? request.Nodes.Select(node =>
+                {
+                    string name = node.Name.Trim();
+                    FleetNodeConfig? previous = current.Nodes.FirstOrDefault(candidate => candidate.Name == name);
+                    return new FleetNodeConfig(
+                        name,
+                        node.Url.Trim(),
+                        node.Model.Trim(),
+                        node.Purpose,
+                        node.Tier,
+                        node.Vision,
+                        node.Fallback,
+                        node.ContextLength,
+                        node.Api,
+                        node.Caveman ?? previous?.Caveman,
+                        node.Ponytail ?? previous?.Ponytail);
+                }).ToList()
                 : current.Nodes,
             Tools = request.Tools is { Count: > 0 }
                 ? request.Tools.ToDictionary(kv => kv.Key, kv => new FleetToolConfig(kv.Value), StringComparer.Ordinal)
@@ -941,7 +970,7 @@ app.MapPut("/api/fleet-config", async (FleetConfigUpdateRequest request, Cancell
         return Results.Json(new
         {
             triageModel = saved.TriageModel,
-            nodes = saved.Nodes.Select(node => new { node.Name, node.Url, node.Model, node.Purpose, node.Tier, node.Vision, node.Fallback, node.ContextLength, node.Api }),
+            nodes = saved.Nodes.Select(node => new { node.Name, node.Url, node.Model, node.Purpose, node.Tier, node.Vision, node.Fallback, node.ContextLength, node.Api, node.Caveman, node.Ponytail }),
             tools = ToolsPayload(saved),
             mcpServers = saved.McpServerMap,
             mcpStatus = toolRegistry.Mcp.Statuses,
@@ -1701,7 +1730,9 @@ internal sealed record FleetConfigNodeUpdate(
     bool Vision = false,
     bool Fallback = false,
     int? ContextLength = null,
-    string? Api = null);
+    string? Api = null,
+    string? Caveman = null,
+    string? Ponytail = null);
 
 internal sealed record FleetConfigUpdateRequest(
     string? TriageModel,

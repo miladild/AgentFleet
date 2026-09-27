@@ -84,14 +84,24 @@ internal sealed record FleetRunRequest(FleetRequestIdentity Identity, JsonElemen
 
 internal sealed class FleetRequestContext
 {
-    private static readonly AsyncLocal<FleetRequestIdentity?> Ambient = new();
+    private static readonly AsyncLocal<RequestScope?> Ambient = new();
 
-    public FleetRequestIdentity? Current => Ambient.Value;
+    public FleetRequestIdentity? Current => Ambient.Value?.Identity;
+
+    public string? ActualNode => Ambient.Value?.ActualNode;
+
+    public void SetActualNode(string node)
+    {
+        if (Ambient.Value is { } scope)
+        {
+            scope.ActualNode = node;
+        }
+    }
 
     public IDisposable Push(FleetRequestIdentity identity)
     {
-        FleetRequestIdentity? prior = Ambient.Value;
-        Ambient.Value = identity;
+        RequestScope? prior = Ambient.Value;
+        Ambient.Value = new RequestScope(identity);
         return new PopWhenDisposed(prior);
     }
 
@@ -173,7 +183,13 @@ internal sealed class FleetRequestContext
         }
     }
 
-    private sealed class PopWhenDisposed(FleetRequestIdentity? prior) : IDisposable
+    private sealed class RequestScope(FleetRequestIdentity identity)
+    {
+        public FleetRequestIdentity Identity { get; } = identity;
+        public string? ActualNode { get; set; }
+    }
+
+    private sealed class PopWhenDisposed(RequestScope? prior) : IDisposable
     {
         private bool _disposed;
 

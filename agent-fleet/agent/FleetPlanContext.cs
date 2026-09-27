@@ -307,6 +307,27 @@ internal sealed class PlanContextRecorder
             IReadOnlyList<FleetContextEvent> pinned = _store.EventsOfKinds(contextId, [FleetContextEventKind.Decision], 30, pinnedOnly: true);
             sourceEvents.AddRange(pinned.Select(e => e.Id));
 
+            // The final check decides whether this step is done, but it does not erase the
+            // failed attempts that got it there. Carry those into the next agent's handoff.
+            IReadOnlyList<FleetContextEvent> earlierFailures = _store.EventsOfKinds(
+                    contextId, [FleetContextEventKind.Verification, FleetContextEventKind.Error], 200)
+                .Where(e => e.TaskId == stepTask &&
+                    (e.Kind == FleetContextEventKind.Error || ContextText.Bool(e.Payload, "passed") == false))
+                .TakeLast(7)
+                .ToList();
+            sourceEvents.AddRange(earlierFailures.Select(e => e.Id));
+            var verificationEvidence = new List<string>();
+            if (earlierFailures.Count > 0)
+            {
+                verificationEvidence.AddRange(earlierFailures.Select(e => ContextText.Clip(ContextText.Describe(e), 400)));
+            }
+
+            verificationEvidence.Add(skipped
+                ? $"Step {step.Id} was skipped by the user and its check was NOT run: do not assume its work is there, check the files it names."
+                : step.Verify is null
+                    ? $"Step {step.Id} had no automatic check."
+                    : $"Step {step.Id}: `{step.Verify}` passed.");
+
             var envelope = new HandoffEnvelope(
                 Version: 1,
                 ContextId: contextId,
@@ -323,11 +344,7 @@ internal sealed class PlanContextRecorder
                 CompletedWork: fresh.Steps.Where(s => s.Status == StepStatus.Done)
                     .Select(s => $"{s.Id}. {s.Title}{(string.IsNullOrWhiteSpace(s.Note) ? string.Empty : $": {ContextText.Clip(s.Note, 200)}")}").ToList(),
                 ArtifactIds: artifactIds,
-                VerificationEvidence: [skipped
-                    ? $"Step {step.Id} was skipped by the user and its check was NOT run: do not assume its work is there, check the files it names."
-                    : step.Verify is null
-                        ? $"Step {step.Id} had no automatic check."
-                        : $"Step {step.Id}: `{step.Verify}` passed."],
+                VerificationEvidence: verificationEvidence,
                 OpenQuestions: fresh.OpenQuestions,
                 Risks: fresh.Risks,
                 NextAction: next is null

@@ -361,7 +361,7 @@ function planConfirmation(payload: ReturnType<typeof planPayload>, machines?: st
   lines.push(
     "",
     "It starts now and runs in the background on your machines, each step checked with its command before the next begins. " +
-      "A failed step is retried, then given to the strongest machine; if it still fails the plan stops and says why. `@fleet /status` shows how it is going.",
+      "A failed step is retried, then given to the strongest machine; if it still fails the plan stops and says why. VS Code shows live progress, and `@fleet /status` prints the full report in chat.",
   );
   return new vscode.MarkdownString(lines.join("\n"));
 }
@@ -410,12 +410,13 @@ class RunPlanTool implements vscode.LanguageModelTool<PlanToolInput> {
           (body.machines ? `\n\nThe user's machines by tier: ${body.machines}.` : "") +
           `\n\nFix these and call ${RUN_PLAN_TOOL} again with the whole plan.`;
       } else if (body.status === "approved" || body.status === "running") {
+        await followPlan(body.id);
         text =
           `Agent Fleet accepted the plan "${body.title}" (id ${body.id}) and started it. It runs in the background on the user's ` +
           "machines, each step on a machine of its tier and checked with its verify command before the next begins; a failed " +
           "step is retried and then given to the strongest machine, and a step that still fails stops the plan as blocked " +
-          "without undoing anything. Tell the user in a sentence or two that it is running and that `@fleet /status` shows " +
-          "how it is going. Do not carry out the steps yourself.";
+          "without undoing anything. Tell the user in a sentence or two that VS Code will keep showing its progress and that " +
+          "`@fleet /status` prints the full report in chat. Do not carry out the steps yourself.";
       } else {
         text =
           `Agent Fleet saved the plan "${body.title}" (id ${body.id}); it waits for the user's approval. Tell the user to ` +
@@ -436,6 +437,7 @@ class RunPlanTool implements vscode.LanguageModelTool<PlanToolInput> {
 // The run report of the plan that matters now (or of a given plan), as text.
 async function planReport(planId?: string): Promise<{ plan?: PlanSummaryWire; report: string; others: PlanSummaryWire[] }> {
   const res = await fetch(plansUrl());
+  if (!res.ok) throw new Error(`Fleet backend returned HTTP ${res.status}.`);
   const plans = (await res.json()) as PlanSummaryWire[];
   const plan = planId ? plans.find((candidate) => candidate.id === planId.trim()) : pickPlan(plans);
   if (!plan) return { report: "There are no plans yet.", others: [] };
@@ -445,6 +447,91 @@ async function planReport(planId?: string): Promise<{ plan?: PlanSummaryWire; re
     : `# ${plan.title}\n\nStatus: ${plan.status}.`;
   const others = plans.filter((other) => other.id !== plan.id && ["running", "approved", "awaiting-approval", "blocked"].includes(other.status));
   return { plan, report, others };
+}
+
+const monitoredPlans = new Set<string>();
+const PLAN_WATCHES_KEY = "agentFleet.planWatches";
+let planWatchState: vscode.Memento | undefined;
+
+function monitorPlan(planId: string): void {
+  if (monitoredPlans.has(planId)) return;
+  monitoredPlans.add(planId);
+
+  void vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: "Agent Fleet is working", cancellable: false },
+    async (progress) => {
+      try {
+        while (true) {
+          let plan: PlanSummaryWire | undefined;
+          try {
+            const response = await fetch(plansUrl());
+            if (!response.ok) throw new Error(`Fleet backend returned HTTP ${response.status}.`);
+            const plans = (await response.json()) as PlanSummaryWire[];
+            plan = plans.find((candidate) => candidate.id === planId);
+          } catch (error) {
+            progress.report({ message: `Reconnecting to Agent Fleet: ${clip(errorText(error), 160)}` });
+            await new Promise((resolve) => setTimeout(resolve, 5000));
+            continue;
+          }
+
+          if (!plan) {
+            void vscode.window.showErrorMessage(`Agent Fleet no longer has plan ${planId}.`);
+            return;
+          }
+
+          progress.report({ message: `${plan.title}: ${plan.status.replace(/-/g, " ")} · ${plan.stepsDone}/${plan.stepsTotal} steps` });
+          if (!["blocked", "done", "rejected"].includes(plan.status)) {
+            await new Promise((resolve) => setTimeout(resolve, 2500));
+            continue;
+          }
+
+          let blockedSection: string | undefined;
+          if (plan.status === "blocked") {
+            try {
+              blockedSection = (await planReport(planId)).report.match(/## Where it stopped\s*([\s\S]*?)(?=\n## |$)/)?.[1];
+            } catch (error) {
+              blockedSection = `Could not load the full report: ${errorText(error)}`;
+            }
+          }
+          const blockedReason = blockedSection?.replace(/[\r\n`*_#]/g, " ").replace(/\s+/g, " ").trim();
+          const message = plan.status === "blocked"
+            ? `Agent Fleet blocked "${plan.title}" at ${plan.stepsDone}/${plan.stepsTotal} steps${blockedReason ? `: ${clip(blockedReason, 180)}` : "."}`
+            : plan.status === "done"
+              ? `Agent Fleet finished "${plan.title}" (${plan.stepsDone}/${plan.stepsTotal} steps).`
+              : `Agent Fleet rejected "${plan.title}".`;
+          const choice = plan.status === "blocked"
+            ? await vscode.window.showErrorMessage(message, "Open report", "Watch it live")
+            : await vscode.window.showInformationMessage(message, "Open report", "Watch it live");
+          if (choice === "Open report") await showPlanStatus(planId);
+          if (choice === "Watch it live") await watchPlanLive(planId);
+          return;
+        }
+      } catch (error) {
+        void vscode.window.showErrorMessage(`Could not monitor Agent Fleet plan: ${clip(errorText(error), 300)}`);
+      } finally {
+        monitoredPlans.delete(planId);
+        if (planWatchState) {
+          void planWatchState.update(
+            PLAN_WATCHES_KEY,
+            planWatchState.get<string[]>(PLAN_WATCHES_KEY, []).filter((id) => id !== planId),
+          ).then(undefined, () => undefined);
+        }
+      }
+    },
+  );
+}
+
+async function followPlan(planId: string): Promise<void> {
+  if (planWatchState) {
+    const ids = planWatchState.get<string[]>(PLAN_WATCHES_KEY, []);
+    try {
+      await planWatchState.update(PLAN_WATCHES_KEY, [...new Set([...ids, planId])]);
+    } catch {
+      // Keep this run visible even if VS Code cannot persist the restart recovery hint.
+    }
+  }
+  monitorPlan(planId);
+  void watchPlanLive(planId);
 }
 
 class PlanStatusTool implements vscode.LanguageModelTool<{ planId?: string }> {
@@ -606,6 +693,10 @@ function backendIsOnThisMachine(): boolean {
 
 function clip(text: string, limit: number): string {
   return text.length <= limit ? text : `${text.slice(0, limit)}\n... (cut, ${text.length - limit} more characters)`;
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function readTextFile(uri: vscode.Uri): Promise<string | null> {
@@ -1020,7 +1111,8 @@ class FleetLanguageModelProvider implements vscode.LanguageModelChatProvider {
       });
 
       if (!response.ok || !response.body) {
-        throw new Error(`Fleet backend returned HTTP ${response.status}.`);
+        const details = (await response.text().catch(() => "")).trim();
+        throw new Error(`Fleet backend returned HTTP ${response.status}${details ? `: ${clip(details, 1200)}` : "."}`);
       }
 
       const reader = response.body.getReader();
@@ -1107,7 +1199,7 @@ class FleetLanguageModelProvider implements vscode.LanguageModelChatProvider {
       }
     } catch (error) {
       if (token.isCancellationRequested || (error instanceof Error && error.name === "AbortError")) return;
-      throw error;
+      progress.report(new vscode.LanguageModelTextPart(`\n\nAgent Fleet error: ${clip(errorText(error), 1600)}`));
     } finally {
       cancellation.dispose();
     }
@@ -1260,7 +1352,8 @@ const handler: vscode.ChatRequestHandler = async (request, chatContext, stream, 
     }
 
     if (!response.ok || !response.body) {
-      stream.markdown(`Fleet backend returned HTTP ${response.status}.`);
+      const details = (await response.text().catch(() => "")).trim();
+      stream.markdown(`Fleet backend returned HTTP ${response.status}${details ? `:\n\n${clip(details, 1200)}` : "."}`);
       return chatResult;
     }
 
@@ -1270,6 +1363,7 @@ const handler: vscode.ChatRequestHandler = async (request, chatContext, stream, 
     const pendingClientToolCalls: ToolCallState[] = [];
     const toolCalls = new Map<string, ToolCallState>();
     let cancelled = false;
+    let streamFailed = false;
 
     try {
       while (true) {
@@ -1347,11 +1441,18 @@ const handler: vscode.ChatRequestHandler = async (request, chatContext, stream, 
           }
         }
       }
+    } catch (error) {
+      if (token.isCancellationRequested || (error instanceof Error && error.name === "AbortError")) {
+        cancelled = true;
+      } else {
+        streamFailed = true;
+        stream.markdown(`\n\n**Agent Fleet stream error:** ${clip(errorText(error), 1600)}\n\nUse @fleet /status to check whether a plan is still running.`);
+      }
     } finally {
       reader.releaseLock();
     }
 
-    if (cancelled) {
+    if (cancelled || streamFailed) {
       return chatResult;
     }
 
@@ -1403,6 +1504,8 @@ const handler: vscode.ChatRequestHandler = async (request, chatContext, stream, 
 };
 
 export function activate(context: vscode.ExtensionContext) {
+  planWatchState = context.globalState;
+  for (const planId of planWatchState.get<string[]>(PLAN_WATCHES_KEY, [])) monitorPlan(planId);
   context.subscriptions.push(vscode.lm.registerLanguageModelChatProvider("agent-fleet", new FleetLanguageModelProvider()));
   const participant = vscode.chat.createChatParticipant("agent-fleet.fleet", handler);
   context.subscriptions.push(
@@ -1433,12 +1536,11 @@ export function activate(context: vscode.ExtensionContext) {
         void vscode.window.showErrorMessage(body.error ?? "Could not approve the plan.");
         return;
       }
+      await followPlan(planId);
       const choice = await vscode.window.showInformationMessage(
-        "Plan approved. It runs in the background across your machines, each step checked before the next one starts. Ask @fleet /status any time.",
-        "Watch it live",
+        "Plan approved. Its live view is open, and VS Code will keep showing progress while it runs.",
         "Show status",
       );
-      if (choice === "Watch it live") await watchPlanLive(planId);
       if (choice === "Show status") await showPlanStatus(planId);
     }),
     vscode.commands.registerCommand("agentFleet.watchPlan", (planId?: string | null, contextId?: string) =>

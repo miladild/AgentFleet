@@ -91,15 +91,24 @@ internal sealed class FleetRoutingChatClient : IChatClient
             : new PlanGateResult(PlanPhase.Off, null);
         // Non-streaming path isn't used by the AG-UI chat flow today, so it doesn't get
         // the "answered by" footer that GetStreamingResponseAsync appends.
-        FleetRouteTarget target = runnerTier is null
-            ? await SelectTargetAsync(messageList, gate, cancellationToken)
-            : await PickForTierAsync(runnerTier, cancellationToken);
+        FleetRouteTarget target = await SelectTargetWithJournalAsync(messageList, gate, runnerTier, cancellationToken);
         options = StripRunnerKey(options);
         (IReadOnlyList<ChatMessage> sendMessages, ChatOptions? sendOptions) = ApplyPlanMode(messageList, options, gate);
         RecordRoute(target, gate, runnerTier);
-        sendMessages = ContextInjection.Apply(sendMessages, _journal?.BuildInjection(target.Node.Name));
-        ChatResponse response = await target.Client.GetResponseAsync(sendMessages, StripToolsIfVision(target, sendOptions), cancellationToken);
-        _journal?.RecordAssistantOutput(target.Node.Name, response.Text ?? string.Empty,
+        sendMessages = InjectContext(sendMessages, target.Node);
+        ChatResponse response;
+        try
+        {
+            response = await target.Client.GetResponseAsync(sendMessages, StripToolsIfVision(target, sendOptions), cancellationToken);
+        }
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            _journal?.RecordError(_journal?.ActualNode ?? target.Node.Name, "response", exception.Message);
+            throw;
+        }
+
+        string servedBy = _journal?.ActualNode ?? target.Node.Name;
+        _journal?.RecordAssistantOutput(servedBy, response.Text ?? string.Empty,
             response.Messages.Sum(message => message.Contents.Count(content => content is FunctionCallContent)));
 
         foreach (ChatMessage message in response.Messages)
@@ -128,29 +137,39 @@ internal sealed class FleetRoutingChatClient : IChatClient
         PlanGateResult gate = runnerTier is null
             ? PlanGate.Evaluate(_planModeService.Effective, messageList, _planStore)
             : new PlanGateResult(PlanPhase.Off, null);
-        FleetRouteTarget target = runnerTier is null
-            ? await SelectTargetAsync(messageList, gate, cancellationToken)
-            : await PickForTierAsync(runnerTier, cancellationToken);
+        FleetRouteTarget target = await SelectTargetWithJournalAsync(messageList, gate, runnerTier, cancellationToken);
         string route = target.Node.Name;
         options = StripRunnerKey(options);
 
         (IReadOnlyList<ChatMessage> sendMessages, ChatOptions? sendOptions) = ApplyPlanMode(messageList, options, gate);
         RecordRoute(target, gate, runnerTier);
-        sendMessages = ContextInjection.Apply(sendMessages, _journal?.BuildInjection(route));
+        sendMessages = InjectContext(sendMessages, target.Node);
 
         bool sawToolCall = false;
+        bool responseFailed = false;
         int toolCallCount = 0;
         var outputText = new System.Text.StringBuilder();
-        IAsyncEnumerator<ChatResponseUpdate> stream = target.Client.GetStreamingResponseAsync(
-            sendMessages,
-            StripToolsIfVision(target, sendOptions),
-            cancellationToken).GetAsyncEnumerator(cancellationToken);
+        IAsyncEnumerator<ChatResponseUpdate>? stream = null;
 
         try
         {
+            try
+            {
+                stream = target.Client.GetStreamingResponseAsync(
+                    sendMessages,
+                    StripToolsIfVision(target, sendOptions),
+                    cancellationToken).GetAsyncEnumerator(cancellationToken);
+            }
+            catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                _journal?.RecordError(_journal?.ActualNode ?? route, "stream setup", exception.Message);
+                throw;
+            }
+
             while (true)
             {
-                ChatResponseUpdate update;
+                ChatResponseUpdate update = null!;
+                Exception? streamError = null;
                 try
                 {
                     if (!await stream.MoveNextAsync())
@@ -162,12 +181,24 @@ internal sealed class FleetRoutingChatClient : IChatClient
                 }
                 catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
                 {
+                    string failedNode = _journal?.ActualNode ?? route;
+                    _journal?.RecordError(failedNode, "stream", exception.Message, outputText.ToString());
                     _logger.LogError(
                         exception,
                         "Fleet request to {FleetNode} failed mid-stream after {MessageCount} messages.",
-                        route,
+                        failedNode,
                         messageList.Count);
-                    throw;
+                    streamError = exception;
+                }
+
+                if (streamError is not null)
+                {
+                    responseFailed = true;
+                    string failedNode = _journal?.ActualNode ?? route;
+                    string notice = $"\n\n[Fleet stopped while {failedNode} was answering. The text above is partial, not a complete answer. Open Context for the error details, then retry.]";
+                    outputText.Append(notice);
+                    yield return new ChatResponseUpdate(ChatRole.Assistant, notice);
+                    break;
                 }
 
                 ChatResponseUpdate guarded = PlanGate.GuardCalls(
@@ -191,19 +222,31 @@ internal sealed class FleetRoutingChatClient : IChatClient
         }
         finally
         {
-            await stream.DisposeAsync();
+            if (stream is not null)
+            {
+                try
+                {
+                    await stream.DisposeAsync();
+                }
+                catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+                {
+                    _journal?.RecordError(_journal?.ActualNode ?? route, "stream cleanup", exception.Message, outputText.ToString());
+                    throw;
+                }
+            }
         }
 
-        _journal?.RecordAssistantOutput(route, outputText.ToString(), toolCallCount);
+        string servedBy = _journal?.ActualNode ?? route;
+        _journal?.RecordAssistantOutput(servedBy, outputText.ToString(), toolCallCount);
 
         // Only tag the response actually shown to the user as final text, not a round
         // that's about to be followed by a tool call and another round of this loop.
         if (!sawToolCall)
         {
-            yield return new ChatResponseUpdate(ChatRole.Assistant, $"\n\n_— via {route}_");
+            yield return new ChatResponseUpdate(ChatRole.Assistant, $"\n\n_— via {servedBy}_");
         }
 
-        _logger.LogInformation("Fleet request completed via {FleetNode}.", route);
+        _logger.LogInformation("Fleet request {CompletionState} via {FleetNode}.", responseFailed ? "stopped early" : "completed", servedBy);
     }
 
     private void RecordRoute(FleetRouteTarget target, PlanGateResult gate, string? runnerTier) =>
@@ -212,6 +255,25 @@ internal sealed class FleetRoutingChatClient : IChatClient
             runnerTier ?? target.Node.Tier,
             gate.Phase.ToString(),
             runnerTier is not null ? $"plan step ({runnerTier})" : gate.Phase == PlanPhase.Planning ? "planning" : "routed");
+
+    private async Task<FleetRouteTarget> SelectTargetWithJournalAsync(
+        IReadOnlyList<ChatMessage> messages,
+        PlanGateResult gate,
+        string? runnerTier,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return runnerTier is null
+                ? await SelectTargetAsync(messages, gate, cancellationToken)
+                : await PickForTierAsync(runnerTier, cancellationToken);
+        }
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            _journal?.RecordError(null, "route selection", exception.Message);
+            throw;
+        }
+    }
 
     public object? GetService(Type serviceType, object? serviceKey = null)
     {
@@ -325,6 +387,7 @@ internal sealed class FleetRoutingChatClient : IChatClient
         }
         catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
         {
+            _journal?.RecordError(route, "routing", exception.Message);
             _logger.LogWarning(
                 exception,
                 "Fleet triage failed; routing the request to {FleetNode} as a safe fallback.",
@@ -334,6 +397,13 @@ internal sealed class FleetRoutingChatClient : IChatClient
         _logger.LogInformation("Fleet router selected {FleetNode} ({FleetMode} mode).", route, mode);
         _activityLog.Record(route, $"{mode} mode");
         return _byName[route];
+    }
+
+    private IReadOnlyList<ChatMessage> InjectContext(IReadOnlyList<ChatMessage> messages, FleetNodeDefinition node)
+    {
+        string? style = AgentStylePrompt.Build(node);
+        string? injection = _journal?.BuildInjection(node.Name, style) ?? style;
+        return ContextInjection.Apply(messages, injection);
     }
 
     // Planning always goes to the heavy tier. Once a plan runs, chat is only a monitor: the fallback

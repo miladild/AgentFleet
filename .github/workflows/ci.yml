@@ -36,6 +36,14 @@ jobs:
           npm run typecheck
           npm run build
 
+      - name: Web UI browser tests
+        working-directory: agent-fleet
+        env:
+          COPILOTKIT_TELEMETRY_DISABLED: "true"
+        run: |
+          npx playwright install chromium
+          npm run test:e2e
+
       - name: VS Code extension tests
         working-directory: vscode-fleet
         run: |

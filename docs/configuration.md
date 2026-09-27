@@ -51,7 +51,9 @@ fallback, found 2."
   "purpose": "Ordinary coding work",
   "tier": "standard",
   "vision": false,
-  "fallback": false
+  "fallback": false,
+  "caveman": "off",
+  "ponytail": "off"
 }
 ```
 
@@ -66,8 +68,14 @@ fallback, found 2."
 | `fallback` | Exactly one node has this. Missing everywhere means the first heavy text node. |
 | `contextLength` | The most tokens of conversation this machine's model may be asked to see (Ollama's `num_ctx`). Each request asks for what it needs, up to this. Missing means 32768 (or `FLEET_CONTEXT_LENGTH`). Lower it for a machine whose model spills out of graphics memory; see [planning.md](planning.md#how-much-a-model-sees) |
 | `api` | `ollama` (default): Ollama's native API, which is what lets the fleet set the context size. `openai`: any OpenAI-compatible server (LM Studio, vLLM, llama.cpp); it then chooses its own context size |
+| `caveman` | `off`, `lite`, `full` or `ultra`: asks this machine's model to answer more briefly while preserving useful detail and safety conditions. Missing means `off`. |
+| `ponytail` | `off`, `lite`, `full` or `ultra`: asks this machine's model to make small, correct coding changes and avoid speculative work. Missing means `off`. |
 
 At least one text node (not vision) is required.
+
+These are prompt styles configured per machine, not skills installed on worker computers. The selected style follows a
+request through fallback; set the same levels on machines that may hand work to each other when you want consistent
+responses.
 
 ### `tools`
 

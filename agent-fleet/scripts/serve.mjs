@@ -23,6 +23,10 @@ const nextBin = createRequire(import.meta.url).resolve("next/dist/bin/next");
 const args = [nextBin, mode, "-H", host, "-p", port];
 if (mode === "dev") args.push("--turbopack");
 
-const child = spawn(process.execPath, args, { stdio: "inherit", env: process.env });
+const env = { ...process.env };
+// Keep a dev server from replacing the production assets while both are running.
+if (mode === "dev" && !env.NEXT_DIST_DIR) env.NEXT_DIST_DIR = ".next-dev";
+
+const child = spawn(process.execPath, args, { stdio: "inherit", env });
 child.on("exit", (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
 for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => child.kill(signal));

@@ -126,7 +126,7 @@ internal static class ContextText
             FleetContextEventKind.Verification =>
                 $"{(Bool(p, "passed") == true ? "PASSED" : "FAILED")} {Clip(String(p, "command"), 120)}" +
                 (Bool(p, "passed") == true ? string.Empty : $" - {Clip(String(p, "output"), 240)}"),
-            FleetContextEventKind.Error => Clip(String(p, "message"), 300),
+            FleetContextEventKind.Error => ErrorBody(p),
             FleetContextEventKind.PlanTransition =>
                 $"{Clip(String(p, "to"), 40)} {Clip(String(p, "note"), 200)}",
             FleetContextEventKind.ToolCall =>
@@ -151,6 +151,16 @@ internal static class ContextText
         }
 
         return string.Empty;
+    }
+
+    private static string ErrorBody(JsonElement payload)
+    {
+        string source = String(payload, "source") ?? string.Empty;
+        string tool = String(payload, "tool") ?? string.Empty;
+        string message = Clip(String(payload, "message"), 220);
+        string partial = String(payload, "partialOutput") ?? string.Empty;
+        return (source.Length == 0 ? string.Empty : source + (tool.Length == 0 ? ": " : $" [{tool}]: ")) + message +
+               (partial.Length == 0 ? string.Empty : " Partial output before failure: " + Clip(partial, 160));
     }
 
     public static string ShortHash(string? hash) => string.IsNullOrEmpty(hash) ? "(none)" : hash[..Math.Min(10, hash.Length)];

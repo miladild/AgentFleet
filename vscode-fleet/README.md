@@ -84,6 +84,13 @@ which machine did what, the files changed) with **Stop it**, or **Approve and
 resume** when it is blocked. The web UI's **Plans** button shows the same.
 Typing `approve` in the chat also approves the pending plan.
 
+While a plan runs, VS Code shows a progress notification and reconnects to it
+after VS Code restarts. When the plan finishes or blocks, the notification offers
+**Open report** and **Watch it live**. Backend and stream failures are written in
+the chat. For a partial answer or earlier agent failure, the web UI's **Context**
+panel shows the error, any partial output, the next handoff, and what each agent
+received; see [durable context](../docs/context.md#errors-and-recovery).
+
 **Watch it live** (as soon as `@fleet /plan` starts, under a proposed plan,
 under `@fleet /status`, after approving, or the command **Agent Fleet: Watch the
 running plan live**) opens the web UI's live view in VS Code's Simple Browser.
