@@ -119,6 +119,7 @@ internal sealed partial class PlanRunner
     private readonly ConcurrentDictionary<string, bool> _stopRequested = new(StringComparer.Ordinal);
     private readonly Func<int, TimeSpan> _transientDelay;
     private readonly Func<TimeSpan, CancellationToken, Task> _delayAsync;
+    private readonly Func<DateTimeOffset> _utcNow;
     private readonly ISleepGuard _sleepGuard;
 
     public PlanRunner(
@@ -135,10 +136,12 @@ internal sealed partial class PlanRunner
         ISleepGuard? sleepGuard = null,
         IWorkerWorkspaceManager? workerWorkspaces = null,
         FleetModeService? modeService = null,
-        Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
+        Func<TimeSpan, CancellationToken, Task>? delayAsync = null,
+        Func<DateTimeOffset>? utcNow = null)
     {
         _transientDelay = transientDelay ?? DefaultTransientDelay;
         _delayAsync = delayAsync ?? Task.Delay;
+        _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
         _sleepGuard = sleepGuard ?? NoSleepGuard.Instance;
         _recorder = recorder;
         _journal = journal;
@@ -257,7 +260,7 @@ internal sealed partial class PlanRunner
         try
         {
             plan = _store.Update(planId, current => current.RunDeadlineUtc is null
-                ? current with { RunDeadlineUtc = DateTimeOffset.UtcNow + FleetPlanStore.DefaultRunDuration }
+                ? current with { RunDeadlineUtc = _utcNow() + FleetPlanStore.DefaultRunDuration }
                 : current)!;
 
             // An interrupted worker attempt is reconciled against the hashes captured at staging. Never infer
@@ -373,7 +376,7 @@ internal sealed partial class PlanRunner
                 }
 
                 runCancellation.Token.ThrowIfCancellationRequested();
-                if (plan.RunDeadlineUtc is { } runDeadline && DateTimeOffset.UtcNow >= runDeadline)
+                if (plan.RunDeadlineUtc is { } runDeadline && _utcNow() >= runDeadline)
                 {
                     BlockForDeadline(current, step, step.Attempts + 1, deferPlanBlock: false);
                     await RecordChangedFilesAsync(planId);
@@ -686,7 +689,7 @@ internal sealed partial class PlanRunner
 
         for (int attempt = firstAttempt; attempt <= MaxAttemptsPerStep; attempt++)
         {
-            if (plan.RunDeadlineUtc is { } deadline && DateTimeOffset.UtcNow >= deadline)
+            if (plan.RunDeadlineUtc is { } deadline && _utcNow() >= deadline)
             {
                 BlockForDeadline(plan, step, attempt, deferPlanBlock);
                 return false;
@@ -1097,7 +1100,7 @@ internal sealed partial class PlanRunner
     private TimeSpan DelayWithinRunDeadline(PlanRecord plan, TimeSpan requested)
     {
         if (plan.RunDeadlineUtc is not { } deadline) return requested;
-        TimeSpan remaining = deadline - DateTimeOffset.UtcNow;
+        TimeSpan remaining = deadline - _utcNow();
         if (remaining <= TimeSpan.Zero) return TimeSpan.Zero;
         return requested > remaining ? remaining : requested;
     }
@@ -1118,7 +1121,7 @@ internal sealed partial class PlanRunner
     {
         while (true)
         {
-            if (plan.RunDeadlineUtc is { } deadline && DateTimeOffset.UtcNow >= deadline)
+            if (plan.RunDeadlineUtc is { } deadline && _utcNow() >= deadline)
                 return (null, waits);
 
             int waitNumber = ++waits;
@@ -1131,7 +1134,7 @@ internal sealed partial class PlanRunner
                 modelNode: failedModel, workspaceNode: workspace);
             await DelayBeforeRetryAsync(delay, cancellationToken);
 
-            if (plan.RunDeadlineUtc is { } runDeadline && DateTimeOffset.UtcNow >= runDeadline)
+            if (plan.RunDeadlineUtc is { } runDeadline && _utcNow() >= runDeadline)
                 return (null, waits);
             if (_healthMonitor is null || failedModel is null)
                 return (null, waits);
@@ -1160,7 +1163,7 @@ internal sealed partial class PlanRunner
                 return (failedModel, waits);
             }
 
-            if (plan.RunDeadlineUtc is { } afterProbeDeadline && DateTimeOffset.UtcNow >= afterProbeDeadline)
+            if (plan.RunDeadlineUtc is { } afterProbeDeadline && _utcNow() >= afterProbeDeadline)
                 return (null, waits);
             string? route = await RouteFailedModelAsync(plan, step, tier, failedModel, workspace, attempt, cancellationToken);
             if (route is not null) return (route, waits);
