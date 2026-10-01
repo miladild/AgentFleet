@@ -38,10 +38,24 @@ public sealed class PlanRestoreTests : PlanTestBase, IDisposable
         return $"Exit code: {process.ExitCode}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}";
     }
 
-    // A setup command that must work; its own output is the failure message when it does not.
+    // A setup command that must work; its own output is the failure message when it does not. A virus scanner can hold a
+    // freshly written git object for a moment ("unable to write file .git/objects/...: Permission denied", seen on a
+    // developer machine and once while committing the repository itself), so that one failure is tried again.
     private static async Task Must(string command, string project)
     {
-        string result = await Run(command, project, default);
+        string result = string.Empty;
+        for (int attempt = 1; attempt <= 5; attempt++)
+        {
+            result = await Run(command, project, default);
+            if (result.StartsWith("Exit code: 0", StringComparison.Ordinal) ||
+                !result.Contains("Permission denied", StringComparison.OrdinalIgnoreCase))
+            {
+                break;
+            }
+
+            await Task.Delay(200 * attempt);
+        }
+
         Assert.True(result.StartsWith("Exit code: 0", StringComparison.Ordinal), $"{command}\n{result}");
     }
 
