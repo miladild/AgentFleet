@@ -40,6 +40,47 @@ public sealed class FleetConfigStoreTests : IDisposable
     }
 
     [Fact]
+    public void Worker_workspace_round_trips_with_a_pinned_host_key()
+    {
+        WriteConfig("""[{"name":"hub","url":"http://127.0.0.1:11434/v1","model":"m","purpose":"local","tier":"heavy","fallback":true},{"name":"worker","url":"http://192.0.2.30:11434/v1","model":"m","purpose":"worker","tier":"standard","workspace":{"host":"192.0.2.30","user":"agentfleet","keyPath":"C:/fleet-test/worker-key","hostKey":"SHA256:known","root":"/home/agentfleet/workspaces","platform":"linux","port":22}}]""");
+
+        FleetConfig config = Open().Current;
+        FleetWorkerWorkspaceConfig workspace = Assert.Single(config.Nodes, node => node.Name == "worker").Workspace!;
+        Assert.Equal("agentfleet", workspace.User);
+        Assert.Equal("SHA256:known", workspace.HostKey);
+
+        FleetConfig reopened = Open().Current;
+        Assert.Equal(workspace, Assert.Single(reopened.Nodes, node => node.Name == "worker").Workspace);
+    }
+
+    [Fact]
+    public void The_hub_cannot_be_configured_as_a_worker_workspace()
+    {
+        WriteConfig("""[{"name":"hub","url":"http://127.0.0.1:11434/v1","model":"m","purpose":"local","tier":"heavy","fallback":true,"workspace":{"host":"127.0.0.1","user":"agentfleet","keyPath":"C:/keys/worker","hostKey":"SHA256:known","root":"/home/agentfleet/workspaces","platform":"linux","port":22}}]""");
+
+        InvalidOperationException exception = Assert.Throws<InvalidOperationException>(() => Open());
+        Assert.Contains("cannot host a worker plan workspace", exception.Message);
+    }
+
+    [Fact]
+    public void Worker_workspace_requires_a_pinned_host_key()
+    {
+        WriteConfig("""[{"name":"hub","url":"http://127.0.0.1:11434/v1","model":"m","purpose":"local","tier":"heavy","fallback":true},{"name":"worker","url":"http://192.0.2.30:11434/v1","model":"m","purpose":"worker","tier":"standard","workspace":{"host":"192.0.2.30","user":"agentfleet","keyPath":"C:/fleet-test/worker-key","root":"relative/workspaces","platform":"linux","port":22}}]""");
+
+        InvalidOperationException exception = Assert.Throws<InvalidOperationException>(() => Open());
+        Assert.Contains("pinned SHA256 host key", exception.Message);
+    }
+
+    [Fact]
+    public void Worker_workspace_root_must_be_absolute_for_its_platform()
+    {
+        WriteConfig("""[{"name":"hub","url":"http://127.0.0.1:11434/v1","model":"m","purpose":"local","tier":"heavy","fallback":true},{"name":"worker","url":"http://192.0.2.30:11434/v1","model":"m","purpose":"worker","tier":"standard","workspace":{"host":"192.0.2.30","user":"agentfleet","keyPath":"C:/fleet-test/worker-key","hostKey":"SHA256:known","root":"relative/workspaces","platform":"linux","port":22}}]""");
+
+        InvalidOperationException exception = Assert.Throws<InvalidOperationException>(() => Open());
+        Assert.Contains("absolute linux path", exception.Message);
+    }
+
+    [Fact]
     public void The_example_config_shipped_in_the_repo_loads_and_validates()
     {
         string? directory = AppContext.BaseDirectory;
@@ -61,7 +102,7 @@ public sealed class FleetConfigStoreTests : IDisposable
     }
 
     [Theory]
-    [InlineData("http://192.168.1.20:11434", "http://192.168.1.20:11434/v1")]
+    [InlineData("http://192.0.2.20:11434", "http://192.0.2.20:11434/v1")]
     [InlineData("http://host:11434/", "http://host:11434/v1")]
     [InlineData("  http://host:11434  ", "http://host:11434/v1")]
     [InlineData("http://host:11434/v1", "http://host:11434/v1")]
@@ -164,8 +205,8 @@ public sealed class FleetConfigStoreTests : IDisposable
             Nodes =
             [
                 new FleetNodeConfig("main", "http://127.0.0.1:11434/v1", "m1", "x", FleetTiers.Heavy),
-                new FleetNodeConfig("quick", "http://10.0.0.2:11434/v1", "m2", "y", FleetTiers.Light),
-                new FleetNodeConfig("eyes", "http://10.0.0.3:11434/v1", "m3", "z", Vision: true)
+                new FleetNodeConfig("quick", "http://192.0.2.10:11434/v1", "m2", "y", FleetTiers.Light),
+                new FleetNodeConfig("eyes", "http://192.0.2.11:11434/v1", "m3", "z", Vision: true)
             ]
         };
 

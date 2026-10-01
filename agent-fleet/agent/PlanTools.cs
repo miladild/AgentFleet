@@ -25,6 +25,8 @@ internal sealed partial class PlanTools
     private readonly Func<string, string?, CancellationToken, Task<string>> _runCommand;
     private readonly FleetContextJournal? _journal;
     private readonly Func<string, bool>? _programExists;
+    private readonly bool _workerWorkspacesEnabled;
+    private readonly FleetModeService? _modeService;
     private readonly ConcurrentDictionary<string, int> _diagramAttempts = new(StringComparer.Ordinal);
 
     /// <param name="programExists">Whether a check's program is installed; defaults to looking on PATH (a seam for tests).</param>
@@ -33,9 +35,13 @@ internal sealed partial class PlanTools
         IDiagramValidator validator,
         Func<string, string?, CancellationToken, Task<string>> runCommand,
         FleetContextJournal? journal = null,
-        Func<string, bool>? programExists = null)
+        Func<string, bool>? programExists = null,
+        bool workerWorkspacesEnabled = false,
+        FleetModeService? modeService = null)
     {
         _programExists = programExists;
+        _workerWorkspacesEnabled = workerWorkspacesEnabled;
+        _modeService = modeService;
         _store = store;
         _validator = validator;
         _runCommand = runCommand;
@@ -66,7 +72,12 @@ internal sealed partial class PlanTools
         }
 
         // Mistakes that would only show in the night, as a blocked plan: caught now, while the planner can fix them.
-        IReadOnlyList<string> problems = PlanReview.Problems(workingDirectory, stepInputs, _programExists);
+        Func<string, bool>? programExists = _workerWorkspacesEnabled ? _ => true : _programExists;
+        var problems = PlanReview.Problems(workingDirectory, stepInputs, programExists).ToList();
+        if (!_workerWorkspacesEnabled)
+        {
+            problems.AddRange(await ProjectToolchainReview.ProblemsAsync(workingDirectory, stepInputs, cancellationToken));
+        }
         if (problems.Count > 0)
         {
             return "The plan was NOT saved, because it would fail when it runs:\n" +
@@ -122,7 +133,10 @@ internal sealed partial class PlanTools
                 ToStringList(risks),
                 diagramCode,
                 diagramNote,
-                stepInputs);
+                stepInputs,
+                _modeService?.Mode == FleetMode.Aggressive
+                    ? PlanRecoveryScope.AllowHubRescue
+                    : PlanRecoveryScope.WorkerOnly);
         }
         catch (ArgumentException exception)
         {
@@ -186,7 +200,7 @@ internal sealed partial class PlanTools
         List<PlanStepInput> stepInputs = ToSteps(steps);
         return stepInputs.Count == 0
             ? ["The plan has no steps: send steps as an array of objects with title, detail, files, verify and tier."]
-            : PlanReview.Problems(workingDirectory, stepInputs, _programExists);
+            : PlanReview.Problems(workingDirectory, stepInputs, _workerWorkspacesEnabled ? _ => true : _programExists);
     }
 
     // One chat, one plan waiting for approval: a revised plan replaces the earlier proposal instead of leaving two
@@ -286,7 +300,8 @@ internal sealed partial class PlanTools
         int stepId,
         string? note,
         CancellationToken cancellationToken,
-        IReadOnlyCollection<string>? requiredFiles = null)
+        IReadOnlyCollection<string>? requiredFiles = null,
+        bool deferCommit = false)
     {
         PlanRecord? plan = _store.Get(planId?.Trim() ?? string.Empty);
         if (plan is null)
@@ -327,7 +342,6 @@ internal sealed partial class PlanTools
         plan = _store.Update(plan.Id, current => WithStep(current, stepId, s => s with
         {
             Status = StepStatus.Running,
-            Attempts = s.Attempts + 1,
             StartedUtc = s.StartedUtc ?? now
         }) with { Status = PlanStatus.Running })!;
         step = plan.Steps.First(candidate => candidate.Id == stepId);
@@ -338,6 +352,12 @@ internal sealed partial class PlanTools
         string? output = null;
         if (step.Verify is not null)
         {
+            if (PlanRunnerToolPolicy.CommandRefusal(step.Verify) is { } refusal)
+            {
+                string blocked = $"Blocked by unattended plan policy: the approved check cannot run safely. {refusal}";
+                return new StepCompletion(false, blocked, blocked);
+            }
+
             string result = await _runCommand(step.Verify, plan.WorkingDirectory, cancellationToken);
             passed = result.StartsWith("Exit code: 0", StringComparison.Ordinal);
             output = ShortenCheckOutput(result);
@@ -389,18 +409,12 @@ internal sealed partial class PlanTools
                 output);
         }
 
-        PlanRecord updated = _store.Update(plan.Id, current =>
+        if (deferCommit)
         {
-            PlanRecord withStep = WithStep(current, stepId, s => s with
-            {
-                Status = StepStatus.Done,
-                Note = string.IsNullOrWhiteSpace(note) ? s.Note : note.Trim(),
-                CompletedUtc = DateTimeOffset.UtcNow
-            });
-            return withStep.Steps.All(s => s.Status == StepStatus.Done)
-                ? withStep with { Status = PlanStatus.Done }
-                : withStep;
-        })!;
+            return new StepCompletion(true, $"Step {stepId} passed its approved check; waiting for the worker sync before marking it done.", output, restoredNote);
+        }
+
+        PlanRecord updated = CommitStepDone(plan.Id, stepId, note);
 
         var reply = new StringBuilder();
         reply.AppendLine(step.Verify is null
@@ -413,6 +427,22 @@ internal sealed partial class PlanTools
         return new StepCompletion(true, reply.ToString(), output, restoredNote);
     }
 
+    public PlanRecord CommitStepDone(string planId, int stepId, string? note)
+    {
+        return _store.Update(planId, current =>
+        {
+            PlanRecord withStep = WithStep(current, stepId, s => s with
+            {
+                Status = StepStatus.Done,
+                Note = string.IsNullOrWhiteSpace(note) ? s.Note : note.Trim(),
+                CompletedUtc = DateTimeOffset.UtcNow
+            });
+            return withStep.Steps.All(s => s.Status == StepStatus.Done)
+                ? withStep with { Status = PlanStatus.Done }
+                : withStep;
+        })!;
+    }
+
     /// <summary>
     /// Tracked files deleted while the plan runs that no step of it names, put back from git. Measured: a test a model
     /// wrote removed the project's config/watchlist.json in its cleanup, so every run of the check deleted it. Works in a
@@ -420,6 +450,14 @@ internal sealed partial class PlanTools
     /// </summary>
     internal async Task<IReadOnlyList<string>> RestoreUnnamedDeletionsAsync(PlanRecord plan, CancellationToken cancellationToken)
     {
+        // Worker paths have their own OS format (for example /home/agentfleet/project). The worker workspace sync
+        // transfers deletions back by its staged-file manifest; comparing those paths with hub paths here would
+        // incorrectly restore named worker edits from git.
+        if (WorkerWorkspaceContext.Current is not null)
+        {
+            return [];
+        }
+
         if (string.IsNullOrWhiteSpace(plan.WorkingDirectory) || !Directory.Exists(plan.WorkingDirectory))
         {
             return [];
@@ -834,8 +872,14 @@ internal sealed partial class PlanTools
             SplitFiles(Raw(step, "files", "file", "paths")),
             Field(step, "verify", "verification", "check", "test", "command"),
             Field(step, "tier", "complexity"),
-            Field(step, "parallelGroup", "parallel_group"));
+            Field(step, "parallelGroup", "parallel_group"),
+            BooleanField(step, "retrySafe", "retry_safe"));
     }
+
+    private static bool BooleanField(JsonElement obj, params string[] names) =>
+        Raw(obj, names) is { } raw &&
+        (raw.ValueKind == JsonValueKind.True || raw.ValueKind == JsonValueKind.String &&
+            bool.TryParse(raw.GetString(), out bool value) && value);
 
     private static JsonElement? Raw(JsonElement obj, params string[] names)
     {

@@ -209,7 +209,7 @@ internal static partial class PlanGate
            never check a step with a file that a later step creates. Name every file a step creates in its files.
            Give each step a tier: heavy for hard or risky
            work, standard for ordinary work, light for trivial edits. Set workingDirectory to the project folder
-           (its full path).
+           (its full path). Retries keep that tier; the user can change a waiting step's machine from the Live view.
            Leave parallelGroup empty by default. Only give the same parallelGroup label to consecutive steps when
            they are independent, name disjoint files, and can safely be edited at the same time. Parallel groups
            must use different tiers, so different machines do them at the same time; the runner also checks that

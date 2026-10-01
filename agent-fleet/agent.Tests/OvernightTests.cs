@@ -134,6 +134,22 @@ public sealed class OvernightTests
     }
 
     [Fact]
+    public async Task A_worker_plan_failure_is_returned_instead_of_falling_back_to_the_hub()
+    {
+        (ResilientChatClient client, _) = Resilient(
+            new FailingFirst(new HttpRequestException("worker unavailable")), new Answers("hub must not run this plan"));
+        using var workspace = new WorkerWorkspaceSession("worker",
+            new FleetWorkerWorkspaceConfig("worker", "agentfleet", "key", "SHA256:host", "/home/agentfleet/workspaces", "linux"),
+            Path.GetTempPath(), NullLogger.Instance, TimeSpan.FromSeconds(1));
+        using IDisposable scope = workspace.Enter();
+
+        await Assert.ThrowsAsync<HttpRequestException>(async () =>
+        {
+            await foreach (ChatResponseUpdate _ in client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "do work")])) { }
+        });
+    }
+
+    [Fact]
     public async Task A_healthy_machine_streams_as_before() =>
         Assert.Equal("a b", string.Concat(await Collect(Resilient(new Answers("a", " b"), new Answers("wrong")).Client)));
 

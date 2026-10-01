@@ -153,7 +153,16 @@ internal sealed class FleetConfigStore
                 Url = NormalizeUrl(node.Url),
                 Api = string.IsNullOrWhiteSpace(node.Api) ? null : node.Api.Trim().ToLowerInvariant(),
                 Caveman = AgentStylePrompt.Normalize(node.Caveman),
-                Ponytail = AgentStylePrompt.Normalize(node.Ponytail)
+                Ponytail = AgentStylePrompt.Normalize(node.Ponytail),
+                Workspace = node.Workspace is null ? null : node.Workspace with
+                {
+                    Host = node.Workspace.Host?.Trim() ?? string.Empty,
+                    User = node.Workspace.User?.Trim() ?? string.Empty,
+                    KeyPath = node.Workspace.KeyPath?.Trim() ?? string.Empty,
+                    HostKey = node.Workspace.HostKey?.Trim() ?? string.Empty,
+                    Root = node.Workspace.Root?.Trim().Replace('\\', '/') ?? string.Empty,
+                    Platform = node.Workspace.Platform?.Trim().ToLowerInvariant() ?? string.Empty
+                }
             })
             .Select(node => node.Vision
                 ? node with { Tier = null, Fallback = false }
@@ -233,7 +242,7 @@ internal sealed class FleetConfigStore
                 !string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.UserInfo))
             {
                 throw new InvalidOperationException(
-                    $"Node '{node.Name}' has the URL '{node.Url}', which must be the machine's address with /v1 at the end, for example http://192.168.1.20:11434/v1.");
+                    $"Node '{node.Name}' has the URL '{node.Url}', which must be the machine's address with /v1 at the end, for example http://192.0.2.20:11434/v1.");
             }
 
             if (string.IsNullOrWhiteSpace(node.Model))
@@ -259,6 +268,32 @@ internal sealed class FleetConfigStore
             if (!AgentStylePrompt.IsValid(node.Ponytail))
             {
                 throw new InvalidOperationException($"Node '{node.Name}' has ponytail '{node.Ponytail}': choose off, lite, full, or ultra.");
+            }
+
+            if (node.Workspace is { } workspace)
+            {
+                if (node.Vision || string.Equals(node.Name, "hub", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException($"Node '{node.Name}' cannot host a worker plan workspace; configure a non-hub text worker instead.");
+                }
+
+                if (string.IsNullOrWhiteSpace(workspace.Host) || workspace.Host.Contains('/') || workspace.Host.Contains('@') ||
+                    string.IsNullOrWhiteSpace(workspace.User) || string.IsNullOrWhiteSpace(workspace.KeyPath) ||
+                    !workspace.HostKey.StartsWith("SHA256:", StringComparison.Ordinal) ||
+                    string.IsNullOrWhiteSpace(workspace.Root) || workspace.Port is < 1 or > 65535 ||
+                    workspace.Platform is not ("linux" or "windows"))
+                {
+                    throw new InvalidOperationException(
+                        $"Node '{node.Name}' workspace needs a host, dedicated low-privilege SSH user, key path, pinned SHA256 host key, absolute root, platform (linux/windows), and valid port.");
+                }
+
+                bool absoluteRoot = workspace.Platform == "linux"
+                    ? workspace.Root.StartsWith("/", StringComparison.Ordinal)
+                    : Regex.IsMatch(workspace.Root, "^(?:/[A-Za-z]:/|[A-Za-z]:/)");
+                if (!absoluteRoot)
+                {
+                    throw new InvalidOperationException($"Node '{node.Name}' workspace root must be an absolute {workspace.Platform} path.");
+                }
             }
 
             if (!node.Vision && !FleetTiers.All.Contains(node.Tier!, StringComparer.Ordinal))

@@ -6,8 +6,8 @@ internal enum FleetMode
     /// protecting its GPU for the user's own foreground use (daytime).</summary>
     Conservative,
 
-    /// <summary>Hub also takes ordinary tasks that would otherwise go to the standard tier,
-    /// making use of its GPU headroom when the user isn't actively using it (night).</summary>
+    /// <summary>Hub also takes ordinary chat and unpinned plan steps, making use of its GPU
+    /// headroom when the user isn't actively using it (night).</summary>
     Aggressive
 }
 

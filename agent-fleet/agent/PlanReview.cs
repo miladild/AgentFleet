@@ -62,6 +62,14 @@ internal static partial class PlanReview
         {
             problems.Add($"The last step ({steps[^1].Title}) has no check: it should prove the whole result, for example by running all the tests or the build.");
         }
+        else if (steps[^1].ParallelGroup is not null)
+        {
+            problems.Add($"The last step ({steps[^1].Title}) cannot be in a parallel group: final validation must run after all project edits finish.");
+        }
+        else if (!HasFinalValidation(steps[^1].Verify!, root))
+        {
+            problems.Add($"The last step ({steps[^1].Title}) needs a whole-project build or test-suite command as its check. The runner executes this command after the step's edits and uses its output for bounded repair retries; a syntax check of one file is not enough.");
+        }
 
         for (int index = 0; index < steps.Count; index++)
         {
@@ -69,17 +77,29 @@ internal static partial class PlanReview
             int number = index + 1;
             if (string.IsNullOrWhiteSpace(step.Verify))
             {
+                problems.Add($"Step {number} ({step.Title}) has no bounded check. Every unattended step needs a command that proves it worked.");
                 continue;
             }
 
             string verify = step.Verify.Trim();
+            if (PlanRunnerToolPolicy.CommandRefusal(verify) is { } refusal)
+            {
+                problems.Add($"Step {number} ({step.Title}): its check is not safe for unattended retries. {refusal}");
+                continue;
+            }
+
             string? firstProgram = FirstProgram(verify);
             if (firstProgram is null || !IsRunnable(firstProgram, root, programExists))
             {
+                string launcherHint = OperatingSystem.IsWindows() &&
+                    (string.Equals(firstProgram, "python", StringComparison.OrdinalIgnoreCase) || string.Equals(firstProgram, "python3", StringComparison.OrdinalIgnoreCase)) &&
+                    QuickProcess.FindOnPath("py") is not null
+                    ? " The Windows Python launcher is available as py; use a check such as py -3 --version if that matches the project."
+                    : string.Empty;
                 problems.Add(
-                    $"Step {number} ({step.Title}): its check \"{Clip(verify)}\" is not a command the hub can run" +
-                    (firstProgram is not null && LooksLikeProgram(firstProgram) ? $" ({firstProgram} is not installed there)" : string.Empty) +
-                    ". The fleet runs the check exactly as written: give a command that fails when the step did not work, such as node --test test/x.test.js, npm test or dotnet test.");
+                    $"Step {number} ({step.Title}): its check \"{Clip(verify)}\" is not a command the selected machine can run" +
+                    (firstProgram is not null && LooksLikeProgram(firstProgram) ? $" ({firstProgram} is not installed on the selected machine)" : string.Empty) +
+                    ". The fleet runs the check exactly as written: give a command that fails when the step did not work, such as node --test test/x.test.js, npm test or dotnet test." + launcherHint);
                 continue;
             }
 
@@ -123,6 +143,95 @@ internal static partial class PlanReview
         }
 
         return problems;
+    }
+
+    private static bool IsWholeProjectValidation(string command, string? root, int depth = 0)
+    {
+        if (depth > 2) return false;
+        foreach (string segment in CommandSeparators().Split(command))
+        {
+            string[] words = Tokens().Matches(segment).Select(match => match.Value.Trim('"', '\''))
+                .Where(word => word.Length > 0).ToArray();
+            if (words.Length == 0) continue;
+            string program = Path.GetFileNameWithoutExtension(words[0]).ToLowerInvariant();
+            string? subcommand = words.ElementAtOrDefault(1)?.ToLowerInvariant();
+            string? script = subcommand is "run" or "run-script" ? words.ElementAtOrDefault(2)?.ToLowerInvariant() : subcommand;
+
+            if (program is "npm" or "pnpm" or "yarn" or "bun")
+            {
+                bool scriptCommand = subcommand is "run" or "run-script";
+                if ((script is "test" or "build" or "typecheck") && words.Length <= (scriptCommand ? 3 : 2)) return true;
+                if (scriptCommand && script is not null && words.Length == 3 &&
+                    ScriptBody(root, script) is { } body && IsWholeProjectValidation(body, root, depth + 1)) return true;
+            }
+
+            if (program == "dotnet" && (subcommand is "build" or "test") && !words.Contains("--filter", StringComparer.OrdinalIgnoreCase)) return true;
+            if (program == "cargo" && (subcommand is "build" or "test") &&
+                !words.Any(word => word is "-p" or "--package" or "--test" or "--bench")) return true;
+            if (program == "go" && (subcommand is "build" or "test") && words.Contains("./...", StringComparer.Ordinal) && !words.Contains("-run", StringComparer.OrdinalIgnoreCase)) return true;
+            if (program == "mvn" && (subcommand is "test" or "verify" or "package")) return true;
+            if ((program is "gradle" or "gradlew") && (subcommand is "test" or "build" or "check")) return true;
+            if (program == "make" && (subcommand is "test" or "build" or "check") && words.Length == 2) return true;
+            if ((program is "pytest" or "phpunit") && words.Length == 1) return true;
+            if ((program is "python" or "python3" or "py") && subcommand == "-m" &&
+                (words.ElementAtOrDefault(2) is "pytest" or "unittest") && words.Length == 3) return true;
+            if (program == "node" && subcommand == "--test" &&
+                !words.Skip(2).Any(word => (word is "--test-name-pattern" or "--test-only") ||
+                    !word.StartsWith("-", StringComparison.Ordinal) &&
+                    (word.Contains(".test.", StringComparison.OrdinalIgnoreCase) || word.Contains(".spec.", StringComparison.OrdinalIgnoreCase) ||
+                     word.Contains('*') || word.Contains('/') || word.Contains('\\') || Path.HasExtension(word)))) return true;
+            if (program == "tsc" && words.Contains("--noEmit", StringComparer.OrdinalIgnoreCase) &&
+                !words.Skip(1).Any(word => Path.HasExtension(word))) return true;
+        }
+
+        return false;
+    }
+
+    private static bool HasFinalValidation(string command, string? root)
+    {
+        if (!IsWholeProjectValidation(command, root)) return false;
+        if (root is null) return true;
+
+        // If package.json defines a build or test script, require every defined gate in the final command.
+        // A unit test alone must not silently replace a production build in a web app.
+        try
+        {
+            string packagePath = Path.Combine(root, "package.json");
+            if (!File.Exists(packagePath)) return true;
+            using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(packagePath));
+            if (!document.RootElement.TryGetProperty("scripts", out System.Text.Json.JsonElement scripts) ||
+                scripts.ValueKind != System.Text.Json.JsonValueKind.Object) return true;
+            bool hasBuild = scripts.TryGetProperty("build", out _);
+            bool hasTests = scripts.TryGetProperty("test", out _);
+            bool hasTypecheck = scripts.TryGetProperty("typecheck", out _);
+            return (!hasBuild || HasPackageScript(command, "build", root)) &&
+                   (!hasTests || HasPackageScript(command, "test", root)) &&
+                   (!hasTypecheck || HasPackageScript(command, "typecheck", root));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool HasPackageScript(string command, string requestedScript, string root, int depth = 0)
+    {
+        if (depth > 2) return false;
+        foreach (string segment in CommandSeparators().Split(command))
+        {
+            string[] words = Tokens().Matches(segment).Select(match => match.Value.Trim('"', '\''))
+                .Where(word => word.Length > 0).ToArray();
+            if (words.Length == 0) continue;
+            string program = Path.GetFileNameWithoutExtension(words[0]).ToLowerInvariant();
+            if (program is not ("npm" or "pnpm" or "yarn" or "bun")) continue;
+            string? subcommand = words.ElementAtOrDefault(1)?.ToLowerInvariant();
+            string? script = subcommand is "run" or "run-script" ? words.ElementAtOrDefault(2)?.ToLowerInvariant() : subcommand;
+            if (string.Equals(script, requestedScript, StringComparison.OrdinalIgnoreCase)) return true;
+            if ((subcommand is "run" or "run-script") && script is not null && words.Length == 3 &&
+                ScriptBody(root, script) is { } body && HasPackageScript(body, requestedScript, root, depth + 1)) return true;
+        }
+
+        return false;
     }
 
     // npm scripts that by convention start something that keeps running.
@@ -242,6 +351,26 @@ internal static partial class PlanReview
         }
 
         return null;
+    }
+
+    internal static IReadOnlySet<string> ProgramsUsed(string command, IReadOnlySet<string> programs)
+    {
+        var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string segment in CommandSeparators().Split(command))
+        {
+            string? first = Tokens().Matches(segment).Select(match => match.Value.Trim('"', '\'')).FirstOrDefault();
+            if (first is null || first.Equals("cd", StringComparison.OrdinalIgnoreCase) || first.Equals("pushd", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (programs.Contains(Path.GetFileNameWithoutExtension(first)))
+            {
+                used.Add(Path.GetFileNameWithoutExtension(first).ToLowerInvariant());
+            }
+        }
+
+        return used;
     }
 
     private static bool IsRunnable(string program, string? root, Func<string, bool> programExists)

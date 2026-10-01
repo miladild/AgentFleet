@@ -71,7 +71,12 @@ internal static class QuickProcess
     public sealed record Result(int ExitCode, string Output, string Error, bool TimedOut);
 
     /// <returns>Null when the program could not be started at all (usually: it is not installed).</returns>
-    public static async Task<Result?> RunAsync(string fileName, IEnumerable<string> arguments, TimeSpan timeout, CancellationToken cancellationToken = default)
+    public static async Task<Result?> RunAsync(
+        string fileName,
+        IEnumerable<string> arguments,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default,
+        string? workingDirectory = null)
     {
         var startInfo = new ProcessStartInfo(fileName)
         {
@@ -80,6 +85,11 @@ internal static class QuickProcess
             UseShellExecute = false,
             CreateNoWindow = true,
         };
+        if (!string.IsNullOrWhiteSpace(workingDirectory))
+        {
+            startInfo.WorkingDirectory = workingDirectory;
+        }
+
         foreach (string argument in arguments)
         {
             startInfo.ArgumentList.Add(argument);

@@ -110,7 +110,9 @@ public sealed class PlanFileTests : PlanTestBase
     public async Task Propose_plan_with_a_plan_file_saves_the_steps_with_their_full_instructions()
     {
         string file = Path.Combine(_project, "PLAN.md");
-        File.WriteAllText(file, Sample(_project));
+        // An unattended plan ends with a whole-project check outside any parallel group, so the sample gets that step.
+        File.WriteAllText(file, Sample(_project).Replace("## Notes",
+            "## Step 4: Everything together\n\n- Tier: standard\n- Files: `package.json`\n- Check: `npm test`\n\nRun all the tests.\n\n## Notes"));
         var tools = new PlanTools(Store, Valid, (_, _, _) => Task.FromResult("Exit code: 0"), programExists: program => program is "npm" or "node");
 
         string result = await tools.ProposePlanFromFileAsync(file, default);
@@ -118,9 +120,9 @@ public sealed class PlanFileTests : PlanTestBase
         Assert.StartsWith("Plan saved", result);
         PlanRecord plan = Store.Get(FleetPlanStore.FindMarkerId(result)!)!;
         Assert.Equal(PlanStatus.AwaitingApproval, plan.Status);
-        Assert.Equal(3, plan.Steps.Count);
+        Assert.Equal(4, plan.Steps.Count);
         Assert.Equal("Good Friday 2026-04-03 is a holiday.\nFriday 2027-12-31 is not.", plan.Steps[1].Detail);
-        Assert.Equal(["core", "core"], plan.Steps.Skip(1).Select(step => step.ParallelGroup));
+        Assert.Equal(["core", "core", null], plan.Steps.Skip(1).Select(step => step.ParallelGroup));
     }
 
     [Fact]

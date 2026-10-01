@@ -48,7 +48,18 @@ internal sealed record FleetNodeConfig(
     int? ContextLength = null,
     string? Api = null,
     string? Caveman = null,
-    string? Ponytail = null);
+    string? Ponytail = null,
+    FleetWorkerWorkspaceConfig? Workspace = null);
+
+/// <summary>SSH workspace for approved plan work. Configure only a dedicated, non-admin worker account.</summary>
+internal sealed record FleetWorkerWorkspaceConfig(
+    string Host,
+    string User,
+    string KeyPath,
+    string HostKey,
+    string Root,
+    string Platform,
+    int Port = 22);
 
 internal sealed record FleetToolConfig(bool Enabled);
 
