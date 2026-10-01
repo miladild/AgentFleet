@@ -275,7 +275,7 @@ else {
             New-Service -Name $BackendName -BinaryPathName "`"$exe`" --urls $urls" -DisplayName 'Agent Fleet backend' -Description 'Agent Fleet .NET AG-UI backend' -StartupType Automatic | Out-Null
         } else { sc.exe config $BackendName binPath= "`"$exe`" --urls $urls" | Out-Null }
     }
-    # Started again if it ever stops unexpectedly, so a plan running overnight carries on (it resumes from disk).
+    # Started again if it ever stops unexpectedly, so a plan whose interrupted step is safe to replay carries on (it resumes from disk).
     Do-Step "restart $BackendName if it stops unexpectedly" { sc.exe failure $BackendName reset= 86400 actions= restart/5000/restart/30000/restart/60000 | Out-Null }
     Write-Ok "Service $BackendName registered"
     if (-not $SkipFrontend) {
