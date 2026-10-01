@@ -108,7 +108,7 @@ public sealed class OvernightTests
         typeof(FleetHealthMonitor).GetField("_snapshots", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
             .GetValue(health)!.GetType().GetMethod("set_Item")!
             .Invoke(typeof(FleetHealthMonitor).GetField("_snapshots", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(health),
-                [node.Name, new NodeHealthSnapshot(node.Name, node.Model, true, true, DateTimeOffset.UtcNow, null)]);
+                [node.Name, new NodeHealthSnapshot(node.Name, node.Model, true, true, true, DateTimeOffset.UtcNow, null)]);
         return (new ResilientChatClient(worker, node, health, NullLogger.Instance, fallback), health);
     }
 
@@ -185,7 +185,7 @@ public sealed class OvernightTests
     public async Task A_parallel_group_waits_out_a_machines_short_rest_but_not_a_slow_machine()
     {
         static NodeHealthSnapshot[] Health(bool ready, string? failure) =>
-            [new("worker", "m", ready, ready, DateTimeOffset.UtcNow, failure)];
+            [new("worker", "m", ready, ready, ready, DateTimeOffset.UtcNow, failure)];
 
         // The wait is measured on the wall clock, and a loaded CI machine can stall for seconds between two probes: with a
         // five second budget this failed once on CI (the test took 12 s). The loop returns the moment a machine is ready,

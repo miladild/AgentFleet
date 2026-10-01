@@ -285,7 +285,7 @@ function TopBar({
       <Clock from={started} until={finished} />
       <span className="mod hide-narrow" aria-label="Machines">
         {nodes.map((node) => (
-          <span key={node.name} title={`${node.name}: ${node.model} (${node.ready ? "ready" : "not ready"})`} style={{ color: node.ready ? colorOf(node.name) : "#565f89" }}>
+          <span key={node.name} title={`${node.name}: ${node.model} (${node.ready ? "ready to answer" : node.listsModels ? "model listed, but not answering" : "not ready"})`} style={{ color: node.ready ? colorOf(node.name) : "#565f89" }}>
             {busyNodes.has(node.name) ? "◉" : "●"} {node.name}
           </span>
         ))}
@@ -537,7 +537,7 @@ function Machines({
               <small>{node.model}</small>
             </div>
             <div className="doing">
-              {!node.ready ? "not reachable" : working.length ? working.map((step) => {
+              {!node.ready ? node.listsModels ? "model listed, but not answering" : node.reachable ? "model not listed" : "not reachable" : working.length ? working.map((step) => {
                 const route = activity.get(step.id);
                 const role = route?.node === node.name ? "model" : "workspace";
                 return `#${step.id} ${role}: ${step.title}`;

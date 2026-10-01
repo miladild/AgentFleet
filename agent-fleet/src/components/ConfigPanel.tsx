@@ -47,7 +47,7 @@ type FleetConfigData = {
   customStatus?: CommandToolStatus[];
 };
 
-type NodeStatus = { name: string; ready: boolean; reachable: boolean };
+type NodeStatus = { name: string; ready: boolean; reachable: boolean; listsModels?: boolean; answers?: boolean; reason?: string | null };
 type FeedbackCount = { node: string; up: number; down: number };
 type FetchedModel = { name: string; sizeBytes: number };
 
@@ -373,9 +373,11 @@ function MachineCard({
   const dotTitle = !status
     ? "not checked yet (new or just saved)"
     : status.ready
-      ? "ready"
+      ? "ready to answer"
       : status.reachable
-        ? "reachable, but the model is not installed there"
+        ? status.listsModels
+          ? "model listed, but it did not answer"
+          : "reachable, but the model is not installed there"
         : "not reachable";
 
   return (
@@ -431,9 +433,13 @@ function MachineCard({
       {status && !status.ready && (
         <div className="space-y-1">
           <p className="text-[11px] text-amber-300">
-            {status.reachable ? `Reachable, but ${node.model} is not downloaded there yet. Download it, or pick an installed model under Edit.` : unreachableHint}
+            {status.reachable && status.listsModels
+              ? `The model is listed, but it did not answer a small test request${status.reason ? ` (${status.reason})` : ""}. Fleet will check again in a few minutes.`
+              : status.reachable
+                ? `Reachable, but ${node.model} is not downloaded there yet. Download it, or pick an installed model under Edit.`
+                : unreachableHint}
           </p>
-          {status.reachable && <DownloadButton compact url={node.url} model={node.model} />}
+          {status.reachable && !status.listsModels && <DownloadButton compact url={node.url} model={node.model} />}
         </div>
       )}
       {open && (

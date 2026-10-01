@@ -90,15 +90,15 @@ public sealed class PlanPromptTests : PlanTestBase
     public async Task A_step_whose_model_did_nothing_is_asked_once_more_in_the_same_session()
     {
         var idle = new Replies("", "Added the backoff.");
-        string summary = await new FleetStepAgent(new Microsoft.Agents.AI.ChatClientAgent(idle)).RunStepAsync("Do step 3.", "standard", default);
+        StepAgentReply summary = await new FleetStepAgent(new Microsoft.Agents.AI.ChatClientAgent(idle)).RunStepAsync("Do step 3.", "standard", default);
 
-        Assert.Equal("Added the backoff.", summary);
+        Assert.Equal("Added the backoff.", summary.Text);
         Assert.Equal(2, idle.Sent.Count);
         Assert.Contains("Do step 3.", idle.Sent[1].Select(message => message.Text)); // same session: the step is still there
         Assert.Equal(FleetStepAgent.Nudge, idle.Sent[1][^1].Text);
 
         var busy = new Replies("Done.");
-        Assert.Equal("Done.", await new FleetStepAgent(new Microsoft.Agents.AI.ChatClientAgent(busy)).RunStepAsync("Do step 4.", "light", default));
+        Assert.Equal("Done.", (await new FleetStepAgent(new Microsoft.Agents.AI.ChatClientAgent(busy)).RunStepAsync("Do step 4.", "light", default)).Text);
         Assert.Single(busy.Sent);
     }
 

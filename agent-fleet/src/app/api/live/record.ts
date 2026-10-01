@@ -48,7 +48,7 @@ export async function backend<T>(path: string): Promise<T | null> {
 }
 
 export const nodesOf = () =>
-  backend<{ nodes?: { name: string; model: string; tier?: string | null; ready: boolean; vision?: boolean; workspace?: boolean }[] }>("/api/fleet-status").then((status) => status?.nodes ?? []);
+  backend<{ nodes?: { name: string; model: string; tier?: string | null; ready: boolean; reachable?: boolean; listsModels?: boolean; answers?: boolean; reason?: string | null; vision?: boolean; workspace?: boolean }[] }>("/api/fleet-status").then((status) => status?.nodes ?? []);
 
 const MAX_TEXT = 220;
 

@@ -1,18 +1,26 @@
+using System.Net;
+using System.Security.Cryptography;
+using System.Text;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AgentFleet.Tests;
 
-internal sealed class FakeStepAgent(Func<string, string, CancellationToken, Task<string>> run) : IStepAgent
+internal sealed class FakeStepAgent(
+    Func<string, string, CancellationToken, Task<string>> run,
+    int toolCalls = 0,
+    bool editToolCalled = false) : IStepAgent
 {
     public List<(string Tier, string Prompt, string? Machine)> Calls { get; } = [];
 
-    public Task<string> RunStepAsync(string prompt, string tier, CancellationToken cancellationToken)
+    public Task<StepAgentReply> RunStepAsync(string prompt, string tier, CancellationToken cancellationToken)
         => RunStepAsync(prompt, tier, null, cancellationToken);
 
-    public Task<string> RunStepAsync(string prompt, string tier, string? machine, CancellationToken cancellationToken)
+    public async Task<StepAgentReply> RunStepAsync(string prompt, string tier, string? machine, CancellationToken cancellationToken)
     {
         Calls.Add((tier, prompt, machine));
-        return run(prompt, tier, cancellationToken);
+        string text = await run(prompt, tier, cancellationToken);
+        return new StepAgentReply(text, toolCalls, editToolCalled);
     }
 }
 
@@ -28,9 +36,12 @@ public sealed class PlanRunnerTests : PlanTestBase
         Assert.Equal("worker-b", PlanRunner.ModelMachineFor(FleetMode.Aggressive, "worker-b", "worker-a", "primary"));
     }
 
-    private PlanRunner Runner(FakeStepAgent agent, Func<string, string> verify, TimeSpan? timeout = null, ISleepGuard? sleepGuard = null) =>
+    private PlanRunner Runner(FakeStepAgent agent, Func<string, string> verify, TimeSpan? timeout = null, ISleepGuard? sleepGuard = null,
+        Func<int, TimeSpan>? transientDelay = null, Func<TimeSpan, CancellationToken, Task>? delayAsync = null,
+        IWorkerWorkspaceManager? workerWorkspaces = null) =>
         new(Store, new PlanTools(Store, Valid, (command, _, _) => Task.FromResult(verify(command))), agent, NullLogger.Instance, timeout,
-            transientDelay: _ => TimeSpan.Zero, sleepGuard: sleepGuard);
+            transientDelay: transientDelay ?? (_ => TimeSpan.Zero), sleepGuard: sleepGuard,
+            workerWorkspaces: workerWorkspaces, delayAsync: delayAsync ?? ((_, _) => Task.CompletedTask));
 
     private static string Pass(string _) => "Exit code: 0\n--- stdout ---\nok";
 
@@ -38,7 +49,95 @@ public sealed class PlanRunnerTests : PlanTestBase
 
     private PlanRecord ApprovedPlan(params PlanStepInput[] steps) => Store.Approve(NewPlan(steps).Id)!;
 
+    private PlanRecord InterruptedWorkerPlan(out WorkerWorkspaceBaseline baseline)
+    {
+        PlanRecord plan = NewPlan(new PlanStepInput("recover worker work", "detail", ["a.cs"], "dotnet build", "standard", RetrySafe: true));
+        plan = Store.SelectMachine(plan.Id, 1, "worker-a", out string? selectionError)!;
+        Assert.Null(selectionError);
+        plan = Store.Approve(plan.Id)!;
+        Store.Update(plan.Id, current => current with
+        {
+            Status = PlanStatus.Running,
+            Steps = current.Steps.Select(step => step with { Status = StepStatus.Running, Attempts = 1 }).ToList()
+        });
+        baseline = new WorkerWorkspaceBaseline("worker-a", new Dictionary<string, string> { ["a.cs"] = "baseline" });
+        Store.SaveWorkerBaseline(plan.Id, 1, 1, baseline.Machine, baseline.Files);
+        Store.AddEvent(plan.Id, 1, 1, RunEventKind.AttemptStarted, "standard", "worker-a", "Interrupted attempt.",
+            modelNode: "worker-a", workspaceNode: "worker-a");
+        Store.AddEvent(plan.Id, 1, 1, RunEventKind.WorkspaceStaged, "standard", "worker-a", "Staged the project.",
+            modelNode: "worker-a", workspaceNode: "worker-a");
+        return Store.Get(plan.Id)!;
+    }
+
     private static FakeStepAgent Agent(string reply = "Done.") => new((_, _, _) => Task.FromResult(reply));
+
+    private FleetOptions OptionsWithNodes(params FleetNodeConfig[] nodes)
+    {
+        IConfiguration configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["FLEET_CONFIG_PATH"] = Path.Combine(PlansDirectory, "fleet.config.json")
+            })
+            .Build();
+        var configStore = new FleetConfigStore(configuration);
+        configStore.Save(configStore.Current with { Nodes = nodes });
+        return FleetOptions.Load(configuration, configStore);
+    }
+
+    private sealed class HealthyNodeHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            string body = request.Method == HttpMethod.Post
+                ? "{\"choices\":[{\"message\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}"
+                : "{\"models\":[{\"name\":\"m:latest\"}]}";
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json")
+            });
+        }
+    }
+
+    private sealed class HealthyNodeFactory : IHttpClientFactory
+    {
+        public HttpClient CreateClient(string name) => new(new HealthyNodeHandler()) { Timeout = Timeout.InfiniteTimeSpan };
+    }
+
+    private sealed class FakeWorkerWorkspaceManager(WorkerWorkspaceRecoveryAnalysis recovery) : IWorkerWorkspaceManager
+    {
+        public List<string> StagedMachines { get; } = [];
+        public int ResumeCalls { get; private set; }
+
+        public Task<IWorkerWorkspaceSession> StageAsync(PlanRecord plan, PlanStep step, string machine, CancellationToken cancellationToken)
+        {
+            StagedMachines.Add(machine);
+            return Task.FromResult<IWorkerWorkspaceSession>(new FakeWorkerWorkspaceSession(machine));
+        }
+
+        public Task<WorkerWorkspaceResume> ResumeInterruptedAsync(PlanRecord plan, PlanStep step,
+            WorkerWorkspaceBaseline baseline, CancellationToken cancellationToken)
+        {
+            ResumeCalls++;
+            return Task.FromResult(new WorkerWorkspaceResume(recovery.Safe ? new FakeWorkerWorkspaceSession(baseline.Machine) : null, recovery));
+        }
+    }
+
+    private sealed class FakeWorkerWorkspaceSession(string machine) : IWorkerWorkspaceSession
+    {
+        public string Machine => machine;
+        public string Platform => "linux";
+        public string SnapshotId() => "synthetic-snapshot";
+        public Dictionary<string, string> BaselineHashes() => new(StringComparer.OrdinalIgnoreCase) { ["a.cs"] = "baseline" };
+        public IDisposable Enter() => new NoopScope();
+        public Task SyncToHubAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task RefreshFromHubAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public void Dispose() { }
+
+        private sealed class NoopScope : IDisposable
+        {
+            public void Dispose() { }
+        }
+    }
 
     [Fact]
     public async Task Steps_run_in_order_each_on_its_own_tier_and_the_plan_finishes()
@@ -222,11 +321,34 @@ public sealed class PlanRunnerTests : PlanTestBase
     }
 
     [Fact]
+    public async Task Each_model_round_persists_its_failure_class_and_tool_summary()
+    {
+        PlanRecord plan = ApprovedPlan(Step("build it"));
+        int checks = 0;
+        var agent = new FakeStepAgent((_, _, _) => Task.FromResult("Worked on the build."), toolCalls: 3, editToolCalled: true);
+
+        await Runner(agent, _ => ++checks == 1 ? "Exit code: 1\nerror CS1002: ; expected" : Pass("build"))
+            .RunPlanAsync(plan.Id, default);
+
+        PlanRunEvent[] rounds = Store.Get(plan.Id)!.Events!
+            .Where(runEvent => runEvent.Kind == RunEventKind.RoundClassified)
+            .ToArray();
+        Assert.Equal(2, rounds.Length);
+        Assert.Equal(nameof(FailureClass.CodeProgress), rounds[0].FailureClass);
+        Assert.Equal("CS1002", rounds[0].FailureSignature);
+        Assert.Equal(1, rounds[0].FailureSignatureSize);
+        Assert.Equal(0, rounds[0].FilesChanged);
+        Assert.Equal(3, rounds[0].ToolCalls);
+        Assert.True(rounds[0].EditToolCalled);
+        Assert.Equal("Passed", rounds[1].FailureClass);
+    }
+
+    [Fact]
     public async Task When_no_machine_answers_the_step_waits_without_spending_its_attempts()
     {
         PlanRecord plan = ApprovedPlan(Step("during a reboot", tier: "standard"));
         int calls = 0;
-        var agent = new FakeStepAgent((_, _, _) => ++calls <= 5
+        var agent = new FakeStepAgent((_, _, _) => ++calls <= 12
             ? throw new HttpRequestException("No connection could be made because the target machine actively refused it.")
             : Task.FromResult("fine"));
 
@@ -234,23 +356,286 @@ public sealed class PlanRunnerTests : PlanTestBase
 
         PlanRecord after = Store.Get(plan.Id)!;
         Assert.Equal(PlanStatus.Done, after.Status);
-        // Five outages and then the first real attempt, still on the step's own tier: nothing was escalated.
-        Assert.Equal(6, agent.Calls.Count);
+        // Twelve outages and then the first real attempt, still on the step's own tier: nothing was escalated.
+        Assert.Equal(13, agent.Calls.Count);
         Assert.All(agent.Calls, call => Assert.Equal("standard", call.Tier));
-        Assert.Equal(5, after.Events!.Count(e => e.Kind == RunEventKind.Waiting));
+        Assert.Equal(12, after.Events!.Count(e => e.Kind == RunEventKind.Waiting));
+        Assert.Equal(1, after.Steps[0].Attempts);
         Assert.Contains("does not count as an attempt", after.Events!.First(e => e.Kind == RunEventKind.Waiting).Detail);
     }
 
     [Fact]
-    public async Task A_long_outage_does_eventually_use_the_attempts_and_block_the_plan()
+    public async Task An_outage_keeps_waiting_past_the_former_eight_wait_limit()
     {
-        PlanRecord plan = ApprovedPlan(Step("machines gone"));
-        var agent = new FakeStepAgent((_, _, _) => throw new HttpRequestException("unreachable"));
+        PlanRecord plan = ApprovedPlan(Step("long reboot"));
+        int calls = 0;
+        var agent = new FakeStepAgent((_, _, _) => ++calls <= 20
+            ? throw new HttpRequestException("unreachable")
+            : Task.FromResult("fine"));
 
         await Runner(agent, Pass).RunPlanAsync(plan.Id, default);
 
-        Assert.Equal(PlanStatus.Blocked, Store.Get(plan.Id)!.Status);
-        Assert.Equal(PlanRunner.MaxTransientWaits + PlanRunner.MaxAttemptsPerStep, agent.Calls.Count);
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.Equal(21, agent.Calls.Count);
+        Assert.Equal(20, after.Events!.Count(e => e.Kind == RunEventKind.Waiting));
+        Assert.Equal(1, after.Steps[0].Attempts);
+    }
+
+    [Fact]
+    public async Task Model_outage_uses_same_tier_alternate_then_hub_only_when_scope_allows()
+    {
+        FleetNodeConfig hub = new("hub", "http://hub.example.test/v1", "m", "hub", "heavy", Fallback: true);
+        FleetNodeConfig workerA = new("worker-a", "http://worker-a.example.test/v1", "m", "worker", "standard");
+        FleetOptions workerOptions = OptionsWithNodes(
+            hub,
+            workerA,
+            new FleetNodeConfig("worker-b", "http://worker-b.example.test/v1", "m", "worker", "standard"));
+        var workerHealth = new FleetHealthMonitor(workerOptions, new HealthyNodeFactory());
+        FleetOptions hubOptions = OptionsWithNodes(hub, workerA);
+        var hubHealth = new FleetHealthMonitor(hubOptions, new HealthyNodeFactory());
+
+        async Task<(string[] Machines, PlanRecord Plan)> RunPinnedAsync(FleetOptions options, FleetHealthMonitor health, bool allowHub)
+        {
+            PlanRecord plan = NewPlan(Step("recover", tier: "standard"));
+            plan = Store.SelectMachine(plan.Id, 1, "worker-a", out string? selectError)!;
+            Assert.Null(selectError);
+            plan = Store.Approve(plan.Id, recoveryScope: allowHub ? PlanRecoveryScope.AllowHubRescue : PlanRecoveryScope.WorkerOnly)!;
+            int calls = 0;
+            var agent = new FakeStepAgent((_, _, _) => ++calls == 1
+                ? throw new HttpRequestException("model server unavailable")
+                : Task.FromResult("finished"));
+            var runner = new PlanRunner(Store,
+                new PlanTools(Store, Valid, (command, _, _) => Task.FromResult(Pass(command))),
+                agent, NullLogger.Instance, fleetOptions: options, healthMonitor: health,
+                transientDelay: _ => TimeSpan.Zero, delayAsync: (_, _) => Task.CompletedTask);
+
+            await runner.RunPlanAsync(plan.Id, default);
+            PlanRecord after = Store.Get(plan.Id)!;
+            Assert.Equal(PlanStatus.Done, after.Status);
+            return (agent.Calls.Select(call => call.Machine!).ToArray(), after);
+        }
+
+        (string[] sameTierMachines, PlanRecord sameTierPlan) = await RunPinnedAsync(workerOptions, workerHealth, allowHub: false);
+        Assert.Equal(["worker-a", "worker-b"], sameTierMachines);
+        Assert.Contains(sameTierPlan.Events!, runEvent => runEvent.Kind == RunEventKind.RecoveryRouted && runEvent.ModelNode == "worker-b");
+
+        (string[] waitingMachines, PlanRecord waitingPlan) = await RunPinnedAsync(hubOptions, hubHealth, allowHub: false);
+        Assert.Equal(["worker-a", "worker-a"], waitingMachines);
+        Assert.Contains(waitingPlan.Events!, runEvent => runEvent.Kind == RunEventKind.InferenceProbePassed && runEvent.Node == "worker-a");
+
+        (string[] hubMachines, PlanRecord hubPlan) = await RunPinnedAsync(hubOptions, hubHealth, allowHub: true);
+        Assert.Equal(["worker-a", "hub"], hubMachines);
+        Assert.Contains(hubPlan.Events!, runEvent => runEvent.Kind == RunEventKind.RecoveryRouted && runEvent.ModelNode == "hub");
+    }
+
+    [Fact]
+    public async Task An_outage_waits_only_until_the_plan_deadline()
+    {
+        PlanRecord plan = ApprovedPlan(Step("machines gone"));
+        DateTimeOffset deadline = DateTimeOffset.UtcNow.AddSeconds(2);
+        plan = Store.Update(plan.Id, current => current with { RunDeadlineUtc = deadline })!;
+        var agent = new FakeStepAgent((_, _, _) => throw new HttpRequestException("unreachable"));
+        int waits = 0;
+        Task Delay(TimeSpan _, CancellationToken cancellationToken)
+        {
+            if (++waits < 20) return Task.CompletedTask;
+            TimeSpan remaining = deadline - DateTimeOffset.UtcNow;
+            return Task.Delay(remaining > TimeSpan.Zero ? remaining + TimeSpan.FromMilliseconds(10) : TimeSpan.Zero, cancellationToken);
+        }
+
+        await Runner(agent, Pass, transientDelay: _ => TimeSpan.FromSeconds(1), delayAsync: Delay)
+            .RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Blocked, after.Status);
+        Assert.Equal(20, agent.Calls.Count);
+        Assert.Equal(20, after.Events!.Count(runEvent => runEvent.Kind == RunEventKind.Waiting));
+        Assert.Contains(after.Events!, runEvent => runEvent.Kind == RunEventKind.RunDeadlineExceeded);
+        Assert.Contains("deadline", after.Steps[0].Note, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task A_worker_transport_staging_failure_waits_without_spending_an_attempt_until_deadline()
+    {
+        string project = Path.Combine(Path.GetTempPath(), "fleet-recovery-test-" + Guid.NewGuid().ToString("N"));
+        string keyPath = Path.Combine(project, "worker-key.pem");
+        Directory.CreateDirectory(project);
+        using (RSA rsa = RSA.Create(2048)) File.WriteAllText(keyPath, rsa.ExportRSAPrivateKeyPem());
+        File.WriteAllText(Path.Combine(project, "a.cs"), "class Sample { }");
+
+        try
+        {
+            IConfiguration configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["FLEET_CONFIG_PATH"] = Path.Combine(PlansDirectory, "staging-fleet.config.json")
+                })
+                .Build();
+            var configStore = new FleetConfigStore(configuration);
+            configStore.Save(configStore.Current with
+            {
+                Nodes =
+                [
+                    new FleetNodeConfig("hub", "http://hub.example.test/v1", "m", "hub", "heavy", Fallback: true),
+                    new FleetNodeConfig("worker-a", "http://worker-a.example.test/v1", "m", "worker", "standard",
+                        Workspace: new FleetWorkerWorkspaceConfig("127.0.0.1", "test-user", keyPath,
+                            "SHA256:synthetic-host-key", "/tmp/fleet-test/workspaces", "linux", Port: 1))
+                ]
+            });
+            FleetOptions options = FleetOptions.Load(configuration, configStore);
+            PlanRecord plan = NewPlan(Step("stage on worker", tier: "standard"));
+            plan = Store.Update(plan.Id, current => current with
+            {
+                WorkingDirectory = project,
+                RunDeadlineUtc = DateTimeOffset.UtcNow.AddMilliseconds(500)
+            })!;
+            plan = Store.SelectMachine(plan.Id, 1, "worker-a", out string? selectError)!;
+            Assert.Null(selectError);
+            plan = Store.Approve(plan.Id)!;
+            plan = Store.Update(plan.Id, current => current with { RunDeadlineUtc = DateTimeOffset.UtcNow.AddMilliseconds(500) })!;
+
+            var workspaces = new WorkerWorkspaceManager(options, NullLogger.Instance, TimeSpan.FromSeconds(1));
+            var runner = new PlanRunner(Store,
+                new PlanTools(Store, Valid, (command, _, _) => Task.FromResult(Pass(command))),
+                Agent(), NullLogger.Instance, fleetOptions: options, workerWorkspaces: workspaces,
+                transientDelay: _ => TimeSpan.FromSeconds(10), delayAsync: Task.Delay);
+            await runner.RunPlanAsync(plan.Id, default);
+
+            PlanRecord after = Store.Get(plan.Id)!;
+            Assert.Equal(PlanStatus.Blocked, after.Status);
+            Assert.Equal(0, after.Steps[0].Attempts);
+            Assert.Contains(after.Events!, runEvent => runEvent.Kind == RunEventKind.Waiting && runEvent.WorkspaceNode == "worker-a");
+            Assert.Contains(after.Events!, runEvent => runEvent.Kind == RunEventKind.RunDeadlineExceeded);
+            Assert.Contains(after.Events!, runEvent => runEvent.Kind == RunEventKind.RoundClassified && runEvent.FailureClass == nameof(FailureClass.Infra));
+        }
+        finally
+        {
+            Directory.Delete(project, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task An_interrupted_worker_without_its_saved_baseline_blocks_without_replaying()
+    {
+        PlanRecord plan = ApprovedPlan(Step("interrupted worker"));
+        Store.Update(plan.Id, current => current with
+        {
+            Status = PlanStatus.Running,
+            Steps = current.Steps.Select(step => step with { Status = StepStatus.Running, Attempts = 1 }).ToList()
+        });
+        Store.AddEvent(plan.Id, 1, 1, RunEventKind.WorkspaceStaged, "standard", "worker-a",
+            "Staged the project on this worker.", modelNode: "worker-a", workspaceNode: "worker-a");
+        FakeStepAgent agent = Agent();
+
+        await Runner(agent, Pass).RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Blocked, after.Status);
+        Assert.Empty(agent.Calls);
+        Assert.Contains("without a recoverable staged baseline", after.Steps[0].Note);
+    }
+
+    [Fact]
+    public async Task A_reconciled_worker_snapshot_does_not_need_its_deleted_baseline_after_restart()
+    {
+        PlanRecord plan = ApprovedPlan(Step("reconciled worker"));
+        Store.Update(plan.Id, current => current with
+        {
+            Status = PlanStatus.Running,
+            Steps = current.Steps.Select(step => step with { Status = StepStatus.Running, Attempts = 1 }).ToList()
+        });
+        Store.AddEvent(plan.Id, 1, 1, RunEventKind.WorkspaceStaged, "standard", "worker-a",
+            "Staged the project on this worker.", modelNode: "worker-a", workspaceNode: "worker-a");
+        Store.AddEvent(plan.Id, 1, 1, RunEventKind.WorkspaceReconciled, "standard", "worker-a",
+            "The snapshot was compared with the hub and safely re-staged.", modelNode: "worker-a", workspaceNode: "worker-a");
+        FakeStepAgent agent = Agent();
+
+        await Runner(agent, Pass).RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.Single(agent.Calls);
+        Assert.Contains(after.Events!, runEvent => runEvent.Kind == RunEventKind.AttemptStarted && runEvent.Attempt == 2);
+    }
+
+    [Fact]
+    public async Task Restart_with_unchanged_worker_files_replays_the_same_attempt()
+    {
+        PlanRecord plan = InterruptedWorkerPlan(out _);
+        var recovery = new WorkerWorkspaceRecoveryAnalysis([], [], []);
+        var workspaces = new FakeWorkerWorkspaceManager(recovery);
+        FakeStepAgent agent = Agent();
+
+        await Runner(agent, Pass, workerWorkspaces: workspaces).RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.Equal(1, after.Steps[0].Attempts);
+        Assert.Equal(1, workspaces.ResumeCalls);
+        Assert.Contains(after.Events!, runEvent => runEvent.Kind == RunEventKind.WorkspaceReconciled && runEvent.Detail.Contains("match their saved staged baseline", StringComparison.Ordinal));
+        Assert.Contains(after.Events!, runEvent => runEvent.Kind == RunEventKind.WorkspaceStaged && runEvent.Attempt == 1);
+        Assert.Single(agent.Calls);
+    }
+
+    [Fact]
+    public async Task Restart_with_safe_worker_edits_runs_the_check_without_another_model_call()
+    {
+        PlanRecord plan = InterruptedWorkerPlan(out _);
+        var recovery = new WorkerWorkspaceRecoveryAnalysis(["a.cs"], ["a.cs"], []);
+        var workspaces = new FakeWorkerWorkspaceManager(recovery);
+        FakeStepAgent agent = Agent();
+        int checks = 0;
+
+        await Runner(agent, command => { if (command == "dotnet build") checks++; return Pass(command); }, workerWorkspaces: workspaces)
+            .RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.True(after.Status == PlanStatus.Done, string.Join(Environment.NewLine, after.Events!.Select(runEvent => $"{runEvent.Kind}: {runEvent.Detail}")));
+        Assert.Equal(1, after.Steps[0].Attempts);
+        Assert.Equal(1, checks);
+        Assert.Empty(agent.Calls);
+        Assert.Contains(after.Events!, runEvent => runEvent.Kind == RunEventKind.WorkspaceReconciled && runEvent.Detail.Contains("a.cs", StringComparison.Ordinal));
+        Assert.Contains(after.Events!, runEvent => runEvent.Kind == RunEventKind.CheckPassed && runEvent.Attempt == 1);
+    }
+
+    [Fact]
+    public async Task Restart_with_conflicting_worker_edits_blocks_without_running_the_check()
+    {
+        PlanRecord plan = InterruptedWorkerPlan(out _);
+        var recovery = new WorkerWorkspaceRecoveryAnalysis(["a.cs"], [], ["a.cs"]);
+        var workspaces = new FakeWorkerWorkspaceManager(recovery);
+        FakeStepAgent agent = Agent();
+        int checks = 0;
+
+        await Runner(agent, command => { if (command == "dotnet build") checks++; return Pass(command); }, workerWorkspaces: workspaces)
+            .RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Blocked, after.Status);
+        Assert.Equal(1, workspaces.ResumeCalls);
+        Assert.Equal(0, checks);
+        Assert.Empty(agent.Calls);
+        Assert.Contains("a.cs", after.Steps[0].Note);
+        Assert.Contains("Nothing was overwritten", after.Steps[0].Note);
+    }
+
+    [Fact]
+    public async Task Unknown_model_exceptions_wait_at_their_minimum_pacing_and_park_after_five()
+    {
+        PlanRecord plan = ApprovedPlan(Step("unknown errors"));
+        var delays = new List<TimeSpan>();
+        var agent = new FakeStepAgent((_, _, _) => throw new InvalidOperationException("unexpected model failure"));
+
+        await Runner(agent, Pass, delayAsync: (delay, _) => { delays.Add(delay); return Task.CompletedTask; })
+            .RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Blocked, after.Status);
+        Assert.Equal(5, agent.Calls.Count);
+        Assert.Equal([20d, 40d, 60d, 80d], delays.Select(delay => delay.TotalSeconds));
+        Assert.Contains("InvalidOperationException", after.Steps[0].Note);
+        Assert.Contains("five unknown failures", after.Steps[0].Note);
     }
 
     [Theory]

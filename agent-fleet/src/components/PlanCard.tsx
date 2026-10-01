@@ -28,6 +28,12 @@ export type PlanRunEvent = {
   node: string | null;
   modelNode?: string | null;
   workspaceNode?: string | null;
+  failureClass?: string | null;
+  failureSignature?: string | null;
+  failureSignatureSize?: number | null;
+  filesChanged?: number | null;
+  toolCalls?: number | null;
+  editToolCalled?: boolean | null;
   detail: string;
 };
 
@@ -142,6 +148,9 @@ const EVENT_STYLE: Record<string, string> = {
   "final-validation-passed": "text-emerald-400",
   "run-lease-busy": "text-amber-300",
   "retry-approved": "text-sky-300",
+  "round-classified": "text-violet-300",
+  "inference-probe-passed": "text-emerald-300",
+  "workspace-reconciled": "text-sky-300",
   stopped: "text-amber-400",
 };
 

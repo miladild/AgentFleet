@@ -1,6 +1,6 @@
 namespace AgentFleet.Tests;
 
-public sealed class WorkerWorkspaceTests
+public sealed class WorkerWorkspaceTests : PlanTestBase
 {
     [Fact]
     public void Windows_sftp_link_checks_skip_the_drive_pseudo_directory()
@@ -90,5 +90,67 @@ public sealed class WorkerWorkspaceTests
     public void Filters_private_files_from_worker_staging_and_prompt_context(string relativePath, bool allowed)
     {
         Assert.Equal(allowed, WorkerWorkspaceSession.IsAllowedProjectFile(relativePath));
+    }
+
+    [Fact]
+    public void Restart_reconciliation_accepts_an_unchanged_worker_snapshot()
+    {
+        PlanRecord plan = NewPlan(new PlanStepInput("recover", "detail", ["a.cs"], "dotnet build", "standard"));
+        PlanStep step = plan.Steps.Single();
+        var hashes = new Dictionary<string, string> { ["a.cs"] = "baseline" };
+
+        WorkerWorkspaceRecoveryAnalysis result = WorkerWorkspaceSession.AnalyzeInterruptedFiles(plan, step, hashes, hashes, hashes);
+
+        Assert.True(result.Safe);
+        Assert.Empty(result.ChangedFiles);
+        Assert.Empty(result.FilesToApply);
+    }
+
+    [Fact]
+    public void Staged_worker_hashes_survive_as_private_plan_store_state()
+    {
+        PlanRecord plan = NewPlan(Step("recover"));
+        var hashes = new Dictionary<string, string> { ["a.cs"] = "synthetic-hash" };
+
+        Store.SaveWorkerBaseline(plan.Id, 1, 2, "worker-a", hashes);
+        WorkerWorkspaceBaseline? saved = Store.GetWorkerBaseline(plan.Id, 1, 2);
+
+        Assert.NotNull(saved);
+        Assert.Equal("worker-a", saved.Machine);
+        Assert.Equal(hashes, saved.Files);
+        Store.DeleteWorkerBaseline(plan.Id, 1, 2);
+        Assert.Null(Store.GetWorkerBaseline(plan.Id, 1, 2));
+    }
+
+    [Fact]
+    public void Restart_reconciliation_recovers_declared_worker_edits_when_the_hub_is_unchanged()
+    {
+        PlanRecord plan = NewPlan(new PlanStepInput("recover", "detail", ["a.cs"], "dotnet build", "standard"));
+        PlanStep step = plan.Steps.Single();
+        var baseline = new Dictionary<string, string> { ["a.cs"] = "baseline" };
+        var remote = new Dictionary<string, string> { ["a.cs"] = "worker-edit" };
+        var hub = new Dictionary<string, string> { ["a.cs"] = "baseline" };
+
+        WorkerWorkspaceRecoveryAnalysis result = WorkerWorkspaceSession.AnalyzeInterruptedFiles(plan, step, baseline, remote, hub);
+
+        Assert.True(result.Safe);
+        Assert.Equal(["a.cs"], result.ChangedFiles);
+        Assert.Equal(["a.cs"], result.FilesToApply);
+    }
+
+    [Fact]
+    public void Restart_reconciliation_blocks_conflicting_or_undeclared_worker_edits()
+    {
+        PlanRecord plan = NewPlan(new PlanStepInput("recover", "detail", ["a.cs"], "dotnet build", "standard"));
+        PlanStep step = plan.Steps.Single();
+        var baseline = new Dictionary<string, string> { ["a.cs"] = "baseline", ["b.cs"] = "baseline-b" };
+        var remote = new Dictionary<string, string> { ["a.cs"] = "worker-edit", ["b.cs"] = "worker-edit-b" };
+        var hub = new Dictionary<string, string> { ["a.cs"] = "hub-edit", ["b.cs"] = "baseline-b" };
+
+        WorkerWorkspaceRecoveryAnalysis result = WorkerWorkspaceSession.AnalyzeInterruptedFiles(plan, step, baseline, remote, hub);
+
+        Assert.False(result.Safe);
+        Assert.Equal(["a.cs", "b.cs"], result.Conflicts);
+        Assert.Empty(result.FilesToApply);
     }
 }

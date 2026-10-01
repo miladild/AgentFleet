@@ -7,10 +7,39 @@ using Renci.SshNet.Sftp;
 
 namespace AgentFleet;
 
-/// <summary>Creates isolated per-plan copies on a selected, explicitly configured worker.</summary>
-internal sealed class WorkerWorkspaceManager(FleetOptions fleet, ILogger logger, TimeSpan commandTimeout)
+internal sealed record WorkerWorkspaceBaseline(string Machine, Dictionary<string, string> Files);
+
+internal sealed record WorkerWorkspaceRecoveryAnalysis(
+    IReadOnlyList<string> ChangedFiles,
+    IReadOnlyList<string> FilesToApply,
+    IReadOnlyList<string> Conflicts)
 {
-    public async Task<WorkerWorkspaceSession> StageAsync(PlanRecord plan, PlanStep step, string machine, CancellationToken cancellationToken)
+    public bool Safe => Conflicts.Count == 0;
+}
+
+internal interface IWorkerWorkspaceSession : IDisposable
+{
+    string Machine { get; }
+    string Platform { get; }
+    string SnapshotId();
+    Dictionary<string, string> BaselineHashes();
+    IDisposable Enter();
+    Task SyncToHubAsync(CancellationToken cancellationToken);
+    Task RefreshFromHubAsync(CancellationToken cancellationToken);
+}
+
+internal interface IWorkerWorkspaceManager
+{
+    Task<IWorkerWorkspaceSession> StageAsync(PlanRecord plan, PlanStep step, string machine, CancellationToken cancellationToken);
+    Task<WorkerWorkspaceResume> ResumeInterruptedAsync(PlanRecord plan, PlanStep step, WorkerWorkspaceBaseline baseline, CancellationToken cancellationToken);
+}
+
+internal sealed record WorkerWorkspaceResume(IWorkerWorkspaceSession? Session, WorkerWorkspaceRecoveryAnalysis Analysis);
+
+/// <summary>Creates isolated per-plan copies on a selected, explicitly configured worker.</summary>
+internal sealed class WorkerWorkspaceManager(FleetOptions fleet, ILogger logger, TimeSpan commandTimeout) : IWorkerWorkspaceManager
+{
+    public async Task<IWorkerWorkspaceSession> StageAsync(PlanRecord plan, PlanStep step, string machine, CancellationToken cancellationToken)
     {
         FleetNodeDefinition node = fleet.Nodes.FirstOrDefault(candidate =>
             string.Equals(candidate.Name, machine, StringComparison.OrdinalIgnoreCase))
@@ -35,6 +64,44 @@ internal sealed class WorkerWorkspaceManager(FleetOptions fleet, ILogger logger,
             logger.LogInformation("Staged plan {PlanId} on worker {Machine} at {Workspace}.", plan.Id, machine, session.RemoteRoot);
             await Task.CompletedTask;
             return session;
+        }
+        catch
+        {
+            session.Dispose();
+            throw;
+        }
+    }
+
+    public async Task<WorkerWorkspaceResume> ResumeInterruptedAsync(
+        PlanRecord plan,
+        PlanStep step,
+        WorkerWorkspaceBaseline baseline,
+        CancellationToken cancellationToken)
+    {
+        if (!fleet.TryGetNode(baseline.Machine, out FleetNodeDefinition? node) || node.Workspace is null || node.Vision ||
+            string.Equals(node.Name, "hub", StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(node.Tier, step.Tier, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"Worker workspace unavailable: {baseline.Machine} is not configured for workspace recovery.");
+        if (string.IsNullOrWhiteSpace(plan.WorkingDirectory) || !Directory.Exists(plan.WorkingDirectory))
+            throw new InvalidOperationException("Worker workspace unavailable: the plan's project folder does not exist on the hub.");
+        var session = new WorkerWorkspaceSession(baseline.Machine, node.Workspace,
+            Path.GetFullPath(plan.WorkingDirectory!), logger, commandTimeout);
+        try
+        {
+            session.Connect();
+            var hashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach ((string path, string hash) in baseline.Files)
+            {
+                if (!hashes.TryAdd(path, hash))
+                    throw new InvalidDataException("The saved worker baseline contains duplicate paths.");
+            }
+            WorkerWorkspaceRecoveryAnalysis analysis = await session.ReconcileInterruptedAsync(plan, step, hashes, cancellationToken);
+            if (!analysis.Safe)
+            {
+                session.Dispose();
+                return new WorkerWorkspaceResume(null, analysis);
+            }
+            return new WorkerWorkspaceResume(session, analysis);
         }
         catch
         {
@@ -67,7 +134,7 @@ internal static class WorkerWorkspaceContext
 /// An SSH/SFTP session for one plan attempt. Paths exposed to tools are confined to its staged project; shell
 /// commands run as the configured worker account, whose OS permissions must be limited to its own workspace.
 /// </summary>
-internal sealed class WorkerWorkspaceSession : IDisposable
+internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
 {
     private static readonly HashSet<string> SkippedDirectories = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -116,13 +183,15 @@ internal sealed class WorkerWorkspaceSession : IDisposable
     public string RemoteRoot { get; private set; }
     public string HubRoot => _hubRoot;
 
-    internal string SnapshotId()
+    public string SnapshotId()
     {
         string contents = string.Join('\n', _baselineHashes
             .OrderBy(file => file.Key, StringComparer.Ordinal)
             .Select(file => $"{file.Key}\0{file.Value}"));
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(contents)))[..16].ToLowerInvariant();
     }
+
+    public Dictionary<string, string> BaselineHashes() => new(_baselineHashes, StringComparer.OrdinalIgnoreCase);
 
     internal void Connect()
     {
@@ -228,6 +297,169 @@ internal sealed class WorkerWorkspaceSession : IDisposable
         }
 
         InitializeWorkspaceGit();
+    }
+
+    internal async Task<WorkerWorkspaceRecoveryAnalysis> ReconcileInterruptedAsync(
+        PlanRecord plan,
+        PlanStep step,
+        IReadOnlyDictionary<string, string> baseline,
+        CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            RemoteRoot = JoinRemote(_config.Root.TrimEnd('/'), "agentfleet", "plans", plan.Id.ToLowerInvariant(), SafePart(Machine), "project");
+            EnsureNoLinkComponents(RemoteRoot);
+            if (!_sftp!.Exists(RemoteRoot)) throw new IOException($"Worker workspace on {Machine} is missing; its staged baseline could not be checked.");
+
+            _stepFiles.Clear();
+            foreach (string requested in step.Files)
+            {
+                string relative = LocalRelativePath(requested);
+                if (!string.IsNullOrWhiteSpace(relative)) _stepFiles.Add(relative);
+            }
+
+            var remoteBytes = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+            var remoteHashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var sizeConflicts = new List<string>();
+            var linkConflicts = new List<string>();
+            foreach (string remote in EnumerateRemoteFilesForRecovery(RemoteRoot, linkConflicts))
+            {
+                string relative = RelativeRemote(RemoteRoot, remote);
+                if (_sftp.GetAttributes(remote).Size > 20 * 1024 * 1024)
+                {
+                    sizeConflicts.Add(relative);
+                    continue;
+                }
+
+                using var content = new MemoryStream();
+                _sftp.DownloadFile(remote, content);
+                byte[] bytes = content.ToArray();
+                remoteBytes.Add(relative, bytes);
+                remoteHashes.Add(relative, HashBytes(bytes));
+            }
+
+            if (linkConflicts.Count > 0)
+                return new WorkerWorkspaceRecoveryAnalysis([], [], linkConflicts.Order(StringComparer.OrdinalIgnoreCase).ToArray());
+            if (sizeConflicts.Count > 0)
+                return new WorkerWorkspaceRecoveryAnalysis([], [], sizeConflicts.Order(StringComparer.OrdinalIgnoreCase).ToArray());
+
+            string[] hubFiles = EnumerateStageFiles(_hubRoot)
+                .Where(file => new FileInfo(file).Length <= 20 * 1024 * 1024)
+                .ToArray();
+            var hubHashes = hubFiles.ToDictionary(
+                file => Path.GetRelativePath(_hubRoot, file).Replace('\\', '/'),
+                HashFile,
+                StringComparer.OrdinalIgnoreCase);
+            WorkerWorkspaceRecoveryAnalysis analysis = AnalyzeInterruptedFiles(
+                plan, step, baseline, remoteHashes, hubHashes);
+            if (!analysis.Safe) return analysis;
+
+            foreach (string relative in analysis.FilesToApply)
+            {
+                string local = SafeHubPath(relative);
+                if (PlanRunner.HasLinkedPathComponent(_hubRoot, local))
+                    throw new UnauthorizedAccessException($"Worker recovery refused a linked hub path: {relative}.");
+                if (!remoteBytes.TryGetValue(relative, out byte[]? bytes))
+                {
+                    if (File.Exists(local)) File.Delete(local);
+                    continue;
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(local)!);
+                string temporary = local + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                try
+                {
+                    await File.WriteAllBytesAsync(temporary, bytes, cancellationToken);
+                    File.Move(temporary, local, overwrite: true);
+                }
+                finally
+                {
+                    if (File.Exists(temporary)) File.Delete(temporary);
+                }
+            }
+
+            // The comparison proved every worker-only change is either already in the hub or named by this step
+            // and uncontested. Re-stage the hub snapshot so future tools and checks see one consistent copy.
+            var currentHub = EnumerateStageFiles(_hubRoot)
+                .Where(file => new FileInfo(file).Length <= 20 * 1024 * 1024)
+                .ToDictionary(file => Path.GetRelativePath(_hubRoot, file).Replace('\\', '/'), StringComparer.OrdinalIgnoreCase);
+            foreach (string remote in EnumerateRemoteFiles(RemoteRoot).ToArray())
+            {
+                string relative = RelativeRemote(RemoteRoot, remote);
+                if (!currentHub.ContainsKey(relative)) _sftp.DeleteFile(remote);
+            }
+            foreach ((string relative, string source) in currentHub)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                string destination = JoinRemote(RemoteRoot, relative);
+                EnsureNoLinkComponents(destination);
+                CreateDirectoryTree(Parent(destination));
+                using FileStream input = File.OpenRead(source);
+                _sftp.UploadFile(input, destination, canOverride: true);
+            }
+
+            _stagedFiles.Clear();
+            _baselineHashes.Clear();
+            foreach ((string relative, string source) in currentHub)
+            {
+                _stagedFiles.Add(relative);
+                _baselineHashes[relative] = HashFile(source);
+            }
+            return analysis;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    internal static WorkerWorkspaceRecoveryAnalysis AnalyzeInterruptedFiles(
+        PlanRecord plan,
+        PlanStep step,
+        IReadOnlyDictionary<string, string> baseline,
+        IReadOnlyDictionary<string, string> remote,
+        IReadOnlyDictionary<string, string> hub)
+    {
+        var changed = new List<string>();
+        var apply = new List<string>();
+        var conflicts = new List<string>();
+        string root = Path.GetFullPath(plan.WorkingDirectory ?? string.Empty);
+        string[] paths = baseline.Keys.Concat(remote.Keys).Concat(hub.Keys).Distinct(StringComparer.OrdinalIgnoreCase)
+            .Order(StringComparer.OrdinalIgnoreCase).ToArray();
+        foreach (string relative in paths)
+        {
+            if (!IsSafeRelative(relative))
+            {
+                conflicts.Add(relative);
+                continue;
+            }
+
+            bool remoteExists = remote.TryGetValue(relative, out string? remoteHash);
+            bool baselineExists = baseline.TryGetValue(relative, out string? baselineHash);
+            if (remoteExists == baselineExists && (!remoteExists || string.Equals(remoteHash, baselineHash, StringComparison.Ordinal))) continue;
+
+            changed.Add(relative);
+            string fullPath = Path.GetFullPath(Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar)));
+            bool named = FleetPlanContext.DeclaredPaths(plan, step).Any(declared => FleetPlanContext.Names(declared, fullPath));
+            if (!named)
+            {
+                conflicts.Add(relative);
+                continue;
+            }
+
+            bool hubExists = hub.TryGetValue(relative, out string? hubHash);
+            if (hubExists == remoteExists && (!hubExists || string.Equals(hubHash, remoteHash, StringComparison.Ordinal))) continue;
+            if (hubExists == baselineExists && (!hubExists || string.Equals(hubHash, baselineHash, StringComparison.Ordinal)))
+            {
+                apply.Add(relative);
+                continue;
+            }
+
+            conflicts.Add(relative);
+        }
+
+        return new WorkerWorkspaceRecoveryAnalysis(changed, apply, conflicts.Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
     }
 
     public IDisposable Enter() => WorkerWorkspaceContext.Push(this);
@@ -588,9 +820,12 @@ internal sealed class WorkerWorkspaceSession : IDisposable
         catch (UnauthorizedAccessException) { return string.Empty; }
     }
 
-    private bool IsNamedByStep(string relative) => _stepFiles.Any(declared =>
-        string.Equals(declared, relative, StringComparison.OrdinalIgnoreCase) ||
-        declared.EndsWith("/", StringComparison.Ordinal) && relative.StartsWith(declared, StringComparison.OrdinalIgnoreCase));
+    private bool IsNamedByStep(string relative)
+    {
+        string fullPath = Path.GetFullPath(Path.Combine(_hubRoot, relative.Replace('/', Path.DirectorySeparatorChar)));
+        return _stepFiles.Any(declared => FleetPlanContext.Names(
+            Path.GetFullPath(Path.Combine(_hubRoot, declared.Replace('/', Path.DirectorySeparatorChar))), fullPath));
+    }
 
     private void EnsureNoLinkComponents(string path)
     {
@@ -649,6 +884,29 @@ internal sealed class WorkerWorkspaceSession : IDisposable
                     foreach (string nested in EnumerateRemoteFiles(entry.FullName)) yield return nested;
             }
             else if (AllowedRelative(RelativeRemote(RemoteRoot, entry.FullName))) yield return entry.FullName;
+        }
+    }
+
+    private IEnumerable<string> EnumerateRemoteFilesForRecovery(string directory, ICollection<string> linkConflicts)
+    {
+        foreach (var entry in _sftp!.ListDirectory(directory).Where(item => item.Name is not ("." or "..")))
+        {
+            if (entry.IsSymbolicLink)
+            {
+                string relative = RelativeRemote(RemoteRoot, entry.FullName);
+                if (AllowedRelative(relative)) linkConflicts.Add(relative);
+                continue;
+            }
+
+            if (entry.IsDirectory)
+            {
+                if (!SkippedDirectories.Contains(entry.Name))
+                    foreach (string nested in EnumerateRemoteFilesForRecovery(entry.FullName, linkConflicts)) yield return nested;
+            }
+            else if (AllowedRelative(RelativeRemote(RemoteRoot, entry.FullName)))
+            {
+                yield return entry.FullName;
+            }
         }
     }
 
@@ -714,6 +972,13 @@ internal sealed class WorkerWorkspaceSession : IDisposable
         !relative.Split('/').Any(SkippedDirectories.Contains) && !relative.Split('/').Any(PrivateDirectories.Contains) &&
         !relative.Split('/').Any(PrivateFiles.Contains) &&
         !relative.Split('/').Any(part => SecretEnvironmentFile.IsMatch(part) || PrivateExtensions.Contains(Path.GetExtension(part)));
+    private static bool IsSafeRelative(string relative)
+    {
+        string normalized = relative.Replace('\\', '/');
+        return AllowedRelative(normalized) && !Path.IsPathRooted(relative) &&
+            !Regex.IsMatch(normalized, "^[A-Za-z]:") && !normalized.Contains('\0') &&
+            !normalized.Split('/').Any(part => part is "" or "." or "..");
+    }
     internal static bool IsAllowedProjectFile(string relative) => AllowedRelative(relative);
     private static string HashFile(string path)
     {

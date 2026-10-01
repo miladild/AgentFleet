@@ -22,18 +22,34 @@ public sealed class HotReloadTests : IDisposable
 
     public void Dispose() => Directory.Delete(_dir, recursive: true);
 
-    private sealed class Tags(string model) : HttpMessageHandler
+    private sealed class Tags(string model, HttpStatusCode inferenceStatus, Action inferenceCalled) : HttpMessageHandler
     {
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
-            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.Method == HttpMethod.Post)
+            {
+                inferenceCalled();
+                return Task.FromResult(new HttpResponseMessage(inferenceStatus)
+                {
+                    Content = new StringContent("{\"choices\":[{\"message\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}", Encoding.UTF8, "application/json")
+                });
+            }
+
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent($"{{\"models\":[{{\"name\":\"{model}\"}}]}}", Encoding.UTF8, "application/json")
             });
+        }
     }
 
-    private sealed class Factory(string model) : IHttpClientFactory
+    private sealed class Factory(string model, HttpStatusCode inferenceStatus = HttpStatusCode.OK) : IHttpClientFactory
     {
-        public HttpClient CreateClient(string name) => new(new Tags(model));
+        public int InferenceCalls { get; private set; }
+
+        public HttpClient CreateClient(string name) => new(new Tags(model, inferenceStatus, () => InferenceCalls++))
+        {
+            Timeout = Timeout.InfiniteTimeSpan
+        };
     }
 
     private FleetConfig WithNodes(params FleetNodeConfig[] nodes) => _store.Save(_store.Current with { Nodes = nodes });
@@ -47,10 +63,10 @@ public sealed class HotReloadTests : IDisposable
 
         options.ReplaceNodes(WithNodes(
             new FleetNodeConfig("hub", "http://127.0.0.1:11434/v1", "m", "", "heavy", Fallback: true),
-            new FleetNodeConfig("worker1", "http://10.0.0.5:11434", "m", "", "standard")));
+            new FleetNodeConfig("worker1", "http://192.0.2.10:11434", "m", "", "standard")));
 
         Assert.Equal(["hub", "worker1"], options.Nodes.Select(n => n.Name));
-        Assert.Equal("http://10.0.0.5:11434/v1", options.GetNode("worker1").OpenAiEndpoint.ToString());
+        Assert.Equal("http://192.0.2.10:11434/v1", options.GetNode("worker1").OpenAiEndpoint.ToString());
         Assert.True((await health.GetNodeAsync("worker1")).Ready);
 
         options.ReplaceNodes(WithNodes(new FleetNodeConfig("hub", "http://127.0.0.1:11434/v1", "m", "", "heavy", Fallback: true)));
@@ -76,6 +92,44 @@ public sealed class HotReloadTests : IDisposable
         NodeHealthSnapshot fresh = await health.GetNodeAsync("hub");
         Assert.Equal("new", fresh.Model);
         Assert.Equal("model_missing", fresh.Failure);
+    }
+
+    [Fact]
+    public async Task A_model_that_is_listed_but_fails_generation_is_not_ready()
+    {
+        FleetOptions options = FleetOptions.Load(_configuration, _store);
+        options.ReplaceNodes(WithNodes(new FleetNodeConfig("hub", "http://127.0.0.1:11434/v1", "m", "", "heavy", Fallback: true)));
+        var health = new FleetHealthMonitor(options, new Factory("m:latest", HttpStatusCode.InternalServerError));
+
+        NodeHealthSnapshot status = await health.GetNodeAsync("hub");
+
+        Assert.True(status.Reachable);
+        Assert.True(status.ModelAvailable);
+        Assert.False(status.Answers);
+        Assert.False(status.Ready);
+        Assert.Equal("inference_http_500", status.Failure);
+    }
+
+    [Fact]
+    public async Task Inference_probes_are_throttled_but_a_wait_can_force_one()
+    {
+        FleetOptions options = FleetOptions.Load(_configuration, _store);
+        options.ReplaceNodes(WithNodes(new FleetNodeConfig("hub", "http://127.0.0.1:11434/v1", "m", "", "heavy", Fallback: true)));
+        var factory = new Factory("m:latest");
+        var health = new FleetHealthMonitor(options, factory);
+
+        Assert.True((await health.GetNodeAsync("hub")).Ready);
+        Assert.True((await health.GetNodeAsync("hub", forceProbe: true)).Ready);
+        Assert.Equal(1, factory.InferenceCalls);
+
+        Assert.True((await health.GetNodeAsync("hub", forceProbe: true, forceInferenceProbe: true)).Ready);
+        Assert.Equal(2, factory.InferenceCalls);
+
+        health.CoolDown("hub", "request_failed", TimeSpan.FromMinutes(1));
+        Assert.False((await health.GetNodeAsync("hub", forceProbe: true)).Ready);
+        Assert.True((await health.GetNodeAsync("hub", forceProbe: true, forceInferenceProbe: true)).Ready);
+        Assert.True((await health.GetNodeAsync("hub")).Ready);
+        Assert.Equal(3, factory.InferenceCalls);
     }
 
     private sealed class Named(string text) : IChatClient
