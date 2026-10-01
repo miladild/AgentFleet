@@ -189,10 +189,14 @@ chat, the fleet notices (the same number of steps) and takes the steps from the 
 What keeps a plan going when something happens in the night:
 
 - **The backend restarts** (a crash, a Windows update, a reboot): the plan, every step's status and the whole record of
-  the conversation are on disk. The plan picks up at the step that was interrupted; finished steps are not redone. Plan
-  files are flushed to disk before they replace the old one, so a power cut cannot leave a half-written plan. Run as a
-  Windows service (`Install-Autostart.ps1 -Mode Service`), the backend is started again within seconds if it stops
-  unexpectedly, and at boot; the scheduled-task mode retries three times, a minute apart. The web UI service starts a
+  the conversation are on disk, and finished steps are not redone. What happens to the step that was running depends on
+  where it ran. A step marked restart-safe that ran on the hub carries on by itself. A step that was running in a worker
+  workspace, or that is not marked restart-safe, stops the plan for review: its files on the worker are kept untouched and
+  you approve the plan to go on (measured: a crash thirteen seconds into a worker step, before the model had changed
+  anything, still stopped the plan). Plan files are flushed to disk before they replace the old one, so a power cut
+  cannot leave a half-written plan. Run as a Windows service (`Install-Autostart.ps1 -Mode Service`), the backend is
+  started again within seconds if it stops unexpectedly, and at boot; the scheduled tasks start it again within five
+  minutes if it is not running (measured: four minutes after the process was killed). The web UI service starts a
   little after boot and is started again if it stops, because it runs from the source folder, which may be on a disk
   that comes up late (on a USB drive it failed at boot and stayed down).
 - **A machine goes down or slows down.** Each call goes to a ready machine of the step's tier; a machine that is off, or

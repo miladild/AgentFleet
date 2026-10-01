@@ -85,8 +85,9 @@ Turn it on when you would want to review the approach before anything changes.
    If a step still cannot pass, the plan stops as *Blocked* and tells you where.
 
 You can close the chat and come back: the **Plans** button lists every plan and
-how far it got, and a plan that was running when the backend restarted picks up
-where it left off. When you reopen the web app, a dismissible notice calls out
+how far it got, and a plan that was running when the backend restarted keeps its
+place: it carries on if its step was safe to replay, and otherwise waits for you
+to approve it. When you reopen the web app, a dismissible notice calls out
 plans that finished or became blocked in the last 36 hours; **Open plan** takes
 you to its run log. **Stop** halts a running plan.
 
