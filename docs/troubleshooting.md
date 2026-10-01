@@ -83,6 +83,14 @@ A release download is new to your antivirus too, and its web UI is about 11,000 
 scanner may look at each one before it runs, so the web UI can take a minute or more to answer; later starts take a few
 seconds. Add an exclusion for the folder you unpacked it to if that first start stalls.
 
+**It stopped and did not come back.** The two scheduled tasks start at your logon and then again every five minutes while
+they are not running, so a backend or web UI that was stopped, crashed, or gave up (its port still held, its disk not yet
+mounted) is started again within five minutes, as long as you are logged in. A task is switched off while
+`Deploy-Fleet.ps1` replaces it and on again afterwards. Check with `Get-ScheduledTask AgentFleetBackend, AgentFleetFrontend`:
+the state should be `Running` or `Ready`, not `Disabled`. An older install gets the repeat by running
+`.\scripts\Install-Autostart.ps1 -SkipBuild` again. After a reboot nothing starts until you log in; see
+[security.md](security.md) before changing that.
+
 If it runs fine in a terminal but not as a Windows service, the service's account is different from yours: it has a different
 user profile, different environment variables and a different `PATH`. The scheduled-task install runs as you and avoids
 this.

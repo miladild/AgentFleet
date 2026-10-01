@@ -234,12 +234,19 @@ $frontendLog = Join-Path $InstallRoot 'frontend.log'
 if (-not $DryRun -and -not (Test-Path $InstallRoot)) { $null = New-Item -ItemType Directory -Path $InstallRoot }
 
 if ($Mode -eq 'Task') {
-    Write-Step 'Registering scheduled tasks (start at your logon, run as you)'
+    Write-Step 'Registering scheduled tasks (start at your logon and every five minutes if stopped, run as you)'
     $me = "$env:USERDOMAIN\$env:USERNAME"
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
         -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
     $principal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive -RunLevel Limited
-    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $me
+    # Two ways to start: at logon, and every five minutes after that. The second is what keeps Fleet up. Task Scheduler
+    # restarts a task only when it fails while running, and only a few times, so a task that was stopped from outside, or
+    # that gave up after its restarts (the web UI's port still held, its disk not mounted yet), stayed down for days. A
+    # task that is already running ignores the repeat (MultipleInstances IgnoreNew). The first repeat is five minutes
+    # away so it does not race the start at the end of this script.
+    $logon = New-ScheduledTaskTrigger -AtLogOn -User $me
+    $repeat = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
+    $trigger = @($logon, $repeat)
 
     # The backend checks plan diagrams in the web UI, so it needs the web UI's address when the port is not 3000.
     $backendCommand = "Set-Location -LiteralPath '$backendTarget'; `$env:FLEET_FRONTEND_URL='http://localhost:$FrontendPort'; & '$exe' --urls $urls"

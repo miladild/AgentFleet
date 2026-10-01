@@ -51,13 +51,24 @@ function Stop-One([string]$Name) {
         $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
         if ($svc -and $svc.Status -ne 'Stopped') { Stop-Service -Name $Name -Force; $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30)) }
     } elseif (Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue) {
+        # Disabled while stopped: the task also starts itself every few minutes, which would put the old program back in
+        # the way of the publish. Start-One enables it again.
+        Disable-ScheduledTask -TaskName $Name | Out-Null
         Stop-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
+    }
+}
+
+# Whatever happens below, the tasks end up enabled, so a failed deploy does not leave the fleet switched off.
+function Enable-FleetTasks {
+    if ($mode -ne 'task') { return }
+    foreach ($name in $BackendName, $FrontendName) {
+        if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) { Enable-ScheduledTask -TaskName $name | Out-Null }
     }
 }
 
 function Start-One([string]$Name) {
     if (-not (($mode -eq 'service' -and (Get-Service -Name $Name -ErrorAction SilentlyContinue)) -or ($mode -eq 'task' -and (Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue)))) { return }
-    if ($mode -ne 'service') { Start-ScheduledTask -TaskName $Name; return }
+    if ($mode -ne 'service') { Enable-ScheduledTask -TaskName $Name | Out-Null; Start-ScheduledTask -TaskName $Name; return }
     # An antivirus can refuse the first start of a freshly published program ("Access is denied"); the second start works.
     try { Start-Service -Name $Name }
     catch {
@@ -78,42 +89,45 @@ if (-not $SkipFrontend) {
     finally { Pop-Location }
 }
 
-Write-Step "Stopping $BackendName"
-Stop-One $BackendName
-# A task stops its shell but can leave the backend process itself; make sure the files are free.
-Get-Process -Name AgentFleet -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe } | Stop-Process -Force -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 1
-
-Write-Step "Publishing the backend to $backendTarget"
-Push-Location $backendSource
 try {
-    dotnet publish -c Release -o $backendTarget -nologo -v q
-    if ($LASTEXITCODE) { throw 'dotnet publish failed' }
-}
-finally { Pop-Location }
+    Write-Step "Stopping $BackendName"
+    Stop-One $BackendName
+    # A task stops its shell but can leave the backend process itself; make sure the files are free.
+    Get-Process -Name AgentFleet -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe } | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
 
-if ($mode -eq 'service') {
-    # Installs made before this setting existed get it here: a backend that stops unexpectedly is started again, so a
-    # plan running overnight carries on (it resumes from disk).
-    sc.exe failure $BackendName reset= 86400 actions= restart/5000/restart/30000/restart/60000 | Out-Null
-    if (-not $SkipFrontend -and (Get-Service -Name $FrontendName -ErrorAction SilentlyContinue)) {
-        # The web UI runs from the source folder, which can be on a disk that comes up after the services start (a USB
-        # drive): after a reboot it failed with "The system cannot open the file" and stayed down. It starts a little
-        # later now, and is started again if it stops.
-        sc.exe failure $FrontendName reset= 86400 actions= restart/5000/restart/30000/restart/60000 | Out-Null
-        sc.exe config $FrontendName start= delayed-auto | Out-Null
+    Write-Step "Publishing the backend to $backendTarget"
+    Push-Location $backendSource
+    try {
+        dotnet publish -c Release -o $backendTarget -nologo -v q
+        if ($LASTEXITCODE) { throw 'dotnet publish failed' }
+    }
+    finally { Pop-Location }
+
+    if ($mode -eq 'service') {
+        # Installs made before this setting existed get it here: a backend that stops unexpectedly is started again, so a
+        # plan running overnight carries on (it resumes from disk).
+        sc.exe failure $BackendName reset= 86400 actions= restart/5000/restart/30000/restart/60000 | Out-Null
+        if (-not $SkipFrontend -and (Get-Service -Name $FrontendName -ErrorAction SilentlyContinue)) {
+            # The web UI runs from the source folder, which can be on a disk that comes up after the services start (a USB
+            # drive): after a reboot it failed with "The system cannot open the file" and stayed down. It starts a little
+            # later now, and is started again if it stops.
+            sc.exe failure $FrontendName reset= 86400 actions= restart/5000/restart/30000/restart/60000 | Out-Null
+            sc.exe config $FrontendName start= delayed-auto | Out-Null
+        }
+    }
+
+    Write-Step "Starting $BackendName"
+    Start-One $BackendName
+
+    if (-not $SkipFrontend) {
+        Write-Step "Restarting $FrontendName"
+        Stop-One $FrontendName
+        Start-Sleep -Seconds 1
+        Start-One $FrontendName
     }
 }
-
-Write-Step "Starting $BackendName"
-Start-One $BackendName
-
-if (-not $SkipFrontend) {
-    Write-Step "Restarting $FrontendName"
-    Stop-One $FrontendName
-    Start-Sleep -Seconds 1
-    Start-One $FrontendName
-}
+finally { Enable-FleetTasks }
 
 Write-Step 'Waiting for the backend to answer /health'
 $healthUrl = "http://localhost:$BackendPort/health"
