@@ -64,7 +64,7 @@
         "icon": "$(server-process)",
         "tags": ["agent-fleet"],
         "userDescription": "Hand a finished plan to your local Agent Fleet. It runs in the background across your machines, each step checked with a real command before the next.",
-        "modelDescription": "Hands a finished implementation plan to the user's local Agent Fleet, which carries it out unattended in the background (for example overnight) on the user's own machines. Each step goes to a machine of the step's tier; the fleet then runs the step's verify command itself, and a step only counts as done when that command exits 0. A failed step is retried with the error, then given to the strongest machine; a step that still fails stops the plan. Use this when the user asks to hand the plan to the fleet, run it on their machines, or run it overnight. The user confirms before it starts. Write every step so a smaller model can do it alone, without this conversation: name the files, the functions, the behaviour and the edge cases, and put a piece of code and its test in the same step. Give every step a verify command, a real shell command run in workingDirectory (for example npm test, dotnet build, node --test test/slug.test.js, python -m pytest), never a sentence, a server or a watcher, and never relying on a file that a later step creates. If the fleet refuses the plan it says why: fix that and call this tool again with the whole plan.",
+        "modelDescription": "Hands a finished implementation plan to the user's local Agent Fleet, which carries it out unattended in the background (for example overnight) on the user's own machines. Each step is routed at its requested tier; the fleet runs its verify command itself, and a step only counts as done when that command exits 0. Retries keep the requested tier and include the check output. A connection failure may fall back to the hub. In Live, the user can choose another configured text machine for a waiting or failed step before its next attempt, without changing the step's tier. A step that still fails stops the plan. Use this when the user asks to hand the plan to the fleet, run it on their machines, or run it overnight. The user confirms before it starts. Write every step so a smaller model can do it alone, without this conversation: name the files, the functions, the behaviour and the edge cases, and put a piece of code and its test in the same step. Give every step a verify command, a real shell command run in workingDirectory (for example npm test, dotnet build, node --test test/slug.test.js, python -m pytest), never a sentence, a server or a watcher, and never relying on a file that a later step creates. If the fleet refuses the plan it says why: fix that and call this tool again with the whole plan.",
         "inputSchema": {
           "type": "object",
           "required": ["title", "steps"],
@@ -149,7 +149,7 @@
         "agentFleet.backendUrl": {
           "type": "string",
           "default": "http://localhost:8000",
-          "description": "Address of the Agent Fleet backend. The default is right when VS Code runs on the same machine as the backend; use the hub's address (for example http://192.168.1.10:8000) from another machine on your network."
+          "description": "Address of the Agent Fleet backend. The default is right when VS Code runs on the same machine as the backend; use the hub's address (for example http://192.0.2.10:8000) from another machine on your network."
         },
         "agentFleet.webUrl": {
           "type": "string",

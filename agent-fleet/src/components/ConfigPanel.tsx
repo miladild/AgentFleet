@@ -22,6 +22,18 @@ type FleetConfigNode = {
   api?: string | null;
   caveman?: string | null;
   ponytail?: string | null;
+  workspace?: WorkerWorkspaceConfig | null;
+  clearWorkspace?: boolean;
+};
+
+type WorkerWorkspaceConfig = {
+  host: string;
+  user: string;
+  keyPath: string;
+  hostKey: string;
+  root: string;
+  platform: "linux" | "windows" | "";
+  port: number;
 };
 
 type FleetConfigData = {
@@ -66,7 +78,7 @@ function formatSize(bytes: number): string {
   return gb >= 0.1 ? `${gb.toFixed(1)} GB` : `${Math.round(bytes / 1024 / 1024)} MB`;
 }
 
-/** "192.168.1.21", "pc2:11434" or "http://pc2:11434" all become "http://host:11434/v1". */
+/** Accept an address, host:port or URL and normalize it to the model API base URL. */
 export function normalizeNodeAddress(raw: string): string {
   let value = raw.trim();
   if (!value) return "";
@@ -238,7 +250,7 @@ function AddMachine({ nodes, onAdd, saving }: { nodes: FleetConfigNode[]; onAdd:
             setError(null);
           }}
           onKeyDown={(e) => e.key === "Enter" && connect()}
-          placeholder="192.168.1.21"
+          placeholder="worker.example.test"
           className="flex-1 text-xs px-2 py-1.5 rounded bg-neutral-950 border border-neutral-700 text-neutral-200 font-mono"
         />
         <button
@@ -512,11 +524,65 @@ function MachineCard({
             </div>
             <p className="col-span-2 text-[10px] text-neutral-600">Caveman controls reply brevity; Ponytail controls coding minimalism. Lite is light, Full is stronger, and Ultra is strongest. The selected style follows a request through fallback, so match levels across machines for consistent handoffs.</p>
           </div>
+          <div className="border-t border-neutral-700 pt-2 space-y-2">
+            <label className="flex items-center gap-2 text-xs text-neutral-300">
+              <input
+                type="checkbox"
+                checked={!!node.workspace}
+                disabled={node.name === "hub" || node.vision}
+                onChange={(event) => onChange(event.target.checked
+                  ? { ...node, workspace: { host: "", user: "", keyPath: "", hostKey: "", root: "", platform: "", port: 22 }, clearWorkspace: false }
+                  : { ...node, workspace: null, clearWorkspace: true })}
+              />
+              Enable worker-side plan workspace
+            </label>
+            {(node.name === "hub" || node.vision) && <p className="text-[10px] text-neutral-600">Plan workspaces are only available on text workers, never on the hub or vision machine.</p>}
+            {node.workspace && <>
+              <p className="text-[10px] text-amber-300">Use a dedicated non-admin account limited to its workspace. SSH host fingerprint is required and must be verified out of band. Plan files are staged here (excluding credentials/build caches) and synced to the hub after each attempt.</p>
+              <details className="text-[10px] text-neutral-400">
+                <summary className="cursor-pointer text-sky-400">Set up the worker account and SSH key</summary>
+                <div className="mt-1 space-y-1.5">
+                  <p>On the hub, make a dedicated key with no passphrase so Fleet can use it while you are signed in. Keep the private file here and give only the matching .pub contents to the worker setup script:</p>
+                  <CopyCommand command={'ssh-keygen -t ed25519 -N "" -f "$env:USERPROFILE\\.ssh\\agentfleet-worker"'} />
+                  <CopyCommand command={'Get-Content "$env:USERPROFILE\\.ssh\\agentfleet-worker.pub" -Raw'} />
+                  <p>Run <code>Setup-WorkerWorkspace.ps1 -PublicKey &apos;&lt;public key&gt;&apos;</code> in elevated PowerShell on a Windows worker, or <code>sudo bash scripts/setup-worker-workspace.sh agentfleet &apos;&lt;public key&gt;&apos; /home/agentfleet/workspaces</code> on Linux.</p>
+                  <p>Get the SSH host fingerprint directly on the worker, then copy its SHA256 value into the pinned host key field:</p>
+                  <p>Windows worker:</p>
+                  <CopyCommand command="ssh-keygen -lf C:\\ProgramData\\ssh\\ssh_host_ed25519_key.pub" />
+                  <p>Linux worker:</p>
+                  <CopyCommand command="sudo ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub" />
+                </div>
+              </details>
+              <div className="grid grid-cols-2 gap-2">
+                <WorkspaceField label="SSH host" value={node.workspace.host} onChange={(host) => onChange({ ...node, workspace: { ...node.workspace!, host } })} placeholder="LAN hostname or address" />
+                <WorkspaceField label="SSH user (dedicated low-privilege account)" value={node.workspace.user} onChange={(user) => onChange({ ...node, workspace: { ...node.workspace!, user } })} placeholder="agentfleet" />
+                <WorkspaceField label="SSH private key path (on hub)" value={node.workspace.keyPath} onChange={(keyPath) => onChange({ ...node, workspace: { ...node.workspace!, keyPath } })} placeholder="C:\\Users\\...\\worker_ed25519" />
+                <WorkspaceField label="Pinned SSH host key (SHA256:...)" value={node.workspace.hostKey} onChange={(hostKey) => onChange({ ...node, workspace: { ...node.workspace!, hostKey } })} placeholder="SHA256:..." />
+                <WorkspaceField label="Workspace root (on worker)" value={node.workspace.root} onChange={(root) => onChange({ ...node, workspace: { ...node.workspace!, root } })} placeholder={node.workspace.platform === "windows" ? "/C:/fleet-test/workspaces" : node.workspace.platform === "linux" ? "/home/agentfleet/workspaces" : "/C:/fleet-test/workspaces or /home/agentfleet/workspaces"} />
+                <div className="flex gap-2">
+                  <label className="flex-1 block text-[10px] uppercase text-neutral-500">Platform
+                    <select value={node.workspace.platform} onChange={(event) => onChange({ ...node, workspace: { ...node.workspace!, platform: event.target.value as "linux" | "windows" | "" } })} className="mt-0.5 block w-full text-xs px-2 py-1 rounded bg-neutral-900 border border-neutral-700 text-neutral-200">
+                      <option value="" disabled>Select…</option><option value="linux">Linux</option><option value="windows">Windows</option>
+                    </select>
+                  </label>
+                  <label className="w-24 block text-[10px] uppercase text-neutral-500">SSH port
+                    <input type="number" min={1} max={65535} value={node.workspace.port} onChange={(event) => onChange({ ...node, workspace: { ...node.workspace!, port: Number(event.target.value) || 22 } })} className="mt-0.5 block w-full text-xs px-2 py-1 rounded bg-neutral-900 border border-neutral-700 text-neutral-200" />
+                  </label>
+                </div>
+              </div>
+            </>}
+          </div>
           <p className="text-[10px] text-neutral-600">Machine {index + 1}</p>
         </div>
       )}
     </div>
   );
+}
+
+function WorkspaceField({ label, value, onChange, placeholder }: { label: string; value: string; onChange: (value: string) => void; placeholder: string }) {
+  return <label className="block text-[10px] uppercase text-neutral-500">{label}
+    <input value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} className="mt-0.5 block w-full text-xs px-2 py-1 rounded bg-neutral-900 border border-neutral-700 text-neutral-200 font-mono" />
+  </label>;
 }
 
 type Tab = "setup" | "machines" | "tools" | "sandbox" | "routing" | "history";
@@ -769,7 +835,7 @@ export function ConfigPanel() {
                     )}
                   </div>
                   <p className="text-xs text-neutral-500">
-                    <strong className="text-neutral-400">Hub mode</strong> (top right) decides how freely the heavy machine is used,
+                    <strong className="text-neutral-400">Hub mode</strong> (top right) routes unpinned plan steps to the hub when set to Aggressive,
                     and <strong className="text-neutral-400">Plan mode</strong> makes the fleet plan before it changes anything.
                   </p>
                 </div>

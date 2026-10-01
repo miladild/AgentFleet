@@ -11,7 +11,9 @@ export type PlanStep = {
   files: string[];
   verify: string | null;
   tier: string;
+  machine?: string | null;
   parallelGroup?: string | null;
+  retrySafe?: boolean;
   status: string;
   note: string | null;
   attempts: number;
@@ -24,6 +26,8 @@ export type PlanRunEvent = {
   kind: string;
   tier: string | null;
   node: string | null;
+  modelNode?: string | null;
+  workspaceNode?: string | null;
   detail: string;
 };
 
@@ -43,6 +47,8 @@ export type Plan = {
   events?: PlanRunEvent[] | null;
   exportedPlanPath?: string | null;
   contextId?: string | null;
+  recoveryScope?: string | null;
+  runDeadlineUtc?: string | null;
 };
 
 const STATUS_LABEL: Record<string, { text: string; className: string }> = {
@@ -125,9 +131,17 @@ const EVENT_STYLE: Record<string, string> = {
   "step-done": "text-emerald-400",
   "plan-done": "text-emerald-400",
   "check-failed": "text-red-400",
+  "final-validation-failed": "text-red-400",
   "model-failed": "text-red-400",
+  "workspace-failed": "text-red-400",
   "attempt-timed-out": "text-red-400",
   "plan-blocked": "text-red-400",
+  "run-deadline-exceeded": "text-red-400",
+  "recovery-routed": "text-amber-300",
+  "final-validation-started": "text-sky-300",
+  "final-validation-passed": "text-emerald-400",
+  "run-lease-busy": "text-amber-300",
+  "retry-approved": "text-sky-300",
   stopped: "text-amber-400",
 };
 
@@ -141,7 +155,7 @@ function RunLog({ planId, events }: { planId: string; events: PlanRunEvent[] }) 
       <div className="mt-1 max-h-72 overflow-y-auto rounded border border-neutral-800 bg-neutral-900/60 p-2 space-y-1">
         {events.map((e, i) => {
           const where = e.stepId == null ? "" : `step ${e.stepId}${e.attempt == null ? "" : `.${e.attempt}`}`;
-          const via = [e.tier, e.node].filter(Boolean).join(" / ");
+          const via = [e.tier, e.modelNode ?? e.node, e.workspaceNode ? `workspace ${e.workspaceNode}` : null].filter(Boolean).join(" / ");
           return (
             <div key={i} className="text-[11px] leading-snug">
               <span className="text-neutral-600">{new Date(e.atUtc).toLocaleTimeString()}</span>{" "}
@@ -177,13 +191,20 @@ export function PlanCard({ planId }: { planId: string }) {
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [exportToProject, setExportToProject] = useState(false);
+  const [recoveryChoice, setRecoveryChoice] = useState<string | null>(null);
 
   async function approve() {
     setBusy(true);
     setActionError(null);
     try {
-      const query = exportToProject ? "?exportToProject=true" : "";
-      const res = await fetch(`/api/plans/${planId}/approve${query}`, { method: "POST" });
+      const res = await fetch(`/api/plans/${planId}/approve`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          exportToProject,
+          recoveryScope: recoveryChoice ?? plan?.recoveryScope ?? "worker-only",
+        }),
+      });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         setActionError(data.error ?? "Could not approve the plan.");
@@ -270,6 +291,9 @@ export function PlanCard({ planId }: { planId: string }) {
 
       <div className="px-3 py-2 space-y-3">
         {plan.goal && <p className="text-xs text-neutral-300">{plan.goal}</p>}
+        {plan.runDeadlineUtc && (
+          <p className="text-[11px] text-neutral-500">Run deadline: {new Date(plan.runDeadlineUtc).toLocaleString()}</p>
+        )}
         <Section title="Open questions" items={plan.openQuestions} />
         <Section title="Assumptions" items={plan.assumptions} />
         <Section title="Risks" items={plan.risks} />
@@ -293,6 +317,12 @@ export function PlanCard({ planId }: { planId: string }) {
                     <div className="text-xs text-neutral-200">
                       {step.id}. {step.title}{" "}
                       <span className="text-[10px] text-neutral-500">({step.tier})</span>
+                      <span
+                        className={`ml-1 text-[10px] ${step.retrySafe ? "text-emerald-400" : "text-amber-400"}`}
+                        title={step.retrySafe ? "This local step may resume automatically after a backend restart." : "If the backend restarts during this step, it will stop for review before retrying."}
+                      >
+                        {step.retrySafe ? "restart-safe" : "restart review"}
+                      </span>
                       {step.parallelGroup && (
                         <span className="ml-1 text-[10px] text-violet-300">parallel: {step.parallelGroup}</span>
                       )}
@@ -302,7 +332,9 @@ export function PlanCard({ planId }: { planId: string }) {
                       <div className="text-[11px] font-mono text-neutral-500 break-all">{step.files.join(", ")}</div>
                     )}
                     {step.verify && (
-                      <div className="text-[11px] font-mono text-neutral-500">verify: {step.verify}</div>
+                      <div className="text-[11px] font-mono text-neutral-500">
+                        {step.id === plan.steps[plan.steps.length - 1]?.id ? "runner final validation: " : "verify: "}{step.verify}
+                      </div>
                     )}
                     {step.note && (
                       <div className={`text-[11px] ${step.status === "failed" ? "text-red-400" : "text-neutral-400"}`}>
@@ -332,6 +364,21 @@ export function PlanCard({ planId }: { planId: string }) {
 
       {(canApprove || canStop) && (
         <div className="px-3 py-2 border-t border-neutral-800 flex flex-wrap items-center gap-2">
+          {canApprove && (
+            <label className="flex items-center gap-1.5 text-[11px] text-neutral-400">
+              <span>Recovery</span>
+              <select
+                aria-label="Plan recovery scope"
+                value={recoveryChoice ?? plan.recoveryScope ?? "worker-only"}
+                onChange={(event) => setRecoveryChoice(event.target.value)}
+                disabled={busy}
+                className="rounded border border-neutral-700 bg-neutral-900 px-1.5 py-1 text-[11px] text-neutral-200"
+              >
+                <option value="worker-only">Worker only</option>
+                <option value="allow-hub-rescue">Allow hub model rescue after worker failure</option>
+              </select>
+            </label>
+          )}
           {canApprove && (
             <button
               type="button"

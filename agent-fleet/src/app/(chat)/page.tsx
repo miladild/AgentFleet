@@ -249,7 +249,7 @@ function FleetModeToggle() {
       type="button"
       onClick={toggle}
       disabled={mode === null || pending}
-      title="Switch how much of the workload the hub's GPU takes on"
+      title="Aggressive mode routes ordinary chat and unpinned plan steps to the hub"
       className={`absolute top-4 right-4 rounded-full px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50 ${
         isAggressive
           ? "bg-amber-500/20 text-amber-300 border border-amber-500/40"

@@ -78,8 +78,11 @@ const contextFixture = {
   pinned: [],
 };
 
+const reroutePlanId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
 test.beforeEach(async ({ page }) => {
   let config = JSON.parse(JSON.stringify(baseConfig)) as typeof baseConfig;
+  let machineChoice: string | null = null;
 
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -107,6 +110,86 @@ test.beforeEach(async ({ page }) => {
     }
     if (pathname === "/api/fleet-mode") return json({ mode: "conservative" });
     if (pathname === "/api/plan-mode") return json({ enabled: false });
+    if (pathname === "/api/live/demo") {
+      const after = Number(new URL(request.url()).searchParams.get("after") ?? "0");
+      const failed = after > 0;
+      return json({
+        plan: {
+          id: "demo",
+          title: "Collapsible live panels",
+          goal: "Keep new failures visible while panels are collapsed.",
+          status: "running",
+          workingDirectory: "C:/workspace/demo",
+          assumptions: [],
+          openQuestions: [],
+          risks: [],
+          diagram: null,
+          diagramNote: null,
+          updatedUtc: "2026-09-27T00:00:00.000Z",
+          events: failed
+            ? [{ atUtc: "2026-09-27T00:00:02.000Z", stepId: 1, attempt: 1, kind: "check-failed", tier: "standard", node: "hub", detail: "Expected true; received false" }]
+            : [],
+          steps: [
+            { id: 1, title: "Simulate a new failure", detail: "Wait for the event feed to update.", files: [], verify: "npm test", tier: "standard", status: failed ? "failed" : "running", note: null, attempts: 1 },
+          ],
+        },
+        events: after === 0
+          ? [{ id: 1, at: "2026-09-27T00:00:01.000Z", step: 1, kind: "route", node: "hub", text: "model call on hub" }]
+          : after === 1
+            ? [{ id: 2, at: "2026-09-27T00:00:02.000Z", step: 1, kind: "verification", node: "hub", text: "check failed", ok: false }]
+            : [],
+        nodes: [{ name: "hub", model: "hub/qwen3-coder:30b", ready: true }],
+      });
+    }
+    if (pathname === `/api/live/${reroutePlanId}`) {
+      const steps = [{
+        id: 1,
+        title: "Retry on a selected machine",
+        detail: "Keep the requested task tier across all attempts.",
+        files: ["src/example.ts"],
+        verify: "npm test",
+        tier: "light",
+        machine: machineChoice,
+        parallelGroup: null,
+        status: "failed",
+        note: "The check failed.",
+        attempts: 3,
+      }];
+      return json({
+        plan: {
+          id: reroutePlanId,
+          title: "Choose a machine for retry",
+          goal: "Reroute a failed step without changing its requested tier.",
+          status: "blocked",
+          workingDirectory: "C:/workspace/demo",
+          assumptions: [],
+          openQuestions: [],
+          risks: [],
+          diagram: null,
+          diagramNote: null,
+          updatedUtc: "2026-09-27T00:00:00.000Z",
+          events: [
+            { atUtc: "2026-09-27T00:00:00.000Z", stepId: 1, attempt: 1, kind: "attempt-started", tier: "light", node: "worker-b", detail: "" },
+            { atUtc: "2026-09-27T00:00:01.000Z", stepId: 1, attempt: 2, kind: "attempt-started", tier: "heavy", node: "hub", detail: "" },
+            { atUtc: "2026-09-27T00:00:02.000Z", stepId: 1, attempt: 3, kind: "attempt-started", tier: "heavy", node: "hub", detail: "" },
+            { atUtc: "2026-09-27T00:00:03.000Z", stepId: 1, attempt: 3, kind: "plan-blocked", tier: null, node: null, detail: "The check failed." },
+          ],
+          steps,
+        },
+        events: [],
+        nodes: [
+          { name: "hub", model: "qwen3-coder:30b", ready: true, vision: false },
+          // As /api/fleet-status sends them: only a worker with a workspace at the step's tier can be chosen for a retry.
+          { name: "worker-a", model: "ornith:9b", tier: "light", ready: true, vision: false, workspace: true },
+          { name: "worker-b", model: "ornith:9b", tier: "light", ready: true, vision: false, workspace: true },
+          { name: "vision", model: "qwen2.5vl:7b", ready: true, vision: true },
+        ],
+      });
+    }
+    if (pathname === `/api/plans/${reroutePlanId}/machine` && request.method() === "POST") {
+      machineChoice = request.postDataJSON().machine ?? null;
+      return json({ machine: machineChoice });
+    }
     if (pathname === "/api/setup") {
       return json({
         ready: true,
@@ -144,6 +227,83 @@ test("loads the main fleet UI and machine status", async ({ page }) => {
 
   await expect(page.getByText("Coding agents routed across hub.", { exact: true })).toBeVisible();
   await expect(page.getByText("Recent activity", { exact: true })).toBeVisible();
+});
+
+test("keeps new errors visible while the Live view panels are collapsed", async ({ page }) => {
+  await page.goto("/live/demo");
+
+  const pipeline = page.locator(".live-tile.focus");
+  const rail = page.locator(".live-rail");
+  const railSummary = rail.locator(":scope > summary");
+  const journal = page.locator(".live-logtile");
+  const journalSummary = journal.locator(":scope > summary");
+
+  await expect(pipeline).toBeVisible();
+  await expect(railSummary).toContainText("1 busy");
+  const pipelineWidth = (await pipeline.boundingBox())?.width ?? 0;
+  await railSummary.click();
+  await expect(rail).toHaveJSProperty("open", false);
+  await expect.poll(async () => (await pipeline.boundingBox())?.width ?? 0).toBeGreaterThan(pipelineWidth);
+
+  await expect(journalSummary).toContainText("0 alerts");
+  await journalSummary.click();
+  await expect(journal).toHaveJSProperty("open", false);
+
+  // The next feed update adds a failed check while both panels are closed.
+  await expect(railSummary).toContainText("1 failed", { timeout: 5000 });
+  await expect(journalSummary).toContainText("2 alerts", { timeout: 5000 });
+  await expect(pipeline).toBeVisible();
+
+  await journalSummary.click();
+  await expect(rail).toHaveJSProperty("open", false);
+  await expect(journal.getByText("check failed", { exact: true })).toBeVisible();
+  await railSummary.click();
+  await expect(journal).toHaveJSProperty("open", true);
+});
+
+test("keeps open Live panels inside their bounds at zoomed desktop width", async ({ page }) => {
+  await page.setViewportSize({ width: 1000, height: 791 });
+  await page.goto(`/live/${reroutePlanId}`);
+
+  const rail = page.locator(".live-rail");
+  const side = page.locator(".live-side");
+  const inspector = page.locator(".live-inspector");
+  const journal = page.locator(".live-logtile");
+  const logBody = page.locator(".live-log-body");
+  const log = page.locator(".live-log");
+  const [railBox, sideBox, inspectorBox, journalBox, logBodyBox, logBox] = await Promise.all([
+    rail.boundingBox(),
+    side.boundingBox(),
+    inspector.boundingBox(),
+    journal.boundingBox(),
+    logBody.boundingBox(),
+    log.boundingBox(),
+  ]);
+
+  expect(railBox && sideBox && inspectorBox && journalBox && logBodyBox && logBox).toBeTruthy();
+  expect(sideBox!.y + sideBox!.height).toBeLessThanOrEqual(railBox!.y + railBox!.height + 1);
+  expect(inspectorBox!.y + inspectorBox!.height).toBeLessThanOrEqual(journalBox!.y + 1);
+  expect(logBodyBox!.height).toBeGreaterThan(120);
+  expect(logBox!.height).toBeGreaterThan(100);
+});
+
+test("reroutes a failed step without changing its requested tier", async ({ page }) => {
+  await page.goto(`/live/${reroutePlanId}`);
+  await page.getByRole("button", { name: /#1 Retry on a selected machine/ }).click();
+
+  const machine = page.getByRole("combobox", { name: "Machine for step #1" });
+  await expect(machine).toHaveValue("");
+  expect((await machine.locator("option").allTextContents()).join("\n")).not.toContain("qwen2.5vl");
+  await expect(page.locator(".live-node.failed .tier")).toHaveText("light");
+  await expect(page.locator(".live-inspector .tier")).toHaveText("light");
+  await expect(page.locator(".live-inspector .tier")).not.toHaveClass(/raised/);
+
+  const routeRequest = page.waitForRequest((request) => request.url().endsWith(`/api/plans/${reroutePlanId}/machine`) && request.method() === "POST");
+  await machine.selectOption("worker-a");
+  const request = await routeRequest;
+  expect(request.postDataJSON()).toEqual({ stepId: 1, machine: "worker-a" });
+  await expect(machine).toHaveValue("worker-a");
+  await expect(page.locator(".live-inspector")).toContainText("task stays light");
 });
 
 test("shows an error and its successful cross-agent handoff in Context", async ({ page }) => {

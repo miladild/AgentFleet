@@ -18,7 +18,7 @@ The address is a setting, **`agentFleet.backendUrl`**:
 - VS Code on the same machine as the backend: leave the default,
   `http://localhost:8000`.
 - VS Code on another machine on your network: set it to the hub's address, for
-  example `http://192.168.1.10:8000`. Give the hub a fixed address (a DHCP
+  example `http://192.0.2.10:8000`. Give the hub a fixed address (a DHCP
   reservation on your router) so this does not stop working when the lease
   changes.
 
@@ -100,6 +100,12 @@ steps as a pipeline, the machine on each, and a log of what they do, updated
 every two seconds. A blocked plan says why and offers to retry or skip the step.
 The web UI is looked for on the backend's machine at port 3000;
 `agentFleet.webUrl` sets another address.
+
+The live view identifies the machine and tier assigned to a step; it does not
+currently put that machine's exact Ollama model alias on each agent card. A plan
+report lists the files Git detected as changed, when the project is a Git
+repository. It is a file list, not an inline patch viewer. For a normal `@fleet`
+coding turn, inspect the workspace's Source Control changes to review the edits.
 
 ## A plan made with Copilot
 
