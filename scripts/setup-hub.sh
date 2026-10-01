@@ -98,6 +98,19 @@ else
   fi
 fi
 
+if ! command -v python3 >/dev/null 2>&1; then
+  missing+=("Python 3.13 or newer with the python3 command (install with this system's package manager)")
+else
+  python_version="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || printf 0.0)"
+  python_major="${python_version%%.*}"
+  python_minor="${python_version#*.}"
+  if [[ "$python_major" =~ ^[0-9]+$ && "$python_minor" =~ ^[0-9]+$ ]] && { [ "$python_major" -gt 3 ] || { [ "$python_major" -eq 3 ] && [ "$python_minor" -ge 13 ]; }; }; then
+    ok "Python $python_version (python3)"
+  else
+    missing+=("Python 3.13 or newer with the python3 command (install with this system's package manager)")
+  fi
+fi
+
 if command -v ollama >/dev/null 2>&1; then
   ok 'Ollama CLI'
 else

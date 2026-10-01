@@ -4,12 +4,13 @@
 
 .DESCRIPTION
     The hub is the machine that runs the backend and the web UI and usually the strongest model. This script:
-      1. checks for (and offers to install with winget) the .NET 9 SDK, Node.js 20+ and Ollama,
+      1. checks for machine-wide .NET 9+, Node.js 20+, Python 3.13+ and Ollama,
       2. installs the web UI's packages and builds the backend,
       3. creates .env.local and fleet.config.json with this machine as the only node,
       4. downloads a coding model that suits this machine,
       5. optionally installs the @fleet VS Code extension.
     Run it as a normal user; nothing here needs administrator rights. It is safe to run again.
+    If a runtime is missing, run Install-FleetToolchains.ps1 separately from an elevated PowerShell, then rerun this script normally.
 
     Afterwards: start everything with `npm run dev` in the agent-fleet folder, open http://localhost:3000,
     and add more machines with Add-FleetNode.ps1 whenever you like.
@@ -21,7 +22,7 @@
     Do not download a model now.
 
 .PARAMETER SkipPrerequisites
-    Do not check for or install .NET, Node.js and Ollama.
+    Skip the runtime and Ollama checks.
 
 .PARAMETER DryRun
     Say what would be done and change nothing.
@@ -40,6 +41,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if (-not $DryRun -and ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw 'Run Setup-Hub.ps1 from a normal, non-elevated PowerShell. Only Install-FleetToolchains.ps1 needs elevation; it installs fixed packages and does not run project code.'
+}
 . "$PSScriptRoot\FleetCommon.ps1"
 $web = Join-Path $script:RepoRoot 'agent-fleet'
 $backend = Join-Path $web 'agent'
@@ -67,19 +71,18 @@ function Install-WithWinget([string]$Id, [string]$Label) {
 # --- 1. prerequisites ---------------------------------------------------------------------------
 Write-Step 'Prerequisites'
 if (-not $SkipPrerequisites) {
-    $dotnetOk = $false
-    if (Test-Command dotnet) { $dotnetOk = (@(dotnet --list-sdks 2>$null) | ForEach-Object { [int](($_ -split '\.')[0]) } | Where-Object { $_ -ge 9 }).Count -gt 0 }
-    if ($dotnetOk) { Write-Ok '.NET SDK 9 or newer' } else { Install-WithWinget 'Microsoft.DotNet.SDK.9' '.NET 9 SDK' }
-
-    $nodeOk = $false
-    if (Test-Command node) { $nodeOk = [int]((node --version) -replace '^v(\d+)\..*', '$1') -ge 20 }
-    if ($nodeOk) { Write-Ok "Node.js $(node --version)" } else { Install-WithWinget 'OpenJS.NodeJS.LTS' 'Node.js (LTS)' }
+    $toolchains = & (Join-Path $PSScriptRoot 'Install-FleetToolchains.ps1') -AuditOnly
+    $missingToolchains = @('DotNet', 'Node', 'Python') | Where-Object { -not $toolchains.$_ }
+    if ($missingToolchains.Count -gt 0) {
+        throw "Machine-wide runtime(s) missing: $($missingToolchains -join ', '). In a separate elevated PowerShell run .\scripts\Install-FleetToolchains.ps1, then open a normal PowerShell and rerun Setup-Hub.ps1. Do not run Setup-Hub.ps1 elevated."
+    }
+    Update-Path
 
     if (Test-Command ollama) { Write-Ok 'Ollama' } else { Install-WithWinget 'Ollama.Ollama' 'Ollama' }
 
     if (-not $DryRun) {
-        foreach ($tool in 'dotnet', 'node', 'npm') {
-            if (-not (Test-Command $tool)) { throw "$tool was installed but is not on PATH in this window yet. Open a new PowerShell window and run this script again." }
+        foreach ($tool in 'dotnet', 'node', 'npm', 'python') {
+            if (-not (Test-Command $tool)) { throw "$tool is not available in this user's shell. Open a new PowerShell window and run Setup-Hub.ps1 again." }
         }
     }
     if (-not (Test-Command git)) { Write-Warn 'git is not installed. Optional, but the run_git_command tool needs it (winget install Git.Git).' }

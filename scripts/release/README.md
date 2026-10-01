@@ -10,6 +10,18 @@ A coding assistant that runs on your own machines. This download is ready to run
 
 The backend is included with its own runtime; you do not need .NET.
 
+If this hub will run coding plans that build or verify .NET, Node.js or Python projects, install those toolchains machine-wide
+first: open an elevated PowerShell, run `scripts\Install-FleetToolchains.ps1`, close the elevated window, then start Fleet
+normally. This installs only the fixed runtime packages and never runs project code. Agent commands use the account that
+runs Fleet; do not run Fleet as administrator.
+
+If a Windows worker will run plan checks, install the common toolchains on that worker too. During worker setup, pass
+`-InstallToolchains` to `Setup-Worker.ps1`, or run `Install-FleetToolchains.ps1` there from elevated PowerShell. Restart
+`sshd` after installation so new SSH sessions inherit the machine PATH. Project-specific pins may need additional SDKs.
+
+On Linux or macOS, install the required runtimes through that system's package manager; `scripts/setup-hub.sh` checks for
+.NET 9+, Node.js 20+, and Python 3.13+ (`python3`).
+
 ## Start it
 
 Windows: double-click **Start Agent Fleet.cmd** in this folder. Keep its window open while you use the fleet; close it to

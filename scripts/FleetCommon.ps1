@@ -23,7 +23,7 @@ function Test-Command([string]$Name) { return [bool](Get-Command $Name -ErrorAct
 
 # Where the installed copy lives (Install-Autostart.ps1 publishes the backend to <root>\backend). In order: an
 # explicit -InstallRoot, the AGENT_FLEET_INSTALL_ROOT environment variable, the folder the registered backend
-# service or scheduled task runs from, and C:\AgentFleet when nothing is installed yet.
+# service or scheduled task runs from, and the standard application-data folder when nothing is installed yet.
 function Resolve-InstallRoot([string]$Given, [string]$BackendName = 'AgentFleetBackend') {
     if ($Given) { return $Given }
     if ($env:AGENT_FLEET_INSTALL_ROOT) { return $env:AGENT_FLEET_INSTALL_ROOT }
@@ -42,7 +42,7 @@ function Resolve-InstallRoot([string]$Given, [string]$BackendName = 'AgentFleetB
         } catch { }
     }
     if ($backendDir -and (Split-Path $backendDir -Leaf) -eq 'backend') { return (Split-Path $backendDir -Parent) }
-    return 'C:\AgentFleet'
+    return (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'AgentFleet')
 }
 
 # The fleet's own configuration file. Looked for, in order: an explicit path, FLEET_CONFIG_PATH,

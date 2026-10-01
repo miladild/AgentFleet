@@ -2,7 +2,7 @@
 # Prepares a Linux machine to be a worker in the fleet: Ollama installed, listening on the network,
 # and reachable only from where you say.
 #
-# Run it on the WORKER machine:   sudo ./setup-worker.sh --allow-from 192.168.1.10
+# Run it on the WORKER machine:   sudo ./setup-worker.sh --allow-from <hub-private-ip>
 #
 # It requires an active, restrictive ufw or firewalld policy, checks that the Ollama port has no broader
 # allow rule, installs Ollama (the official installer) if it is missing, makes Ollama listen on the network
@@ -64,7 +64,7 @@ confirm() {
 }
 
 if [ -z "$allow_from" ]; then
-  echo "Name the hub's private IPv4 address, for example:  --allow-from 192.168.1.10" >&2
+  echo "Pass --allow-from with the hub's RFC1918 private IPv4 address." >&2
   exit 2
 fi
 valid_private_ipv4() {
