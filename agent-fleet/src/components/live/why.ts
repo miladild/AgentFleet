@@ -14,7 +14,10 @@ export function failureLine(detail: string): string {
   return (failing ?? lines[0] ?? "").slice(0, 180);
 }
 
-export function explain(detail: string | null | undefined, step: PlanStep | null): Why {
+/** What the repair ladder did for a step, from its events: rounds whose check ran and failed, and the highest rung. */
+export type Ladder = { rounds: number; rung: number };
+
+export function explain(detail: string | null | undefined, step: PlanStep | null, ladder?: Ladder): Why {
   const text = detail ?? "";
   if (/^Environment issue:/im.test(text)) {
     const cause = text.split("\n", 1)[0].replace(/^Environment issue:\s*/i, "").trim();
@@ -56,12 +59,29 @@ export function explain(detail: string | null | undefined, step: PlanStep | null
     return { short: "its check could not start", hint: "A program the check needs is not installed on the hub, or not on its PATH." };
   }
   const line = failureLine(text);
+  const tried = ladder && ladder.rounds > 0
+    ? `${ladder.rounds} repair round${ladder.rounds === 1 ? "" : "s"}${ladder.rung > 1 ? `, up to rung ${ladder.rung} of the repair ladder,` : ""}`
+    : "The attempts";
   return {
     short: line ? `check failed: ${line}` : "its check failed",
     hint:
-      "Three attempts did not pass the check. Read the output, choose another ready machine in the step panel if useful, " +
-      "then retry or skip the step.",
+      `${tried} did not get the check passing. Read the output, choose another ready machine in the step panel if useful, ` +
+      "then retry (a fresh repair ladder) or skip the step.",
   };
+}
+
+/** What the repair ladder did for a step since its run last started or was approved again. */
+export function ladderOf(plan: LivePlan, stepId: number | undefined): Ladder {
+  const events = plan.events ?? [];
+  const boundary = events.findLastIndex((event) => event.kind === "run-started" || event.kind === "resumed" || event.kind === "retry-approved");
+  let rounds = 0;
+  let rung = 1;
+  for (const event of events.slice(boundary + 1)) {
+    if (event.stepId !== stepId) continue;
+    if (event.kind === "round-classified" && event.round != null && event.failureClass !== "Passed") rounds++;
+    if (event.rung != null) rung = Math.max(rung, event.rung);
+  }
+  return { rounds, rung };
 }
 
 /** Each step's latest failed check, explained: shown on the step's card. */
@@ -72,7 +92,7 @@ export function stepFailures(plan: LivePlan): Map<number, Why> {
     const step = plan.steps.find((candidate) => candidate.id === event.stepId) ?? null;
     if (event.kind === "check-failed" || event.kind === "final-validation-failed" || event.kind === "run-deadline-exceeded" ||
         (event.kind === "plan-blocked" && /does not exit/.test(event.detail))) {
-      byStep.set(event.stepId, explain(event.detail, step));
+      byStep.set(event.stepId, explain(event.detail, step, ladderOf(plan, event.stepId)));
     }
   }
   return byStep;
@@ -100,8 +120,10 @@ export type Block = {
   step: PlanStep | null;
   stopped: boolean;
   why: Why;
-  /** The tiers of the attempts since the run last started, in order. */
-  tiers: string[];
+  /** The machines the step's rounds ran on, since the run last started, in order (a machine once per change). */
+  machines: string[];
+  /** What the repair ladder did for the step. */
+  ladder: Ladder;
 };
 
 /** Why a blocked plan stopped: the step it stopped at, and whether the user stopped it or a check did. */
@@ -120,17 +142,20 @@ export function blockOf(plan: LivePlan): Block | null {
       step,
       stopped,
       why: { short: "stopped by you", hint: `Finished steps stay done. Resuming carries on${step ? ` with step ${step.id}` : ""}.` },
-      tiers: [],
+      machines: [],
+      ladder: { rounds: 0, rung: 1 },
     };
   }
 
   const since = events.findLastIndex((event) => event.kind === "run-started" || event.kind === "resumed");
-  const tiers = events
-    .slice(Math.max(0, since))
-    .filter((event) => event.kind === "attempt-started" && event.stepId === step?.id && event.tier)
-    .map((event) => event.tier as string);
+  const machines: string[] = [];
+  for (const event of events.slice(Math.max(0, since))) {
+    const machine = event.modelNode ?? event.node;
+    if (event.kind === "attempt-started" && event.stepId === step?.id && machine && machines[machines.length - 1] !== machine) machines.push(machine);
+  }
+  const ladder = ladderOf(plan, step?.id);
   const failure = [...events].reverse().find((event) => event.stepId === step?.id &&
     (event.kind === "check-failed" || event.kind === "final-validation-failed" || event.kind === "run-deadline-exceeded"));
   const endless = last && /does not exit on its own/.test(last.detail) ? last.detail : null;
-  return { step, stopped, why: explain(endless ?? failure?.detail ?? last?.detail, step), tiers };
+  return { step, stopped, why: explain(endless ?? failure?.detail ?? last?.detail, step, ladder), machines, ladder };
 }
