@@ -9,7 +9,8 @@
       2. makes Ollama listen on the network (sets OLLAMA_HOST for the machine),
       3. adds a firewall rule that lets only the named private peer addresses reach Ollama's port,
       4. narrows Ollama's own inbound rules to those same addresses,
-      5. optionally stops the machine from sleeping.
+      5. optionally stops the machine from sleeping, and
+      6. optionally installs common plan runtimes machine-wide (with -InstallToolchains).
     It does NOT download a model: the hub can do that over the network (Add-FleetNode.ps1 -Pull), and the
     command to run is printed at the end.
 
@@ -29,8 +30,12 @@
 .PARAMETER DryRun
     Print what would be done and change nothing.
 
+.PARAMETER InstallToolchains
+    Install missing .NET SDK 9+, Node.js 20+ with npm, and Python 3.13+ machine-wide.
+    Requires winget and administrator rights. Project-specific pins may require additional versions.
+
 .EXAMPLE
-    .\Setup-Worker.ps1 -AllowFrom 192.168.1.10
+    .\Setup-Worker.ps1 -AllowFrom '<hub-private-ip>'
 #>
 [CmdletBinding()]
 param(
@@ -38,6 +43,7 @@ param(
     [ValidateRange(1, 65535)][int]$Port = 11434,
     [switch]$RestrictOllamaRules,
     [switch]$KeepAwake,
+    [switch]$InstallToolchains,
     [switch]$DryRun,
     [switch]$Yes
 )
@@ -54,7 +60,7 @@ function Do-Step([string]$What, [scriptblock]$Block) {
 }
 
 $remote = @($AllowFrom -split '[,\s]+' | Where-Object { $_ })
-if ($remote.Count -eq 0) { throw 'Pass -AllowFrom with the hub IP, for example -AllowFrom 192.168.1.10.' }
+if ($remote.Count -eq 0) { throw 'Pass -AllowFrom with the hub RFC1918 IPv4 address. Do not use a subnet or hostname.' }
 
 function Test-PrivateIPv4([string]$Address) {
     $parts = $Address.Split('.')
@@ -174,7 +180,18 @@ if ($KeepAwake) {
     Write-Ok 'Will not sleep while plugged in'
 }
 
-# --- 6. check ----------------------------------------------------------------------------------
+# --- 6. common plan runtimes ---------------------------------------------------------------------
+if ($InstallToolchains) {
+    Write-Step 'Common plan runtimes'
+    $toolchainInstaller = Join-Path $PSScriptRoot 'Install-FleetToolchains.ps1'
+    if (-not (Test-Path -LiteralPath $toolchainInstaller -PathType Leaf)) {
+        throw "Toolchain installer is missing: $toolchainInstaller"
+    }
+    if ($DryRun) { & $toolchainInstaller -DryRun }
+    else { & $toolchainInstaller }
+}
+
+# --- 7. check ----------------------------------------------------------------------------------
 Write-Step 'Check'
 $addresses = Get-LocalAddresses
 if ($DryRun) { Write-Info 'dry run: nothing was changed.' }

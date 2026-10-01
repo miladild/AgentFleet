@@ -12,7 +12,7 @@
 .PARAMETER InstallRoot
     Where the backend is published. fleet.config.json, sessions and logs live in <InstallRoot>\backend and are
     never overwritten by a publish. Default: AGENT_FLEET_INSTALL_ROOT, else the folder the registered service or task
-    runs from, else C:\AgentFleet.
+    runs from, else the standard application-data folder.
 
 .PARAMETER SkipFrontend
     Skip the web UI build and restart (backend-only change).

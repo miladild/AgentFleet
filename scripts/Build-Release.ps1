@@ -113,8 +113,8 @@ if (-not $SkipFleet) {
     Write-Ok 'Built'
 
     Write-Step 'Scripts, docs and license'
-    $scripts = 'Start-Fleet.ps1', 'start-fleet.sh', 'Install-Autostart.ps1', 'install-autostart.sh', 'Test-Fleet.ps1', 'Add-FleetNode.ps1',
-        'Get-FleetModels.ps1', 'Setup-Worker.ps1', 'setup-worker.sh', 'FleetCommon.ps1'
+    $scripts = 'Start-Fleet.ps1', 'start-fleet.sh', 'Install-Autostart.ps1', 'Install-FleetToolchains.ps1', 'install-autostart.sh', 'Test-Fleet.ps1', 'Add-FleetNode.ps1',
+        'Get-FleetModels.ps1', 'Setup-Worker.ps1', 'setup-worker.sh', 'Setup-WorkerWorkspace.ps1', 'setup-worker-workspace.sh', 'FleetCommon.ps1'
     $null = New-Item -ItemType Directory -Path (Join-Path $stage 'scripts')
     foreach ($script in $scripts) { Copy-Item (Join-Path $root "scripts/$script") (Join-Path $stage 'scripts') }
     Copy-Tracked 'docs' $stage
@@ -142,7 +142,7 @@ if (-not $SkipFleet) {
     }
     else {
         $archive = Join-Path $OutDir "$name.tar.gz"
-        chmod +x (Join-Path $stage 'backend/AgentFleet') (Join-Path $stage 'scripts/start-fleet.sh') (Join-Path $stage 'scripts/install-autostart.sh') (Join-Path $stage 'scripts/setup-worker.sh')
+        chmod +x (Join-Path $stage 'backend/AgentFleet') (Join-Path $stage 'scripts/start-fleet.sh') (Join-Path $stage 'scripts/install-autostart.sh') (Join-Path $stage 'scripts/setup-worker.sh') (Join-Path $stage 'scripts/setup-worker-workspace.sh')
         tar -czf $archive -C $OutDir $name
     }
     $assets += $archive

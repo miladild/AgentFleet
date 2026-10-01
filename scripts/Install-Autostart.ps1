@@ -16,10 +16,14 @@
 
     Update a running install later with Deploy-Fleet.ps1. Remove it with -Uninstall.
 
+.PARAMETER Mode
+    Task (default) starts with a limited user token at logon. Run builds from a normal, non-elevated PowerShell.
+    Service starts at boot and requires an elevated PowerShell.
+
 .PARAMETER InstallRoot
     Where the backend is published. Its fleet.config.json, conversations, plans and logs live in <InstallRoot>\backend
     and are never overwritten by an update. Default: the AGENT_FLEET_INSTALL_ROOT environment variable, else where an
-    earlier install is registered, else C:\AgentFleet. Set AGENT_FLEET_INSTALL_ROOT once and the other scripts find it too.
+    earlier install is registered, else the standard application-data folder. Set AGENT_FLEET_INSTALL_ROOT once and the other scripts find it too.
 
 .PARAMETER ListenOnLan
     Let other machines on your network reach the backend (for @fleet in VS Code on another computer). Adds a
@@ -32,6 +36,9 @@
 
 .PARAMETER DryRun
     Say what would be done and change nothing.
+
+.PARAMETER SkipBuild
+    Register or switch autostart using the already-published backend and existing web build. No project code is run.
 
 .EXAMPLE
     .\scripts\Install-Autostart.ps1
@@ -49,6 +56,7 @@ param(
     [switch]$ListenOnLan,
     [switch]$WebOnLan,
     [switch]$SkipFrontend,
+    [switch]$SkipBuild,
     [switch]$Uninstall,
     [switch]$DryRun
 )
@@ -80,6 +88,39 @@ function Do-Step([string]$What, [scriptblock]$Block) {
 
 if (($Mode -eq 'Service' -or $ListenOnLan -or $WebOnLan) -and -not $isAdmin -and -not $DryRun) {
     throw 'This needs an elevated PowerShell (Run as administrator): services and firewall rules cannot be changed otherwise. Or use the default -Mode Task without -ListenOnLan.'
+}
+if ($Mode -eq 'Task' -and $isAdmin -and -not $Uninstall -and -not $DryRun) {
+    throw 'Run Install-Autostart.ps1 from a normal, non-elevated PowerShell. It builds project code and its tasks run with a limited user token.'
+}
+if ($Mode -eq 'Service' -and -not $SkipBuild -and -not $Uninstall -and -not $DryRun) {
+    throw 'Service registration needs elevation, but project builds must not run elevated. Build first in normal Task mode, then register the existing publish with -Mode Service -SkipBuild.'
+}
+
+function Protect-InstallRoot {
+    $fullPath = [IO.Path]::GetFullPath($InstallRoot)
+    $rootPath = [IO.Path]::GetPathRoot($fullPath)
+    if ($fullPath.TrimEnd('\').Equals($rootPath.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) {
+        throw "InstallRoot must be a dedicated directory, not a drive root: $fullPath"
+    }
+    if (-not (Test-Path -LiteralPath $fullPath)) { $null = New-Item -ItemType Directory -Path $fullPath }
+
+    $userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $systemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    $adminsSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    $icacls = Join-Path $env:WINDIR 'System32\icacls.exe'
+    & $icacls $fullPath /inheritance:r | Out-Null
+    if ($LASTEXITCODE) { throw "Cannot remove inherited permissions from $fullPath. Have its owner or an administrator fix the folder permissions, then rerun this script." }
+    $user = $userSid.Translate([Security.Principal.NTAccount]).Value
+    & $icacls $fullPath /grant:r `
+        "${user}:(OI)(CI)F" `
+        'NT AUTHORITY\SYSTEM:(OI)(CI)F' `
+        'BUILTIN\Administrators:(OI)(CI)F' | Out-Null
+    if ($LASTEXITCODE) { throw "Cannot restrict $fullPath. Have its owner or an administrator fix the folder permissions, then rerun this script." }
+    $check = Get-Acl -LiteralPath $fullPath
+    if (-not $check.AreAccessRulesProtected -or @($check.Access).Count -ne 3) {
+        throw "Could not restrict $fullPath to the Fleet user, SYSTEM and Administrators. Check its permissions before continuing."
+    }
+    Write-Ok "Restricted $fullPath to the Fleet user, SYSTEM and Administrators"
 }
 
 # Stopping a scheduled task (or a service wrapper) ends the wrapper, not always the backend and web UI it started.
@@ -116,6 +157,8 @@ if ($Uninstall) {
 if ($Mode -eq 'Task' -and $existingService) { throw "A Windows service called $BackendName already exists. Remove it first (-Uninstall) or use -Mode Service." }
 if ($Mode -eq 'Service' -and $existingTask) { throw "A scheduled task called $BackendName already exists. Remove it first (-Uninstall) or use -Mode Task." }
 
+if (-not $DryRun) { Protect-InstallRoot }
+
 # --- prerequisites ------------------------------------------------------------------------------
 Write-Step 'Checking prerequisites'
 if ($bundle) {
@@ -127,7 +170,7 @@ if ($bundle) {
 }
 
 # --- build --------------------------------------------------------------------------------------
-if (-not $SkipFrontend -and -not $bundle) {
+if (-not $SkipBuild -and -not $SkipFrontend -and -not $bundle) {
     Write-Step 'Building the web UI'
     Do-Step 'npm install and npm run build in agent-fleet' {
         Push-Location $web
@@ -148,7 +191,10 @@ function Stop-Fleet {
     Stop-FleetProcesses
 }
 
-if ($bundle) {
+if ($SkipBuild) {
+    Write-Step 'Keeping the existing backend and web build'
+    Do-Step 'stop the previous fleet processes before registering the new autostart' { Stop-Fleet }
+} elseif ($bundle) {
     Write-Step "Running the download in place ($script:RepoRoot)"
     Do-Step 'stop a copy that is already running' { Stop-Fleet }
     Write-Ok 'Keep this folder where it is: the autostart runs the fleet from here'
