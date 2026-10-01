@@ -2036,6 +2036,13 @@ internal sealed partial class PlanRunner
         if (machine is null && !continuing && HasPriorAttempt(plan.Id, step.Id))
         {
             (machine, retryRoute) = await SelectRetryMachineAsync(plan, step, tier, cancellationToken);
+
+            // "Could not move off this machine" is true of most retries (a fleet has one worker per tier) and means
+            // nothing to the model; the note is for the log and the prompt only when the workspace really moved.
+            if (machine is null)
+            {
+                retryRoute = null;
+            }
         }
 
         if (_workerWorkspaces is not null && machine is null)
