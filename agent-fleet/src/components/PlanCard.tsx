@@ -34,6 +34,11 @@ export type PlanRunEvent = {
   filesChanged?: number | null;
   toolCalls?: number | null;
   editToolCalled?: boolean | null;
+  /** The repair ladder: 1 the requested tier, 2 the hub model in the same conversation, 3 a fresh conversation. */
+  rung?: number | null;
+  /** The round within that rung: the model works, then the approved check runs. */
+  round?: number | null;
+  changedFiles?: string[] | null;
   detail: string;
 };
 
@@ -149,6 +154,7 @@ const EVENT_STYLE: Record<string, string> = {
   "run-lease-busy": "text-amber-300",
   "retry-approved": "text-sky-300",
   "round-classified": "text-violet-300",
+  "rung-changed": "text-violet-300",
   "inference-probe-passed": "text-emerald-300",
   "workspace-reconciled": "text-sky-300",
   stopped: "text-amber-400",
@@ -163,7 +169,8 @@ function RunLog({ planId, events }: { planId: string; events: PlanRunEvent[] }) 
       </summary>
       <div className="mt-1 max-h-72 overflow-y-auto rounded border border-neutral-800 bg-neutral-900/60 p-2 space-y-1">
         {events.map((e, i) => {
-          const where = e.stepId == null ? "" : `step ${e.stepId}${e.attempt == null ? "" : `.${e.attempt}`}`;
+          const ladder = e.rung == null ? "" : ` rung ${e.rung}${e.round == null ? "" : ` round ${e.round}`}`;
+          const where = e.stepId == null ? "" : `step ${e.stepId}${e.attempt == null ? "" : `.${e.attempt}`}${ladder}`;
           const via = [e.tier, e.modelNode ?? e.node, e.workspaceNode ? `workspace ${e.workspaceNode}` : null].filter(Boolean).join(" / ");
           return (
             <div key={i} className="text-[11px] leading-snug">

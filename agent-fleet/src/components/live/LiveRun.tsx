@@ -2,7 +2,7 @@
 
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { PlanStep } from "../PlanCard";
-import { useLiveFeed, type LiveNode, type LivePlan, type LogLine, type StepActivity } from "./useLiveFeed";
+import { RUNG_NAME, useLiveFeed, type LiveNode, type LivePlan, type LogLine, type StepActivity } from "./useLiveFeed";
 import { blockOf, stepFailures, withRunAttempts, type Why } from "./why";
 
 // ---------- colours and helpers ----------
@@ -383,9 +383,12 @@ const StepNode = memo(function StepNode({
         <span className="act" title={failure && step.status === "failed" ? `${failure.short}\n\n${failure.hint}` : footer}>
           {footer}
         </span>
-        {(step.attempts > 1 || (step.status === "failed" && step.attempts > 0)) && (
-          <span className="tries" title={`${step.attempts} of 3 attempts used`}>
-            ↻ {step.attempts}/3
+        {(step.attempts > 1 || (activity?.rung ?? 1) > 1 || (activity?.round ?? 1) > 1 || (step.status === "failed" && step.attempts > 0)) && (
+          <span
+            className="tries"
+            title={`${step.attempts} of 3 attempts (conversations) used${activity?.rung ? `\nRepair ladder: rung ${activity.rung} (${RUNG_NAME[activity.rung] ?? "?"})${activity.round ? `, round ${activity.round}` : ""}` : ""}`}
+          >
+            ↻ {activity?.rung ? `rung ${activity.rung}${activity.round ? ` · round ${activity.round}` : ""}` : `${step.attempts}/3`}
           </span>
         )}
       </div>
@@ -596,6 +599,7 @@ function Inspector({
       </h3>
       <div>
         <span className="live-glow-text">{step.status}</span> · <TierMeter tier={step.tier} /> tier · {step.attempts} of 3 attempts
+        {activity?.rung ? ` · rung ${activity.rung} (${RUNG_NAME[activity.rung] ?? "?"})${activity.round ? `, round ${activity.round}` : ""}` : ""}
         {activity?.node ? ` · model ${activity.node}` : ""}
         {activity?.workspaceNode ? ` · workspace ${activity.workspaceNode}` : ""} · {activity?.toolCalls ?? 0} tool calls
       </div>
@@ -885,7 +889,7 @@ function PlanBanner({ plan, onInspect }: { plan: LivePlan; onInspect: (id: numbe
   }
 
   if (!block) return null;
-  const { step, stopped, why, tiers } = block;
+  const { step, stopped, why, machines, ladder } = block;
   const endless = why.short.includes("never finishes");
   const environment = why.short.startsWith("environment issue:");
   return (
@@ -906,8 +910,8 @@ function PlanBanner({ plan, onInspect }: { plan: LivePlan; onInspect: (id: numbe
             {step.attempts > 0
               ? environment
                 ? `stopped after ${step.attempts} attempt${step.attempts === 1 ? "" : "s"}`
-                : `${step.attempts} of 3 attempts`
-              : "no attempt spent"}{tiers.length > 0 ? ` · ${tiers.join(" → ")}` : ""}
+                : `${ladder.rounds} round${ladder.rounds === 1 ? "" : "s"}, ${step.attempts} attempt${step.attempts === 1 ? "" : "s"}${ladder.rung > 1 ? `, rung ${ladder.rung}` : ""}`
+              : "no attempt spent"}{machines.length > 0 ? ` · ${machines.join(" → ")}` : ""}
           </span>
         )}
       </div>
@@ -921,7 +925,7 @@ function PlanBanner({ plan, onInspect }: { plan: LivePlan; onInspect: (id: numbe
         ) : (
           <>
             {!endless && (
-              <button type="button" className="primary" disabled={acting} onClick={() => act("approve")} title={environment ? "Fix the hub toolchain first, then try this step again" : "Three fresh attempts at this step, then the rest of the plan"}>
+              <button type="button" className="primary" disabled={acting} onClick={() => act("approve")} title={environment ? "Fix the hub toolchain first, then try this step again" : "A fresh repair ladder for this step, then the rest of the plan"}>
                 ↻ retry step {step?.id}
               </button>
             )}

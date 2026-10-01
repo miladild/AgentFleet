@@ -79,6 +79,7 @@ const contextFixture = {
 };
 
 const reroutePlanId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const ladderPlanId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 test.beforeEach(async ({ page }) => {
   let config = JSON.parse(JSON.stringify(baseConfig)) as typeof baseConfig;
@@ -183,6 +184,41 @@ test.beforeEach(async ({ page }) => {
           { name: "worker-a", model: "ornith:9b", tier: "light", ready: true, vision: false, workspace: true },
           { name: "worker-b", model: "ornith:9b", tier: "light", ready: true, vision: false, workspace: true },
           { name: "vision", model: "qwen2.5vl:7b", ready: true, vision: true },
+        ],
+      });
+    }
+    if (pathname === `/api/live/${ladderPlanId}`) {
+      const at = (second: number) => `2026-09-27T00:00:${String(second).padStart(2, "0")}.000Z`;
+      return json({
+        plan: {
+          id: ladderPlanId,
+          title: "Repair ladder",
+          goal: "Show where a step is on the repair ladder.",
+          status: "running",
+          workingDirectory: "C:/workspace/demo",
+          assumptions: [],
+          openQuestions: [],
+          risks: [],
+          diagram: null,
+          diagramNote: null,
+          updatedUtc: at(10),
+          events: [
+            { atUtc: at(0), stepId: 1, attempt: 1, kind: "attempt-started", tier: "standard", node: "worker-a", modelNode: "worker-a", rung: 1, round: 1, detail: "" },
+            { atUtc: at(1), stepId: 1, attempt: 1, kind: "round-classified", tier: "standard", node: "worker-a", modelNode: "worker-a", failureClass: "NoOp", filesChanged: 0, rung: 1, round: 1, detail: "Round classified: NoOp." },
+            { atUtc: at(2), stepId: 1, attempt: 1, kind: "check-failed", tier: "standard", node: "worker-a", rung: 1, round: 1, detail: "FAILED widget::renders" },
+            { atUtc: at(3), stepId: 1, attempt: 1, kind: "rung-changed", tier: "standard", node: "hub", modelNode: "hub", rung: 2, detail: "Climbing from rung 1 (the requested tier) to rung 2 (the hub model, same conversation) on hub: the last round made no edit and changed no file." },
+            { atUtc: at(4), stepId: 1, attempt: 1, kind: "attempt-started", tier: "standard", node: "hub", modelNode: "hub", rung: 2, round: 1, detail: "Round 1: the output of the failed check goes back into the same conversation." },
+            { atUtc: at(5), stepId: 1, attempt: 1, kind: "round-classified", tier: "standard", node: "hub", modelNode: "hub", failureClass: "CodeProgress", filesChanged: 1, changedFiles: ["src/widget.ts"], rung: 2, round: 1, detail: "Round classified: CodeProgress." },
+            { atUtc: at(6), stepId: 1, attempt: 1, kind: "attempt-started", tier: "standard", node: "hub", modelNode: "hub", rung: 2, round: 2, detail: "Round 2: the output of the failed check goes back into the same conversation." },
+          ],
+          steps: [
+            { id: 1, title: "Fix the failing tests", detail: "Make the widget tests pass.", files: ["src/widget.ts"], verify: "npm test", tier: "standard", machine: "worker-a", status: "running", note: null, attempts: 1 },
+          ],
+        },
+        events: [],
+        nodes: [
+          { name: "hub", model: "qwen3-coder:30b", ready: true, vision: false },
+          { name: "worker-a", model: "ornith:9b", tier: "standard", ready: true, vision: false, workspace: true },
         ],
       });
     }
@@ -304,6 +340,19 @@ test("reroutes a failed step without changing its requested tier", async ({ page
   expect(request.postDataJSON()).toEqual({ stepId: 1, machine: "worker-a" });
   await expect(machine).toHaveValue("worker-a");
   await expect(page.locator(".live-inspector")).toContainText("task stays light");
+});
+
+test("shows where a step is on the repair ladder and says each climb in plain words", async ({ page }) => {
+  await page.goto(`/live/${ladderPlanId}`);
+
+  await expect(page.locator(".live-node .tries")).toContainText("rung 2 · round 2");
+  await page.getByRole("button", { name: /Fix the failing tests/ }).click();
+  await expect(page.locator(".live-inspector")).toContainText("rung 2 (hub model, same conversation), round 2");
+
+  const log = page.locator(".live-log");
+  await expect(log).toContainText("round 1 (rung 1): nothing changed · changed no file");
+  await expect(log).toContainText("round 1 (rung 2): failed, but the failures changed · changed src/widget.ts");
+  await expect(log).toContainText("Climbing from rung 1 (the requested tier) to rung 2 (the hub model, same conversation) on hub");
 });
 
 test("shows an error and its successful cross-agent handoff in Context", async ({ page }) => {

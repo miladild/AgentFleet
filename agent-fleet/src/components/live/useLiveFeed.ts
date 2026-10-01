@@ -48,6 +48,27 @@ export type StepActivity = {
   lastAction: string | null;
   lastAt: number | null;
   toolCalls: number;
+  /** Where the step is on the repair ladder (see the run log's rung-changed lines), when it has been on it. */
+  rung: number | null;
+  round: number | null;
+};
+
+/** The rungs of the repair ladder, in a few words. */
+export const RUNG_NAME: Record<number, string> = {
+  1: "requested tier",
+  2: "hub model, same conversation",
+  3: "fresh conversation with a brief",
+};
+
+const CLASS_WORDS: Record<string, string> = {
+  Passed: "passed",
+  CodeProgress: "failed, but the failures changed",
+  Stall: "same failures, no file changed",
+  NoOp: "nothing changed",
+  Infra: "a machine did not answer",
+  Environment: "environment problem",
+  CheckDefect: "the check itself is broken",
+  Unknown: "unknown failure",
 };
 
 const LIVE_STATUSES = new Set(["awaiting-approval", "approved", "running", "blocked"]);
@@ -78,6 +99,7 @@ const RUN_TONE: Record<string, LogLine["tone"]> = {
   "run-deadline-exceeded": "bad",
   "run-lease-busy": "warn",
   "retry-approved": "accent",
+  "rung-changed": "accent",
 };
 
 // A line of the run log in words: which attempt, on which tier, and the part of the detail that matters.
@@ -89,13 +111,23 @@ function runText(event: PlanRunEvent): string {
     event.workspaceNode ? `workspace ${event.workspaceNode}` : null,
   ].filter(Boolean).join(" · ");
   const routeText = route ? ` · ${route}` : "";
+  const ladder = event.rung != null ? ` · rung ${event.rung}${event.round != null ? `, round ${event.round}` : ""}` : "";
   switch (event.kind) {
     case "attempt-started":
-      return `attempt ${event.attempt ?? "?"} on ${event.tier ?? "?"}${routeText}${tail(firstLine)}`;
+      return `attempt ${event.attempt ?? "?"}${ladder} on ${event.tier ?? "?"}${routeText}${tail(firstLine)}`;
     case "attempt-ended":
-      return `attempt ${event.attempt ?? "?"} ended${tail(firstLine)}`;
+      return `attempt ${event.attempt ?? "?"}${ladder} ended${tail(firstLine)}`;
     case "check-failed":
-      return `✖ check failed on attempt ${event.attempt ?? "?"}${tail(failureLine(event.detail ?? ""))}`;
+      return `✖ check failed on attempt ${event.attempt ?? "?"}${ladder}${tail(failureLine(event.detail ?? ""))}`;
+    case "round-classified": {
+      if (event.round == null && !event.failureClass) return `round classified${tail(firstLine)}`;
+      const files = event.changedFiles?.length
+        ? ` · changed ${event.changedFiles.slice(0, 3).join(", ")}${event.changedFiles.length > 3 ? ` +${event.changedFiles.length - 3}` : ""}`
+        : event.filesChanged === 0 ? " · changed no file" : "";
+      return `round ${event.round ?? "?"}${event.rung != null ? ` (rung ${event.rung})` : ""}: ${CLASS_WORDS[event.failureClass ?? ""] ?? event.failureClass ?? "classified"}${files}`;
+    }
+    case "rung-changed":
+      return event.detail || `moved to rung ${event.rung ?? "?"}`;
     case "check-passed":
       return `✔ check passed${tail(firstLine)}`;
     default:
@@ -191,7 +223,7 @@ export function useLiveFeed(planId: string) {
     const byStep = new Map<number, StepActivity>();
     for (const event of events) {
       if (event.step === null) continue;
-      const entry = byStep.get(event.step) ?? { node: null, workspaceNode: null, lastAction: null, lastAt: null, toolCalls: 0 };
+      const entry = byStep.get(event.step) ?? { node: null, workspaceNode: null, lastAction: null, lastAt: null, toolCalls: 0, rung: null, round: null };
       if (event.kind === "route" && event.node) entry.node = event.node;
       if (event.kind === "tool-call") {
         entry.toolCalls += 1;
@@ -202,9 +234,13 @@ export function useLiveFeed(planId: string) {
     }
     for (const event of plan?.events ?? []) {
       if (event.stepId === null) continue;
-      const entry = byStep.get(event.stepId) ?? { node: null, workspaceNode: null, lastAction: null, lastAt: null, toolCalls: 0 };
+      const entry = byStep.get(event.stepId) ?? { node: null, workspaceNode: null, lastAction: null, lastAt: null, toolCalls: 0, rung: null, round: null };
       if (event.modelNode ?? event.node) entry.node = event.modelNode ?? event.node;
       if (event.workspaceNode) entry.workspaceNode = event.workspaceNode;
+      // The latest rung and round the log names; a climb starts the new rung's rounds again.
+      if (event.rung != null) entry.rung = event.rung;
+      if (event.kind === "rung-changed") entry.round = null;
+      else if (event.round != null) entry.round = event.round;
       byStep.set(event.stepId, entry);
     }
     return byStep;
@@ -234,7 +270,9 @@ export function useLiveFeed(planId: string) {
         node: event.modelNode ?? event.node,
         kind: event.kind,
         text: runText(event),
-        tone: RUN_TONE[event.kind] ?? "info",
+        tone: event.kind === "round-classified"
+          ? event.failureClass === "Passed" ? "good" : event.failureClass === "NoOp" || event.failureClass === "Stall" ? "warn" : "info"
+          : RUN_TONE[event.kind] ?? "info",
       });
     });
     return lines.sort((a, b) => a.at - b.at || a.key.localeCompare(b.key));
