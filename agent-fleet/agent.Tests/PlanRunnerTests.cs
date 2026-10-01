@@ -38,10 +38,10 @@ public sealed class PlanRunnerTests : PlanTestBase
 
     private PlanRunner Runner(FakeStepAgent agent, Func<string, string> verify, TimeSpan? timeout = null, ISleepGuard? sleepGuard = null,
         Func<int, TimeSpan>? transientDelay = null, Func<TimeSpan, CancellationToken, Task>? delayAsync = null,
-        IWorkerWorkspaceManager? workerWorkspaces = null) =>
+        IWorkerWorkspaceManager? workerWorkspaces = null, Func<DateTimeOffset>? utcNow = null) =>
         new(Store, new PlanTools(Store, Valid, (command, _, _) => Task.FromResult(verify(command))), agent, NullLogger.Instance, timeout,
             transientDelay: transientDelay ?? (_ => TimeSpan.Zero), sleepGuard: sleepGuard,
-            workerWorkspaces: workerWorkspaces, delayAsync: delayAsync ?? ((_, _) => Task.CompletedTask));
+            workerWorkspaces: workerWorkspaces, delayAsync: delayAsync ?? ((_, _) => Task.CompletedTask), utcNow: utcNow);
 
     private static string Pass(string _) => "Exit code: 0\n--- stdout ---\nok";
 
@@ -433,18 +433,19 @@ public sealed class PlanRunnerTests : PlanTestBase
     public async Task An_outage_waits_only_until_the_plan_deadline()
     {
         PlanRecord plan = ApprovedPlan(Step("machines gone"));
-        DateTimeOffset deadline = DateTimeOffset.UtcNow.AddSeconds(2);
+        DateTimeOffset fakeNow = DateTimeOffset.UtcNow;
+        DateTimeOffset deadline = fakeNow.AddSeconds(20);
         plan = Store.Update(plan.Id, current => current with { RunDeadlineUtc = deadline })!;
         var agent = new FakeStepAgent((_, _, _) => throw new HttpRequestException("unreachable"));
         int waits = 0;
-        Task Delay(TimeSpan _, CancellationToken cancellationToken)
+        Task Delay(TimeSpan delay, CancellationToken cancellationToken)
         {
-            if (++waits < 20) return Task.CompletedTask;
-            TimeSpan remaining = deadline - DateTimeOffset.UtcNow;
-            return Task.Delay(remaining > TimeSpan.Zero ? remaining + TimeSpan.FromMilliseconds(10) : TimeSpan.Zero, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            fakeNow = ++waits < 20 ? fakeNow + delay : deadline;
+            return Task.CompletedTask;
         }
 
-        await Runner(agent, Pass, transientDelay: _ => TimeSpan.FromSeconds(1), delayAsync: Delay)
+        await Runner(agent, Pass, transientDelay: _ => TimeSpan.FromSeconds(1), delayAsync: Delay, utcNow: () => fakeNow)
             .RunPlanAsync(plan.Id, default);
 
         PlanRecord after = Store.Get(plan.Id)!;
@@ -458,6 +459,7 @@ public sealed class PlanRunnerTests : PlanTestBase
     [Fact]
     public async Task A_worker_transport_staging_failure_waits_without_spending_an_attempt_until_deadline()
     {
+        DateTimeOffset fakeNow = DateTimeOffset.UtcNow;
         string project = Path.Combine(Path.GetTempPath(), "fleet-recovery-test-" + Guid.NewGuid().ToString("N"));
         string keyPath = Path.Combine(project, "worker-key.pem");
         Directory.CreateDirectory(project);
@@ -488,18 +490,20 @@ public sealed class PlanRunnerTests : PlanTestBase
             plan = Store.Update(plan.Id, current => current with
             {
                 WorkingDirectory = project,
-                RunDeadlineUtc = DateTimeOffset.UtcNow.AddMilliseconds(500)
+                RunDeadlineUtc = fakeNow.AddSeconds(10)
             })!;
             plan = Store.SelectMachine(plan.Id, 1, "worker-a", out string? selectError)!;
             Assert.Null(selectError);
             plan = Store.Approve(plan.Id)!;
-            plan = Store.Update(plan.Id, current => current with { RunDeadlineUtc = DateTimeOffset.UtcNow.AddMilliseconds(500) })!;
+            plan = Store.Update(plan.Id, current => current with { RunDeadlineUtc = fakeNow.AddSeconds(10) })!;
 
             var workspaces = new WorkerWorkspaceManager(options, NullLogger.Instance, TimeSpan.FromSeconds(1));
             var runner = new PlanRunner(Store,
                 new PlanTools(Store, Valid, (command, _, _) => Task.FromResult(Pass(command))),
                 Agent(), NullLogger.Instance, fleetOptions: options, workerWorkspaces: workspaces,
-                transientDelay: _ => TimeSpan.FromSeconds(10), delayAsync: Task.Delay);
+                transientDelay: _ => TimeSpan.FromSeconds(10),
+                delayAsync: (delay, cancellationToken) => { cancellationToken.ThrowIfCancellationRequested(); fakeNow += delay; return Task.CompletedTask; },
+                utcNow: () => fakeNow);
             await runner.RunPlanAsync(plan.Id, default);
 
             PlanRecord after = Store.Get(plan.Id)!;
