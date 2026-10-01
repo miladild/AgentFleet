@@ -11,9 +11,18 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AgentFleet.Tests;
 
-/// <summary>A fleet context store, journal and request scope on a scratch folder.</summary>
+/// <summary>
+/// A fleet context store, journal and request scope on a scratch folder. Every test class that opens the SQLite-backed
+/// record derives from this and shares one xUnit collection, so they run one after another. A test that ends or simulates
+/// a restart clears the connection pools, a process-wide call that closes connections another running test is still
+/// using: the concurrency test failed about one run in seven with "Cannot access a disposed object: SQLitePCL.sqlite3"
+/// while other classes ran beside it.
+/// </summary>
+[Collection(SqliteRecordCollection)]
 public abstract class ContextTestBase : IDisposable
 {
+    public const string SqliteRecordCollection = "SQLite context record";
+
     protected ContextTestBase()
     {
         Root = Path.Combine(Path.GetTempPath(), "fleet-context-tests-" + Guid.NewGuid().ToString("N"));
