@@ -171,7 +171,7 @@ still contact their configured external services. Details are in
 ```
 
 This builds the web UI, publishes the backend to the configured install root (set `AGENT_FLEET_INSTALL_ROOT` or pass `-InstallRoot C:\fleet-test\install`), and registers two scheduled tasks that start when you
-log in and run as you. It needs no administrator rights. Later, `.\scripts\Deploy-Fleet.ps1` updates the running copy
+log in, start again every five minutes if they are not running, and run as you. It needs no administrator rights. Later, `.\scripts\Deploy-Fleet.ps1` updates the running copy
 after you change the code, and `.\scripts\Install-Autostart.ps1 -Uninstall` removes it.
 
 If you want it running before anyone logs in, use `-Mode Service` from an elevated PowerShell, and read
