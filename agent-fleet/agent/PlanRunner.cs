@@ -16,12 +16,33 @@ internal interface IStepAgent
 
     Task<StepAgentReply> RunStepAsync(string prompt, string tier, string? machine, CancellationToken cancellationToken) =>
         RunStepAsync(prompt, tier, cancellationToken);
+
+    /// <summary>
+    /// A conversation with a model that the runner keeps sending messages into: the check output of a failed round goes
+    /// back into the same conversation, so the model still has the task and everything it did.
+    /// </summary>
+    IStepSession OpenSession();
+}
+
+/// <summary>
+/// One conversation. The tier and machine are given per message, so a conversation can continue on another machine
+/// (measured: the history, tool calls included, is understood by the second model, in both directions).
+/// </summary>
+internal interface IStepSession
+{
+    /// <summary>
+    /// True once a message has been answered. A message that failed or timed out left nothing in the conversation, so
+    /// until then the next message has to be the whole task, not a follow-up.
+    /// </summary>
+    bool HasHistory { get; }
+
+    Task<StepAgentReply> SendAsync(string message, string tier, string? machine, CancellationToken cancellationToken);
 }
 
 internal sealed record StepAgentReply(string Text, int ToolCalls, bool EditToolCalled);
 
 /// <summary>
-/// Drives the real agent, one fresh session per call so a step never inherits another step's
+/// Drives the real agent. Each conversation is its own session, so a step never inherits another step's
 /// conversation. The requested tier goes through the router (see FleetRoutingChatClient.RunnerTierKey);
 /// routing mode and an explicit machine choice determine which configured machine answers.
 /// </summary>
@@ -33,9 +54,21 @@ internal sealed class FleetStepAgent(AIAgent agent) : IStepAgent
     public Task<StepAgentReply> RunStepAsync(string prompt, string tier, CancellationToken cancellationToken) =>
         RunStepAsync(prompt, tier, null, cancellationToken);
 
-    public async Task<StepAgentReply> RunStepAsync(string prompt, string tier, string? machine, CancellationToken cancellationToken)
+    public Task<StepAgentReply> RunStepAsync(string prompt, string tier, string? machine, CancellationToken cancellationToken) =>
+        OpenSession().SendAsync(prompt, tier, machine, cancellationToken);
+
+    public IStepSession OpenSession() => new FleetStepSession(agent);
+}
+
+internal sealed class FleetStepSession(AIAgent agent) : IStepSession
+{
+    private AgentSession? _session;
+
+    public bool HasHistory { get; private set; }
+
+    public async Task<StepAgentReply> SendAsync(string message, string tier, string? machine, CancellationToken cancellationToken)
     {
-        AgentSession session = await agent.CreateSessionAsync(cancellationToken);
+        _session ??= await agent.CreateSessionAsync(cancellationToken);
         var properties = new AdditionalPropertiesDictionary { [FleetRoutingChatClient.RunnerTierKey] = tier };
         if (!string.IsNullOrWhiteSpace(machine))
         {
@@ -46,12 +79,13 @@ internal sealed class FleetStepAgent(AIAgent agent) : IStepAgent
         {
             AdditionalProperties = properties
         });
-        AgentResponse response = await agent.RunAsync(prompt, session, options, cancellationToken);
+        AgentResponse response = await agent.RunAsync(message, _session, options, cancellationToken);
+        HasHistory = true;
 
         // Measured: a worker spent 75 s on one reply and ended with no tool call and no text (a thinking model that
         // only thought), which cost the step an attempt and sent it to the hub's queue. Asked once more in the same
         // session, it gets on with it.
-        FunctionCallContent[] calls = response.Messages.SelectMany(message => message.Contents)
+        FunctionCallContent[] calls = response.Messages.SelectMany(reply => reply.Contents)
             .OfType<FunctionCallContent>()
             .ToArray();
         int toolCalls = calls.Length;
@@ -60,8 +94,8 @@ internal sealed class FleetStepAgent(AIAgent agent) : IStepAgent
             "read_file" or "list_directory" or "find_files" or "search_files" or "project_overview" or "get_plan" or "search_context");
         if ((string.IsNullOrWhiteSpace(response.Text) && calls.Length == 0) || readOnlyOnly)
         {
-            response = await agent.RunAsync(Nudge, session, options, cancellationToken);
-            FunctionCallContent[] nudgedCalls = response.Messages.SelectMany(message => message.Contents)
+            response = await agent.RunAsync(FleetStepAgent.Nudge, _session, options, cancellationToken);
+            FunctionCallContent[] nudgedCalls = response.Messages.SelectMany(reply => reply.Contents)
                 .OfType<FunctionCallContent>()
                 .ToArray();
             toolCalls += nudgedCalls.Length;
@@ -121,6 +155,7 @@ internal sealed partial class PlanRunner
     private readonly Func<TimeSpan, CancellationToken, Task> _delayAsync;
     private readonly Func<DateTimeOffset> _utcNow;
     private readonly ISleepGuard _sleepGuard;
+    private readonly int _roundsPerRung;
 
     public PlanRunner(
         FleetPlanStore store,
@@ -137,8 +172,10 @@ internal sealed partial class PlanRunner
         IWorkerWorkspaceManager? workerWorkspaces = null,
         FleetModeService? modeService = null,
         Func<TimeSpan, CancellationToken, Task>? delayAsync = null,
-        Func<DateTimeOffset>? utcNow = null)
+        Func<DateTimeOffset>? utcNow = null,
+        int roundsPerRung = RepairLadder.DefaultRoundsPerRung)
     {
+        _roundsPerRung = Math.Max(1, roundsPerRung);
         _transientDelay = transientDelay ?? DefaultTransientDelay;
         _delayAsync = delayAsync ?? Task.Delay;
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
@@ -669,6 +706,13 @@ internal sealed partial class PlanRunner
         }
     }
 
+    /// <summary>
+    /// One step, as rounds in a conversation: the model works, the runner runs the approved check, and a failure goes back
+    /// into the same conversation (a round) instead of starting a new one. Rounds stop paying off when a round changes
+    /// nothing, the same failures come back with no file changed, or a rung's round budget is used: the step then climbs
+    /// the repair ladder (see <see cref="RepairLadder"/>). An attempt is one conversation with a model; machine outages and
+    /// other failures that give no verdict wait or reroute without using a round or an attempt.
+    /// </summary>
     private async Task<bool> RunStepAsync(
         PlanRecord plan,
         PlanStep step,
@@ -677,37 +721,268 @@ internal sealed partial class PlanRunner
         string? previousFailure = null,
         bool deferPlanBlock = false,
         string? initialModelOverride = null,
-        string? initialWorkspaceOverride = null)
+        string? initialWorkspaceOverride = null,
+        IStepSession? continuingSession = null)
     {
         string? lastFailure = previousFailure;
         string? workspaceOverride = initialWorkspaceOverride;
         string? modelOverride = initialModelOverride;
-        PlanRunEvent[] priorEvents = (_store.Get(plan.Id)?.Events ?? []).ToArray();
-        int retryBoundary = Array.FindLastIndex(priorEvents, runEvent => runEvent.Kind == RunEventKind.RetryApproved);
-        int waits = priorEvents.Skip(retryBoundary + 1).Count(runEvent =>
-            runEvent.StepId == step.Id && runEvent.Kind == RunEventKind.Waiting);
+        PlanRunEvent[] earlierEvents = StepEventsSinceRetry(plan.Id, step.Id);
+        int waits = earlierEvents.Count(runEvent => runEvent.Kind == RunEventKind.Waiting);
+        RepairPosition position = RepairLadder.PositionFrom(earlierEvents);
+        int rung = position.Rung;
+        int roundsInRung = position.RoundsInRung;
+        int roundsTotal = position.RoundsTotal;
+        string? hub = _fleetOptions?.Nodes.SingleOrDefault(node => node.Fallback)?.Name;
+        bool hubAllowed = hub is not null && PlanRecoveryScope.AllowsHubRescue(plan.RecoveryScope);
 
-        for (int attempt = firstAttempt; attempt <= MaxAttemptsPerStep; attempt++)
+        // A restart loses the open conversation, but not the rung: a step that had climbed to the hub stays on it.
+        if (modelOverride is null && rung >= RepairLadder.HubRung && hubAllowed)
         {
-            if (plan.RunDeadlineUtc is { } deadline && _utcNow() >= deadline)
+            modelOverride = hub;
+        }
+
+        IStepSession? session = continuingSession;
+        string? conversationWorkspace = null;
+        RoundOutcome? lastRound = null;
+        string? handover = null;
+        bool gaveUp = false;
+
+        // The restart landed after the last round of a rung and before the climb was written down.
+        if (roundsInRung >= _roundsPerRung)
+        {
+            RepairDecision spent = RepairLadder.Decide(rung, roundsInRung, _roundsPerRung, noChange: false, string.Empty, hubRungAvailable: false);
+            if (spent.Move == RepairMove.GiveUp)
             {
-                BlockForDeadline(plan, step, attempt, deferPlanBlock);
-                return false;
+                gaveUp = true;
+            }
+            else
+            {
+                modelOverride = await ClimbAsync(plan, step, spent, rung, firstAttempt, step.Tier, modelOverride, workspaceOverride, null, hub, hubAllowed, cancellationToken);
+                rung = spent.ToRung;
+                roundsInRung = 0;
+            }
+        }
+
+        for (int attempt = firstAttempt; attempt <= MaxAttemptsPerStep && !gaveUp; attempt++)
+        {
+            session ??= _agent.OpenSession();
+            IStepSession conversation = session;
+            if (!conversation.HasHistory)
+            {
+                conversationWorkspace = null;
             }
 
-            string tier = step.Tier;
-            ModelAttemptResult model = await RunModelAttemptAsync(
-                plan, step, attempt, lastFailure, tier, parallelGroup: false, cancellationToken: cancellationToken,
-                workspaceOverride: workspaceOverride, modelMachineOverride: modelOverride);
-            if (!model.ShouldVerify)
+            bool conversationOver = false;
+            while (!conversationOver)
             {
-                model.Workspace?.Dispose();
-                int failedAttemptFiles = await ChangedFilesSinceAsync(plan, model.WorkBefore, cancellationToken);
-                FailureClass roundClass = await RecordRoundClassifiedAsync(plan, step, attempt, model, model.Failure ?? string.Empty,
-                    passed: false, filesChanged: failedAttemptFiles);
-                if (model.WorkspaceFailure is { } workspaceFailure)
+                if (plan.RunDeadlineUtc is { } deadline && _utcNow() >= deadline)
                 {
-                    if (model.ReroutableWorkspaceFailure)
+                    BlockForDeadline(plan, step, attempt, deferPlanBlock);
+                    return false;
+                }
+
+                string tier = step.Tier;
+                int round = roundsInRung + 1;
+                string? repairMessage = null;
+                string? brief = null;
+                if (conversation.HasHistory)
+                {
+                    repairMessage = BuildRepairMessage(plan, step, lastFailure, round, lastRound, handover);
+                }
+                else if (RepairMessages.Brief(StepEventsSinceRetry(plan.Id, step.Id)) is { Length: > 0 } earlierRounds)
+                {
+                    brief = earlierRounds;
+                }
+
+                handover = null;
+                bool continuing = repairMessage is not null;
+                ModelAttemptResult model = await RunModelAttemptAsync(
+                    plan, step, attempt, lastFailure, tier, parallelGroup: false, cancellationToken: cancellationToken,
+                    workspaceOverride: workspaceOverride ?? (continuing ? conversationWorkspace : null), modelMachineOverride: modelOverride,
+                    round: new RoundContext(conversation, rung, round, repairMessage, brief));
+                if (model.Machine is not null)
+                {
+                    conversationWorkspace = model.Machine;
+                }
+
+                if (!model.ShouldVerify)
+                {
+                    model.Workspace?.Dispose();
+                    IReadOnlyList<string> failedAttemptFiles = await ChangedFilesSinceAsync(plan, model.WorkBefore, cancellationToken);
+                    RoundOutcome failedRound = await RecordRoundClassifiedAsync(plan, step, attempt, model, model.Failure ?? string.Empty,
+                        passed: false, failedAttemptFiles, rung);
+                    FailureClass roundClass = failedRound.Class;
+                    if (model.WorkspaceFailure is { } workspaceFailure)
+                    {
+                        if (model.ReroutableWorkspaceFailure)
+                        {
+                            (string? alternate, string detail) = await SelectRetryMachineAsync(plan, step, tier, cancellationToken);
+                            if (alternate is not null)
+                            {
+                                workspaceOverride = alternate;
+                                if (step.Machine is not null)
+                                {
+                                    // A user-selected worker failed before the model could edit anything. Persist the
+                                    // safe same-tier replacement so a later restart keeps using it.
+                                    step = step with { Machine = alternate };
+                                    _store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, step.Id,
+                                        currentStep => currentStep with { Machine = alternate }));
+                                    plan = _store.Get(plan.Id)!;
+                                }
+                                _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.RecoveryRouted, tier,
+                                    node: null,
+                                    detail: $"Worker staging failed before model tools or edits. {detail}",
+                                    modelNode: null, workspaceNode: alternate, rung: rung, round: round);
+                                continue;
+                            }
+
+                            GiveBackAttempt(plan.Id, step.Id, attempt, conversation);
+                            int waitNumber = ++waits;
+                            TimeSpan delay = _transientDelay(waitNumber - 1);
+                            delay = DelayWithinRunDeadline(plan, delay);
+                            _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.Waiting, tier, node: model.Machine,
+                                detail: $"Worker staging failed before model tools or edits ({Summarize(workspaceFailure)}). {detail} Waiting {Duration(delay)} (wait {waitNumber}) before retrying; this does not count as a model attempt.",
+                                modelNode: null, workspaceNode: model.Machine, rung: rung, round: round);
+                            await DelayBeforeRetryAsync(delay, cancellationToken);
+                            continue;
+                        }
+
+                        BlockForEnvironment(plan, step, attempt, tier, model.Machine, workspaceFailure,
+                            "the selected worker workspace is not configured or could not be staged", deferPlanBlock);
+                        return false;
+                    }
+
+                    if (roundClass == FailureClass.Environment)
+                    {
+                        BlockForEnvironment(plan, step, attempt, tier, model.ModelNode, model.Failure ?? "The model route failed with an environment error.",
+                            "the selected model machine has a permission, security, or runtime problem", deferPlanBlock);
+                        return false;
+                    }
+
+                    if (roundClass is FailureClass.Infra or FailureClass.Unknown)
+                    {
+                        // The next message is about the check's output; a failed call only gives the failure to speak of
+                        // when there is nothing better, as for a first message that never reached a model.
+                        if (!conversation.HasHistory && string.IsNullOrWhiteSpace(lastFailure))
+                        {
+                            lastFailure = model.Failure;
+                        }
+
+                        int unknownFailures = CountClassifiedRounds(plan.Id, step.Id, FailureClass.Unknown);
+                        if (roundClass == FailureClass.Unknown && unknownFailures >= 5)
+                        {
+                            BlockForUnknown(plan, step, attempt, model.FailureException, model.Failure, deferPlanBlock);
+                            return false;
+                        }
+
+                        if (roundClass == FailureClass.Infra)
+                        {
+                            string? route = await RouteFailedModelAsync(plan, step, tier, model.ModelNode, model.Machine,
+                                attempt, cancellationToken);
+                            if (route is not null)
+                            {
+                                modelOverride = route;
+                                continue;
+                            }
+                        }
+
+                        GiveBackAttempt(plan.Id, step.Id, attempt, conversation);
+                        if (roundClass == FailureClass.Unknown)
+                        {
+                            TimeSpan delay = DelayWithinRunDeadline(plan, TimeSpan.FromSeconds(20 * unknownFailures));
+                            string failedNode = model.ModelNode ?? "the selected model machine";
+                            _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.Waiting, tier, node: model.ModelNode,
+                                detail: $"Unknown failure on {failedNode}: {Summarize(model.Failure ?? "unknown failure")}. Waiting at least {Duration(delay)} (unknown failure {unknownFailures} of 5) before retrying; this does not count as an attempt.",
+                                modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round);
+                            await DelayBeforeRetryAsync(delay, cancellationToken);
+                            continue;
+                        }
+
+                        (modelOverride, waits) = await WaitForInfrastructureRecoveryAsync(plan, step, tier,
+                            model.ModelNode, model.Machine, attempt, model.Failure, waits, cancellationToken);
+                        continue;
+                    }
+
+                    // A failure that is neither a machine nor an environment problem and gave no verdict: it costs a round.
+                    if (!conversation.HasHistory && string.IsNullOrWhiteSpace(lastFailure))
+                    {
+                        lastFailure = model.Failure;
+                    }
+
+                    roundsInRung++;
+                    roundsTotal++;
+                    RepairDecision failedDecision = RepairLadder.Decide(rung, roundsInRung, _roundsPerRung, noChange: false, string.Empty,
+                        HubRungAvailable(step, hub, hubAllowed, model.ModelNode));
+                    if (failedDecision.Move != RepairMove.NextRound)
+                    {
+                        (rung, roundsInRung, modelOverride, conversationOver, gaveUp, handover) = await MoveAsync(
+                            plan, step, failedDecision, rung, attempt, tier, model, modelOverride, workspaceOverride, hub, hubAllowed, cancellationToken);
+                        if (conversationOver) session = null;
+                    }
+
+                    continue;
+                }
+
+                StepCompletion result;
+                bool isFinalValidation = step.Id == plan.Steps.Max(candidate => candidate.Id);
+                try
+                {
+                    using IDisposable? workerScope = model.Workspace?.Enter();
+                    if (isFinalValidation)
+                    {
+                        string snapshot = model.Workspace?.SnapshotId() ?? "unavailable";
+                        _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.FinalValidationStarted, tier,
+                            node: ViaNode(model.Summary), detail: $"Runner is executing the approved final check: `{step.Verify}` on source snapshot `{snapshot}`.",
+                            modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round);
+                    }
+
+                    result = await _tools.TryCompleteStepAsync(
+                        plan.Id, step.Id, Summarize(model.Summary), cancellationToken, FilesToCreate(plan, step), deferCommit: true);
+                    if (model.Workspace is not null)
+                    {
+                        await model.Workspace.SyncToHubAsync(cancellationToken);
+                        _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.WorkspaceSynced, tier, model.Machine,
+                            "Synced the worker project after verification; the checked changes are now in the hub checkout.",
+                            modelNode: model.ModelNode, workspaceNode: model.Machine);
+                    }
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException && model.Workspace is not null)
+                {
+                    _logger.LogError(exception, "Worker verification or sync failed for plan {PlanId} step {StepId} on {Machine}.", plan.Id, step.Id, model.Machine);
+                    string failure = $"Worker workspace unavailable: verification or sync failed on {model.Machine}: {exception.Message}";
+                    result = new StepCompletion(false, failure, failure);
+                }
+                finally
+                {
+                    model.Workspace?.Dispose();
+                }
+                long? verification = RecordCheck(plan, step, attempt, result, model.ModelNode);
+                RoundOutcome outcome = await RecordRoundClassifiedAsync(plan, step, attempt, model,
+                    result.Output ?? result.Message, result.Done, await ChangedFilesSinceAsync(plan, model.WorkBefore, cancellationToken),
+                    rung, round);
+                if (result.Done)
+                {
+                    _tools.CommitStepDone(plan.Id, step.Id, Summarize(model.Summary));
+                    _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.CheckPassed, tier,
+                        node: model.ModelNode ?? model.Machine,
+                        detail: isFinalValidation ? $"Final validation passed: `{step.Verify}`." : $"`{step.Verify}` passed.",
+                        modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round);
+                    if (isFinalValidation)
+                    {
+                        _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.FinalValidationPassed, tier,
+                            node: model.ModelNode ?? model.Machine, detail: $"`{step.Verify}` passed on the final synced checkout.",
+                            modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round);
+                    }
+                    _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.StepDone, tier, detail: JoinNotes(StrayDetail(plan, step), result.Restored));
+                    RecordStepDone(plan, step, verification, model.ModelNode ?? model.Machine);
+                    return true;
+                }
+
+                lastFailure = WithStrayNote(plan, step, result.Output ?? result.Message);
+                if (EnvironmentBlockReason(lastFailure) is { } environmentReason)
+                {
+                    if (IsToolchainEnvironmentIssue(environmentReason))
                     {
                         (string? alternate, string detail) = await SelectRetryMachineAsync(plan, step, tier, cancellationToken);
                         if (alternate is not null)
@@ -715,8 +990,6 @@ internal sealed partial class PlanRunner
                             workspaceOverride = alternate;
                             if (step.Machine is not null)
                             {
-                                // A user-selected worker failed before the model could edit anything. Persist the
-                                // safe same-tier replacement so a later restart keeps using it.
                                 step = step with { Machine = alternate };
                                 _store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, step.Id,
                                     currentStep => currentStep with { Machine = alternate }));
@@ -724,188 +997,245 @@ internal sealed partial class PlanRunner
                             }
                             _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.RecoveryRouted, tier,
                                 node: null,
-                                detail: $"Worker staging failed before model tools or edits. {detail}",
-                                modelNode: null, workspaceNode: alternate);
-                            attempt--;
-                            continue;
-                        }
+                                detail: $"The worker check reported a missing or incompatible runtime. {detail}",
+                                modelNode: null, workspaceNode: alternate, rung: rung, round: round);
 
-                        _store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, step.Id, currentStep => currentStep with
-                        {
-                            Attempts = Math.Min(currentStep.Attempts, attempt - 1)
-                        }));
-                        int waitNumber = ++waits;
-                        TimeSpan delay = _transientDelay(waitNumber - 1);
-                        delay = DelayWithinRunDeadline(plan, delay);
-                        _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.Waiting, tier, node: model.Machine,
-                            detail: $"Worker staging failed before model tools or edits ({Summarize(workspaceFailure)}). {detail} Waiting {Duration(delay)} (wait {waitNumber}) before retrying; this does not count as a model attempt.",
-                            modelNode: null, workspaceNode: model.Machine);
-                        await DelayBeforeRetryAsync(delay, cancellationToken);
-                        attempt--;
-                        continue;
-                    }
-
-                    BlockForEnvironment(plan, step, attempt, tier, model.Machine, workspaceFailure,
-                        "the selected worker workspace is not configured or could not be staged", deferPlanBlock);
-                    return false;
-                }
-
-                if (roundClass == FailureClass.Environment)
-                {
-                    BlockForEnvironment(plan, step, attempt, tier, model.ModelNode, model.Failure ?? "The model route failed with an environment error.",
-                        "the selected model machine has a permission, security, or runtime problem", deferPlanBlock);
-                    return false;
-                }
-
-                if (roundClass is FailureClass.Infra or FailureClass.Unknown)
-                {
-                    lastFailure = model.Failure;
-                    int unknownFailures = CountClassifiedRounds(plan.Id, step.Id, FailureClass.Unknown);
-                    if (roundClass == FailureClass.Unknown && unknownFailures >= 5)
-                    {
-                        BlockForUnknown(plan, step, attempt, model.FailureException, model.Failure, deferPlanBlock);
-                        return false;
-                    }
-
-                    if (roundClass == FailureClass.Infra)
-                    {
-                        string? route = await RouteFailedModelAsync(plan, step, tier, model.ModelNode, model.Machine,
-                            attempt, cancellationToken);
-                        if (route is not null)
-                        {
-                            modelOverride = route;
-                            attempt--;
+                            // The conversation so far was held on a machine whose toolchain cannot run the check: start
+                            // a new one on the replacement, with what was tried. The round is in the log, so it counts.
+                            roundsInRung++;
+                            roundsTotal++;
+                            session = null;
+                            conversationOver = true;
                             continue;
                         }
                     }
 
-                    _store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, step.Id, currentStep => currentStep with
+                    BlockForEnvironment(plan, step, attempt, tier, model.ModelNode, lastFailure, environmentReason, deferPlanBlock);
+                    return false;
+                }
+
+                _store.AddEvent(plan.Id, step.Id, attempt,
+                    step.Id == plan.Steps.Max(candidate => candidate.Id) ? RunEventKind.FinalValidationFailed : RunEventKind.CheckFailed,
+                    tier, node: model.ModelNode ?? model.Machine, detail: lastFailure,
+                    modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round);
+                plan = _store.Get(plan.Id)!;
+
+                lastRound = outcome;
+                roundsInRung++;
+                roundsTotal++;
+                RepairDecision decision = RepairLadder.Decide(rung, roundsInRung, _roundsPerRung, outcome.NoChange,
+                    outcome.NoOp ? "the last round made no edit and changed no file" : "the last round left the same failures and changed no file",
+                    HubRungAvailable(step, hub, hubAllowed, model.ModelNode));
+                if (decision.Move != RepairMove.NextRound)
+                {
+                    (rung, roundsInRung, modelOverride, conversationOver, gaveUp, handover) = await MoveAsync(
+                        plan, step, decision, rung, attempt, tier, model, modelOverride, workspaceOverride, hub, hubAllowed, cancellationToken);
+                    if (conversationOver)
                     {
-                        Attempts = Math.Min(currentStep.Attempts, attempt - 1)
-                    }));
-                    if (roundClass == FailureClass.Unknown)
-                    {
-                        TimeSpan delay = DelayWithinRunDeadline(plan, TimeSpan.FromSeconds(20 * unknownFailures));
-                        string failedNode = model.ModelNode ?? "the selected model machine";
-                        _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.Waiting, tier, node: model.ModelNode,
-                            detail: $"Unknown failure on {failedNode}: {Summarize(model.Failure ?? "unknown failure")}. Waiting at least {Duration(delay)} (unknown failure {unknownFailures} of 5) before retrying; this does not count as an attempt.",
-                            modelNode: model.ModelNode, workspaceNode: model.Machine);
-                        await DelayBeforeRetryAsync(delay, cancellationToken);
-                        attempt--;
-                        continue;
-                    }
-
-                    (modelOverride, waits) = await WaitForInfrastructureRecoveryAsync(plan, step, tier,
-                        model.ModelNode, model.Machine, attempt, model.Failure, waits, cancellationToken);
-                    attempt--;
-                    continue;
-                }
-
-                lastFailure = model.Failure;
-                continue;
-            }
-
-            StepCompletion result;
-            bool isFinalValidation = step.Id == plan.Steps.Max(candidate => candidate.Id);
-            try
-            {
-                using IDisposable? workerScope = model.Workspace?.Enter();
-                if (isFinalValidation)
-                {
-                    string snapshot = model.Workspace?.SnapshotId() ?? "unavailable";
-                    _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.FinalValidationStarted, tier,
-                        node: ViaNode(model.Summary), detail: $"Runner is executing the approved final check: `{step.Verify}` on source snapshot `{snapshot}`.",
-                        modelNode: model.ModelNode, workspaceNode: model.Machine);
-                }
-
-                result = await _tools.TryCompleteStepAsync(
-                    plan.Id, step.Id, Summarize(model.Summary), cancellationToken, FilesToCreate(plan, step), deferCommit: true);
-                if (model.Workspace is not null)
-                {
-                    await model.Workspace.SyncToHubAsync(cancellationToken);
-                    _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.WorkspaceSynced, tier, model.Machine,
-                        "Synced the worker project after verification; the checked changes are now in the hub checkout.",
-                        modelNode: model.ModelNode, workspaceNode: model.Machine);
-                }
-            }
-            catch (Exception exception) when (exception is not OperationCanceledException && model.Workspace is not null)
-            {
-                _logger.LogError(exception, "Worker verification or sync failed for plan {PlanId} step {StepId} on {Machine}.", plan.Id, step.Id, model.Machine);
-                string failure = $"Worker workspace unavailable: verification or sync failed on {model.Machine}: {exception.Message}";
-                result = new StepCompletion(false, failure, failure);
-            }
-            finally
-            {
-                model.Workspace?.Dispose();
-            }
-            long? verification = RecordCheck(plan, step, attempt, result, model.ModelNode);
-            await RecordRoundClassifiedAsync(plan, step, attempt, model,
-                result.Output ?? result.Message, result.Done, await ChangedFilesSinceAsync(plan, model.WorkBefore, cancellationToken));
-            if (result.Done)
-            {
-                _tools.CommitStepDone(plan.Id, step.Id, Summarize(model.Summary));
-                _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.CheckPassed, tier,
-                    node: model.ModelNode ?? model.Machine,
-                    detail: isFinalValidation ? $"Final validation passed: `{step.Verify}`." : $"`{step.Verify}` passed.",
-                    modelNode: model.ModelNode, workspaceNode: model.Machine);
-                if (isFinalValidation)
-                {
-                    _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.FinalValidationPassed, tier,
-                        node: model.ModelNode ?? model.Machine, detail: $"`{step.Verify}` passed on the final synced checkout.",
-                        modelNode: model.ModelNode, workspaceNode: model.Machine);
-                }
-                _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.StepDone, tier, detail: JoinNotes(StrayDetail(plan, step), result.Restored));
-                RecordStepDone(plan, step, verification, model.ModelNode ?? model.Machine);
-                return true;
-            }
-
-            lastFailure = WithStrayNote(plan, step, result.Output ?? result.Message);
-            if (EnvironmentBlockReason(lastFailure) is { } environmentReason)
-            {
-                if (IsToolchainEnvironmentIssue(environmentReason))
-                {
-                    (string? alternate, string detail) = await SelectRetryMachineAsync(plan, step, tier, cancellationToken);
-                    if (alternate is not null)
-                    {
-                        workspaceOverride = alternate;
-                        if (step.Machine is not null)
-                        {
-                            step = step with { Machine = alternate };
-                            _store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, step.Id,
-                                currentStep => currentStep with { Machine = alternate }));
-                            plan = _store.Get(plan.Id)!;
-                        }
-                        _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.RecoveryRouted, tier,
-                            node: null,
-                            detail: $"The worker check reported a missing or incompatible runtime. {detail}",
-                            modelNode: null, workspaceNode: alternate);
-                        continue;
+                        session = null;
                     }
                 }
-
-                BlockForEnvironment(plan, step, attempt, tier, model.ModelNode, lastFailure, environmentReason, deferPlanBlock);
-                return false;
             }
 
-            _store.AddEvent(plan.Id, step.Id, attempt,
-                step.Id == plan.Steps.Max(candidate => candidate.Id) ? RunEventKind.FinalValidationFailed : RunEventKind.CheckFailed,
-                tier, node: model.ModelNode ?? model.Machine, detail: lastFailure,
-                modelNode: model.ModelNode, workspaceNode: model.Machine);
-            plan = _store.Get(plan.Id)!;
+            if (gaveUp)
+            {
+                break;
+            }
         }
 
+        int attemptsUsed = _store.Get(plan.Id)?.Steps.FirstOrDefault(candidate => candidate.Id == step.Id)?.Attempts ?? 0;
+        string rounds = $"{roundsTotal} round{(roundsTotal == 1 ? string.Empty : "s")} over {attemptsUsed} attempt{(attemptsUsed == 1 ? string.Empty : "s")}";
         _store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, step.Id, s => s with
         {
             Status = StepStatus.Failed,
-            Note = $"Did not pass its check after {MaxAttemptsPerStep} attempts."
+            Note = $"Did not pass its check after {rounds}."
         }) with { Status = deferPlanBlock ? PlanStatus.Running : PlanStatus.Blocked });
         if (!deferPlanBlock)
         {
-            AddBlockedEvent(plan.Id, step);
+            AddBlockedEvent(plan.Id, step,
+                $"Step {step.Id} ({step.Title}) did not pass its check after {rounds}: every rung of the repair ladder had its rounds.");
         }
 
         return false;
     }
+
+    // The attempt was counted when its model call began. A first message that failed before any verdict never started a
+    // conversation, so the attempt is given back; a later round of a conversation that did start keeps its attempt.
+    private void GiveBackAttempt(string planId, int stepId, int attempt, IStepSession session)
+    {
+        if (session.HasHistory)
+        {
+            return;
+        }
+
+        _store.Update(planId, current => FleetPlanStoreSteps.With(current, stepId, currentStep => currentStep with
+        {
+            Attempts = Math.Min(currentStep.Attempts, attempt - 1)
+        }));
+    }
+
+    private PlanRunEvent[] StepEventsSinceRetry(string planId, int stepId)
+    {
+        PlanRunEvent[] events = (_store.Get(planId)?.Events ?? []).ToArray();
+        int retryBoundary = Array.FindLastIndex(events, runEvent => runEvent.Kind == RunEventKind.RetryApproved);
+        return events.Skip(retryBoundary + 1).Where(runEvent => runEvent.StepId == stepId).ToArray();
+    }
+
+    // The hub rung needs a plan that allows the hub, a hub that is not already the model, and a conversation to continue.
+    private bool HubRungAvailable(PlanStep step, string? hub, bool hubAllowed, string? modelNode)
+    {
+        if (!hubAllowed || hub is null)
+        {
+            return false;
+        }
+
+        if (string.Equals(modelNode, hub, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        // Without routing information the tier tells: a heavy step on the hub's own tier already runs there.
+        return modelNode is not null ||
+               !string.Equals(_fleetOptions?.Nodes.SingleOrDefault(node => node.Fallback)?.Tier, step.Tier, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async Task<bool> HubReadyAsync(string hub, CancellationToken cancellationToken)
+    {
+        if (_healthMonitor is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            return (await _healthMonitor.GetNodeAsync(hub, cancellationToken, forceProbe: true, forceInferenceProbe: true)).Ready;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Could not check hub model {Machine} before climbing the repair ladder.", hub);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Acts on a ladder decision that is not "another round": climbs to rung 2 (the same conversation on the hub) or rung 3
+    /// (a fresh conversation), or gives up. The hub is only used when its inference answers right now; otherwise rung 3
+    /// is a fresh conversation on the workers, and the reason says so.
+    /// </summary>
+    private async Task<(int Rung, int RoundsInRung, string? ModelOverride, bool ConversationOver, bool GaveUp, string? Handover)> MoveAsync(
+        PlanRecord plan,
+        PlanStep step,
+        RepairDecision decision,
+        int rung,
+        int attempt,
+        string tier,
+        ModelAttemptResult model,
+        string? modelOverride,
+        string? workspaceOverride,
+        string? hub,
+        bool hubAllowed,
+        CancellationToken cancellationToken)
+    {
+        if (decision.Move == RepairMove.GiveUp)
+        {
+            return (rung, 0, modelOverride, true, true, null);
+        }
+
+        if (decision.Move == RepairMove.ContinueOnHub && !await HubReadyAsync(hub!, cancellationToken))
+        {
+            decision = new RepairDecision(RepairMove.FreshConversation, RepairLadder.FreshRung,
+                $"{decision.Why}; the hub did not answer a probe, so this stays on the workers");
+        }
+
+        string? newOverride = await ClimbAsync(plan, step, decision, rung, attempt, tier, modelOverride, workspaceOverride ?? model.Machine, model.ModelNode, hub, hubAllowed, cancellationToken);
+        string? handover = decision.Move == RepairMove.ContinueOnHub
+            ? "A more capable model (the hub) has taken over this conversation because the earlier rounds did not get the check passing. Find the root cause first, then fix it."
+            : null;
+        return (decision.ToRung, 0, newOverride, decision.Move == RepairMove.FreshConversation, false, handover);
+    }
+
+    // Writes the climb into the run log and returns the model machine the new rung uses.
+    private async Task<string?> ClimbAsync(
+        PlanRecord plan,
+        PlanStep step,
+        RepairDecision decision,
+        int fromRung,
+        int attempt,
+        string tier,
+        string? modelOverride,
+        string? workspace,
+        string? currentModel,
+        string? hub,
+        bool hubAllowed,
+        CancellationToken cancellationToken)
+    {
+        string? target = modelOverride;
+        if (decision.Move == RepairMove.ContinueOnHub)
+        {
+            target = hub;
+        }
+        else if (decision.Move == RepairMove.FreshConversation)
+        {
+            // Rung 3 uses the hub when the plan allows it and it answers; otherwise whatever machine routing gives.
+            bool onHub = string.Equals(modelOverride, hub, StringComparison.OrdinalIgnoreCase) && modelOverride is not null;
+            if (hubAllowed && hub is not null && (onHub || await HubReadyAsync(hub, cancellationToken)))
+            {
+                target = hub;
+            }
+            else if (onHub)
+            {
+                target = null;
+            }
+        }
+
+        string where = target ?? currentModel ?? "the machine routing picks";
+        string detail = $"Climbing from rung {fromRung} ({RepairLadder.Name(fromRung)}) to rung {decision.ToRung} ({RepairLadder.Name(decision.ToRung)}) on {where}: {decision.Why}.";
+        _logger.LogInformation("Plan {PlanId} step {StepId}: {Detail}", plan.Id, step.Id, detail);
+        _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.RungChanged, tier, node: target, detail: detail,
+            modelNode: target, workspaceNode: workspace, rung: decision.ToRung);
+        return target;
+    }
+
+    private string BuildRepairMessage(PlanRecord plan, PlanStep step, string? failure, int round, RoundOutcome? last, string? handover)
+    {
+        IReadOnlyList<string> current = last is not null
+            ? last.Signature.Items
+            : PlanFailure.FailureSignature(failure).Items;
+        IReadOnlyList<string> previous = last is null ? [] : RepairMessages.FailingNames(last.PreviousSignature);
+        return RepairMessages.Build(plan, step, failure ?? string.Empty, round, previous, current, last?.SameAsPrevious ?? false,
+            last is { FilesKnown: true } ? last.ChangedFiles : null, handover);
+    }
+
+    /// <summary>What one round did, as the repair ladder reads it.</summary>
+    private sealed record RoundOutcome(
+        FailureClass Class,
+        FailureFingerprint Signature,
+        string? PreviousSignature,
+        IReadOnlyList<string> ChangedFiles,
+        bool FilesKnown,
+        bool EditToolCalled)
+    {
+        public bool SameAsPrevious => PreviousSignature is not null && Signature.Size > 0 &&
+            string.Equals(PreviousSignature, Signature.Value, StringComparison.Ordinal);
+
+        // Where git could not tell, an edit tool call stands for "changed something".
+        public bool Changed => FilesKnown ? ChangedFiles.Count > 0 : EditToolCalled;
+
+        public bool NoOp => !EditToolCalled && !Changed;
+
+        public bool Stall => SameAsPrevious && !Changed;
+
+        public bool NoChange => NoOp || Stall;
+    }
+
+    /// <summary>The conversation a model call belongs to, and where on the repair ladder it is.</summary>
+    /// <param name="RepairMessage">The follow-up to send; null when the conversation has to be told the whole task.</param>
+    /// <param name="Brief">What the rounds before this conversation tried, for a fresh conversation after them.</param>
+    private sealed record RoundContext(IStepSession Session, int Rung, int Round, string? RepairMessage = null, string? Brief = null);
 
     private async Task<string?> ReconcileInterruptedWorkspaceAsync(PlanRecord plan, PlanStep step, CancellationToken cancellationToken)
     {
@@ -985,8 +1315,10 @@ internal sealed partial class PlanRunner
                 ShouldVerify: true, Machine: baseline.Machine, ModelNode: staged.ModelNode,
                 EditToolCalled: true);
             long? verification = RecordCheck(plan, step, attempt, check, staged.ModelNode);
+            // The recovered edits are a round of the step's current rung: a failed check counts against its budget.
+            RepairPosition position = RepairLadder.PositionFrom(StepEventsSinceRetry(plan.Id, step.Id));
             await RecordRoundClassifiedAsync(plan, step, attempt, recoveredAttempt,
-                check.Output ?? check.Message, check.Done, analysis.ChangedFiles.Count);
+                check.Output ?? check.Message, check.Done, analysis.ChangedFiles, position.Rung, position.RoundsInRung + 1);
             if (check.Done)
             {
                 _tools.CommitStepDone(plan.Id, step.Id, "Recovered worker edits.");
@@ -1034,15 +1366,18 @@ internal sealed partial class PlanRunner
         }
     }
 
-    private Task<FailureClass> RecordRoundClassifiedAsync(
+    private Task<RoundOutcome> RecordRoundClassifiedAsync(
         PlanRecord plan,
         PlanStep step,
         int attempt,
         ModelAttemptResult model,
         string failureOutput,
         bool passed,
-        int filesChanged)
+        IReadOnlyList<string> changedFiles,
+        int? rung = null,
+        int? round = null)
     {
+        int filesChanged = changedFiles.Count;
         PlanRecord current = _store.Get(plan.Id) ?? plan;
         FailureRound[] history = (current.Events ?? [])
             .Where(runEvent => runEvent.StepId == step.Id && runEvent.Kind == RunEventKind.RoundClassified &&
@@ -1057,28 +1392,43 @@ internal sealed partial class PlanRunner
                 ? FailureClass.Infra
                 : PlanFailure.Classify(model.FailureException, failureOutput, history, filesChanged, model.EditToolCalled);
         string failureClass = passed ? "Passed" : classification.ToString();
-        string detail = $"Round classified: {failureClass}; signature size: {signature.Size}; files changed: {filesChanged}; " +
+        string files = filesChanged == 0
+            ? "0"
+            : $"{filesChanged} ({string.Join(", ", changedFiles.Take(5))}{(filesChanged > 5 ? ", ..." : string.Empty)})";
+        string detail = $"Round classified: {failureClass}; signature size: {signature.Size}; files changed: {files}; " +
             $"tool calls: {model.ToolCalls}; edit tool called: {(model.EditToolCalled ? "yes" : "no")}.";
         _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.RoundClassified, step.Tier,
             node: model.ModelNode ?? model.Machine, detail: detail,
             modelNode: model.ModelNode, workspaceNode: model.Machine,
             failureClass: failureClass, failureSignature: signature.Value, failureSignatureSize: signature.Size,
-            filesChanged: filesChanged, toolCalls: model.ToolCalls, editToolCalled: model.EditToolCalled);
-        return Task.FromResult(classification);
+            filesChanged: filesChanged, toolCalls: model.ToolCalls, editToolCalled: model.EditToolCalled,
+            rung: rung, round: round, changedFiles: changedFiles);
+        string? previous = history.LastOrDefault(earlier => !string.IsNullOrWhiteSpace(earlier.Signature))?.Signature;
+        return Task.FromResult(new RoundOutcome(classification, signature, previous, changedFiles,
+            FilesKnown: model.WorkBefore is not null, model.EditToolCalled));
     }
 
-    private async Task<int> ChangedFilesSinceAsync(PlanRecord plan, PlanTools.WorkSnapshot? before, CancellationToken cancellationToken)
+    // The project files a model call changed, as paths inside the project: the files git sees as changed or new before
+    // the call against the same files after it. Empty when git could not tell (see PlanTools.SnapshotWorkAsync).
+    private async Task<IReadOnlyList<string>> ChangedFilesSinceAsync(PlanRecord plan, PlanTools.WorkSnapshot? before, CancellationToken cancellationToken)
     {
-        if (before is null) return 0;
-        PlanTools.WorkSnapshot? after = await _tools.SnapshotWorkAsync(_store.Get(plan.Id) ?? plan, cancellationToken);
-        if (after is null) return 0;
+        if (before is null) return [];
+        PlanRecord fresh = _store.Get(plan.Id) ?? plan;
+        PlanTools.WorkSnapshot? after = await _tools.SnapshotWorkAsync(fresh, cancellationToken);
+        if (after is null) return [];
 
         StringComparer comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
         string[] paths = before.Files.Keys.Concat(after.Files.Keys).Distinct(comparer).ToArray();
-        return paths.Count(path =>
-            !before.Files.TryGetValue(path, out byte[]? previous) ||
-            !after.Files.TryGetValue(path, out byte[]? current) ||
-            !previous.AsSpan().SequenceEqual(current));
+        return paths
+            .Where(path =>
+                !before.Files.TryGetValue(path, out byte[]? previous) ||
+                !after.Files.TryGetValue(path, out byte[]? current) ||
+                !previous.AsSpan().SequenceEqual(current))
+            .Select(path => string.IsNullOrWhiteSpace(fresh.WorkingDirectory)
+                ? path
+                : Path.GetRelativePath(fresh.WorkingDirectory, path).Replace('\\', '/'))
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
     }
 
     private int CountClassifiedRounds(string planId, int stepId, FailureClass failureClass)
@@ -1491,15 +1841,15 @@ internal sealed partial class PlanRunner
         ModelAttemptResult[] firstAttempts = await Task.WhenAll(steps.Select(step =>
             RunModelAttemptAsync(plan, step, 1, LastFailure(plan.Id, step.Id), step.Tier, parallelGroup: true, cancellationToken: cancellationToken)));
 
-        var retry = new List<(int StepId, string Failure, int FirstAttempt, string? ModelOverride, string? WorkspaceOverride)>();
+        var retry = new List<(int StepId, string Failure, int FirstAttempt, string? ModelOverride, string? WorkspaceOverride, IStepSession? Session)>();
         var failedSteps = new List<PlanStep>();
         foreach (ModelAttemptResult attempt in firstAttempts.OrderBy(result => result.StepId))
         {
             PlanStep step = steps.Single(candidate => candidate.Id == attempt.StepId);
             if (!attempt.ShouldVerify)
             {
-                FailureClass failureClass = await RecordRoundClassifiedAsync(plan, step, 1, attempt, attempt.Failure ?? string.Empty,
-                    passed: false, filesChanged: await ChangedFilesSinceAsync(plan, attempt.WorkBefore, cancellationToken));
+                FailureClass failureClass = (await RecordRoundClassifiedAsync(plan, step, 1, attempt, attempt.Failure ?? string.Empty,
+                    passed: false, await ChangedFilesSinceAsync(plan, attempt.WorkBefore, cancellationToken), RepairLadder.RequestedTierRung)).Class;
                 if (attempt.WorkspaceFailure is { } workspaceFailure)
                 {
                     if (!attempt.ReroutableWorkspaceFailure)
@@ -1523,7 +1873,7 @@ internal sealed partial class PlanRunner
                         }
                         _store.AddEvent(plan.Id, step.Id, 1, RunEventKind.RecoveryRouted, step.Tier,
                             detail: $"Worker staging failed before model tools or edits. {routeDetail}", workspaceNode: alternate);
-                        retry.Add((step.Id, workspaceFailure, 1, null, alternate));
+                        retry.Add((step.Id, workspaceFailure, 1, null, alternate, attempt.Session));
                     }
                     else
                     {
@@ -1533,7 +1883,7 @@ internal sealed partial class PlanRunner
                             detail: $"Worker staging failed before model tools or edits ({Summarize(workspaceFailure)}). Waiting {Duration(delay)} (wait {waitNumber}) before retrying; this does not count as an attempt.",
                             workspaceNode: attempt.Machine);
                         await DelayBeforeRetryAsync(delay, cancellationToken);
-                        retry.Add((step.Id, workspaceFailure, 1, null, null));
+                        retry.Add((step.Id, workspaceFailure, 1, null, null, attempt.Session));
                     }
                     continue;
                 }
@@ -1580,7 +1930,7 @@ internal sealed partial class PlanRunner
                         }
                     }
                 }
-                retry.Add((step.Id, attempt.Failure ?? "The model call did not complete.", noAttemptSpent ? 1 : 2, modelOverride, null));
+                retry.Add((step.Id, attempt.Failure ?? "The model call did not complete.", noAttemptSpent ? 1 : 2, modelOverride, null, attempt.Session));
                 continue;
             }
 
@@ -1588,7 +1938,7 @@ internal sealed partial class PlanRunner
                 plan.Id, step.Id, Summarize(attempt.Summary), cancellationToken, FilesToCreate(plan, step));
             long? verification = RecordCheck(plan, step, 1, check, ViaNode(attempt.Summary));
             await RecordRoundClassifiedAsync(plan, step, 1, attempt, check.Output ?? check.Message, check.Done,
-                await ChangedFilesSinceAsync(plan, attempt.WorkBefore, cancellationToken));
+                await ChangedFilesSinceAsync(plan, attempt.WorkBefore, cancellationToken), RepairLadder.RequestedTierRung, round: 1);
             if (check.Done)
             {
                 _store.AddEvent(plan.Id, step.Id, 1, RunEventKind.CheckPassed, step.Tier,
@@ -1606,20 +1956,22 @@ internal sealed partial class PlanRunner
                 }
                 else
                 {
-                    _store.AddEvent(plan.Id, step.Id, 1, RunEventKind.CheckFailed, step.Tier, detail: failure);
-                    retry.Add((step.Id, failure, 2, null, null));
+                    _store.AddEvent(plan.Id, step.Id, 1, RunEventKind.CheckFailed, step.Tier, detail: failure,
+                        rung: RepairLadder.RequestedTierRung, round: 1);
+                    // The conversation that made the first attempt carries on: it is told what the check said.
+                    retry.Add((step.Id, failure, attempt.Session is { HasHistory: true } ? 1 : 2, null, null, attempt.Session));
                 }
             }
         }
 
-        foreach ((int stepId, string failure, int firstAttempt, string? modelOverride, string? workspaceOverride) in retry.OrderBy(item => item.StepId))
+        foreach ((int stepId, string failure, int firstAttempt, string? modelOverride, string? workspaceOverride, IStepSession? session) in retry.OrderBy(item => item.StepId))
         {
             cancellationToken.ThrowIfCancellationRequested();
             PlanRecord current = _store.Get(plan.Id)!;
             PlanStep step = current.Steps.Single(candidate => candidate.Id == stepId);
             if (!await RunStepAsync(current, step, cancellationToken, firstAttempt,
                 previousFailure: failure, deferPlanBlock: true, initialModelOverride: modelOverride,
-                initialWorkspaceOverride: workspaceOverride))
+                initialWorkspaceOverride: workspaceOverride, continuingSession: session))
             {
                 failedSteps.Add(step);
             }
@@ -1649,14 +2001,20 @@ internal sealed partial class PlanRunner
         bool parallelGroup,
         CancellationToken cancellationToken,
         string? workspaceOverride = null,
-        string? modelMachineOverride = null)
+        string? modelMachineOverride = null,
+        RoundContext? round = null)
     {
+        // A model call belongs to a conversation. The first attempt of a parallel group opens its own.
+        RoundContext conversation = round ?? new RoundContext(_agent.OpenSession(), RepairLadder.RequestedTierRung, 1);
+        bool continuing = conversation.RepairMessage is not null;
         _logger.LogInformation(
-            "Plan {PlanId} step {StepId} ({Title}): attempt {Attempt} on the {Tier} tier{Parallel}.",
+            "Plan {PlanId} step {StepId} ({Title}): attempt {Attempt}, rung {Rung} round {Round} on the {Tier} tier{Parallel}.",
             plan.Id,
             step.Id,
             step.Title,
             attempt,
+            conversation.Rung,
+            conversation.Round,
             tier,
             parallelGroup ? " (parallel group)" : string.Empty);
 
@@ -1675,7 +2033,7 @@ internal sealed partial class PlanRunner
 
         string? machine = workspaceOverride ?? step.Machine;
         string? retryRoute = null;
-        if (machine is null && HasPriorAttempt(plan.Id, step.Id))
+        if (machine is null && !continuing && HasPriorAttempt(plan.Id, step.Id))
         {
             (machine, retryRoute) = await SelectRetryMachineAsync(plan, step, tier, cancellationToken);
         }
@@ -1688,32 +2046,27 @@ internal sealed partial class PlanRunner
             }
             catch (InvalidOperationException exception) when (exception.Message.StartsWith("Worker workspace unavailable:", StringComparison.OrdinalIgnoreCase))
             {
-                _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.AttemptStarted, tier, detail: exception.Message);
+                _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.AttemptStarted, tier, detail: exception.Message,
+                    rung: conversation.Rung, round: conversation.Round);
                 return new ModelAttemptResult(step.Id, string.Empty, exception.Message, ShouldVerify: false,
                     WorkspaceFailure: exception.Message,
-                    ReroutableWorkspaceFailure: IsWorkerSelectionTemporarilyUnavailable(exception.Message));
+                    ReroutableWorkspaceFailure: IsWorkerSelectionTemporarilyUnavailable(exception.Message),
+                    Session: conversation.Session);
             }
         }
 
-        string attemptDetail = retryRoute ?? (string.IsNullOrWhiteSpace(lastFailure)
-            ? string.Empty
-            : attempt > 1 ? "Retrying with the previous failure; the requested task tier is unchanged." : "Picking up after the stop, with the last failure.");
+        string attemptDetail = continuing
+            ? $"Round {conversation.Round}: the output of the failed check goes back into the same conversation."
+            : retryRoute ?? (string.IsNullOrWhiteSpace(lastFailure)
+                ? string.Empty
+                : attempt > 1 ? "Retrying with the previous failure; the requested task tier is unchanged." : "Picking up after the stop, with the last failure.");
         string? fallbackHub = _fleetOptions?.Nodes.SingleOrDefault(node => node.Fallback)?.Name;
-        bool hubRescue = modelMachineOverride is null && attempt > 1 && step.Machine is not null && fallbackHub is not null &&
-            PlanRecoveryScope.AllowsHubRescue(plan.RecoveryScope);
-        string? modelMachine = modelMachineOverride ?? (hubRescue
-            ? fallbackHub
-            : ModelMachineFor(_modeService?.Mode, step.Machine, machine, fallbackHub));
-        if (hubRescue)
-        {
-            retryRoute = $"The previous worker attempt failed. The hub model is taking this retry; file tools and checks run in the selected worker workspace on {machine}, and the requested {tier} tier is unchanged.";
-            attemptDetail = retryRoute;
-            _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.RecoveryRouted, tier,
-                node: modelMachine, detail: retryRoute, modelNode: modelMachine, workspaceNode: machine);
-        }
+
+        // Climbing to the hub is the decision of the repair ladder (see RunStepAsync), passed in as the model machine.
+        string? modelMachine = modelMachineOverride ?? ModelMachineFor(_modeService?.Mode, step.Machine, machine, fallbackHub);
 
         _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.AttemptStarted, tier, node: modelMachine, detail: attemptDetail,
-            modelNode: modelMachine, workspaceNode: machine);
+            modelNode: modelMachine, workspaceNode: machine, rung: conversation.Rung, round: conversation.Round);
 
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         using var attemptCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -1726,7 +2079,8 @@ internal sealed partial class PlanRunner
         {
             SnapshotFilesToCreate(plan, step);
             work = await _tools.SnapshotWorkAsync(plan, attemptCancellation.Token);
-            string fileContext = await LoadStepFileContextAsync(plan, step, attemptCancellation.Token);
+            // A follow-up message needs no file contents: the conversation has the task, and the files are one tool call away.
+            string fileContext = continuing ? string.Empty : await LoadStepFileContextAsync(plan, step, attemptCancellation.Token);
 
             if (_workerWorkspaces is not null)
             {
@@ -1754,21 +2108,24 @@ internal sealed partial class PlanRunner
             // Everything the step's model does (routing, tool calls, decisions it pins) is recorded in the
             // plan's context under this step's task, and the router hands it the durable context for it.
             string? contextId = ContextFor(plan.Id);
-            if (_recorder is not null && contextId is not null)
+            if (_recorder is not null && contextId is not null && !continuing)
             {
                 _recorder.AttemptStarted(contextId, plan, step, attempt, tier);
             }
 
+            string runId = continuing ? $"{plan.Id}:{step.Id}:{attempt}:{conversation.Round}" : $"{plan.Id}:{step.Id}:{attempt}";
             using IDisposable? scope = _journal is not null && contextId is not null
-                ? _journal.Push(new FleetRequestIdentity(contextId, $"{plan.Id}:{step.Id}:{attempt}", "plan-runner", FleetPlanContext.StepTaskId(plan.Id, step.Id)))
+                ? _journal.Push(new FleetRequestIdentity(contextId, runId, "plan-runner", FleetPlanContext.StepTaskId(plan.Id, step.Id)))
                 : null;
             StepAgentReply reply;
             using (IDisposable? workerScope = worker?.Enter())
             {
-                reply = await _agent.RunStepAsync(
+                reply = await conversation.Session.SendAsync(
+                    conversation.RepairMessage ??
                     BuildPrompt(plan, step, attempt, lastFailure, fileContext, parallelGroup,
                         durableContext: contextId is not null, retryRoute: retryRoute,
-                        workerWorkspace: worker is not null, workerMachine: machine, workerPlatform: worker?.Platform),
+                        workerWorkspace: worker is not null, workerMachine: machine, workerPlatform: worker?.Platform,
+                        brief: conversation.Brief),
                     tier,
                     modelMachine,
                     attemptCancellation.Token);
@@ -1777,7 +2134,7 @@ internal sealed partial class PlanRunner
 
             _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.AttemptEnded, tier, modelMachine ?? ViaNode(summary) ?? _journal?.ActualNode,
                 $"Model finished after {(int)stopwatch.Elapsed.TotalSeconds} s: {Summarize(summary)}",
-                modelNode: modelMachine ?? ViaNode(summary), workspaceNode: machine);
+                modelNode: modelMachine ?? ViaNode(summary), workspaceNode: machine, rung: conversation.Rung, round: conversation.Round);
             result = new ModelAttemptResult(step.Id, summary, null, ShouldVerify: true, Workspace: worker, Machine: machine,
                 ModelNode: modelMachine ?? ViaNode(summary) ?? _journal?.ActualNode, ToolCalls: reply.ToolCalls,
                 EditToolCalled: reply.EditToolCalled, WorkBefore: work);
@@ -1788,9 +2145,9 @@ internal sealed partial class PlanRunner
             _logger.LogWarning("Plan {PlanId} step {StepId} attempt {Attempt} timed out.", plan.Id, step.Id, attempt);
             string failure = $"The attempt ran out of time after {_attemptTimeout.TotalMinutes:0} minutes.";
             _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.TimedOut, tier, modelMachine ?? _journal?.ActualNode, failure,
-                modelNode: modelMachine, workspaceNode: machine);
+                modelNode: modelMachine, workspaceNode: machine, rung: conversation.Rung, round: conversation.Round);
             result = new ModelAttemptResult(step.Id, string.Empty, failure, ShouldVerify: true, Workspace: worker, Machine: machine,
-                ModelNode: modelMachine ?? _journal?.ActualNode);
+                ModelNode: modelMachine ?? _journal?.ActualNode, WorkBefore: work);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -1810,7 +2167,8 @@ internal sealed partial class PlanRunner
             _store.AddEvent(plan.Id, step.Id, attempt,
                 workspaceUnavailable ? RunEventKind.WorkspaceFailed : RunEventKind.ModelFailed,
                 tier, workspaceUnavailable ? machine : _journal?.ActualNode, failure,
-                modelNode: modelMachine ?? _journal?.ActualNode, workspaceNode: machine);
+                modelNode: modelMachine ?? _journal?.ActualNode, workspaceNode: machine,
+                rung: conversation.Rung, round: conversation.Round);
             string? workspaceFailure = workspaceUnavailable ? failure : null;
             result = new ModelAttemptResult(step.Id, string.Empty, failure, ShouldVerify: false, Transient: IsTransient(exception),
                 WorkspaceFailure: workspaceFailure, Machine: machine, ModelNode: modelMachine ?? _journal?.ActualNode,
@@ -1862,7 +2220,7 @@ internal sealed partial class PlanRunner
             }
         }
 
-        return result;
+        return result with { Session = conversation.Session };
     }
 
     /// <summary>
@@ -2006,7 +2364,30 @@ internal sealed partial class PlanRunner
         int ToolCalls = 0,
         bool EditToolCalled = false,
         PlanTools.WorkSnapshot? WorkBefore = null,
-        Exception? FailureException = null);
+        Exception? FailureException = null,
+        IStepSession? Session = null);
+
+    /// <summary>
+    /// What is worth saying again to a model whose step failed, from the step and the failure: used by the first prompt of
+    /// a fresh conversation and by every follow-up message of a round.
+    /// </summary>
+    internal static IEnumerable<string> RetryHints(PlanStep step, string failure)
+    {
+        // Measured: the hub's own test built "10:00 New York" as 10:00 UTC and expected "open"; two retries changed
+        // the code, which was right, and never the test.
+        if (step.Files.Any(file => file.Contains("test", StringComparison.OrdinalIgnoreCase) || file.Contains("spec", StringComparison.OrdinalIgnoreCase)))
+        {
+            yield return "This step writes its own test, so the test can be the mistake: for each failing test, compare what it " +
+                "sets up and expects with this step's instructions before you change the code.";
+        }
+
+        if (failure.Contains("timeout", StringComparison.OrdinalIgnoreCase) ||
+            failure.Contains("ran out of time", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return "A command that never finishes usually means something keeps the process alive: a timer (setInterval), " +
+                "an open server or socket, a background thread, a watch mode. Find and remove or release that.";
+        }
+    }
 
     internal static string BuildPrompt(
         PlanRecord plan,
@@ -2019,7 +2400,8 @@ internal sealed partial class PlanRunner
         string? retryRoute = null,
         bool workerWorkspace = false,
         string? workerMachine = null,
-        string? workerPlatform = null)
+        string? workerPlatform = null,
+        string? brief = null)
     {
         var text = new StringBuilder();
         text.AppendLine(workerWorkspace
@@ -2102,20 +2484,16 @@ internal sealed partial class PlanRunner
             text.AppendLine(lastFailure);
             text.AppendLine("Look at what is already on disk (read_file, list_directory) and fix the cause instead of starting over. " +
                 "The cause can be in a file an earlier step wrote: if the output points there, fix that file too.");
+            foreach (string hint in RetryHints(step, lastFailure))
+            {
+                text.AppendLine(hint);
+            }
+        }
 
-            // Measured: the hub's own test built "10:00 New York" as 10:00 UTC and expected "open"; two retries changed
-            // the code, which was right, and never the test.
-            if (step.Files.Any(file => file.Contains("test", StringComparison.OrdinalIgnoreCase) || file.Contains("spec", StringComparison.OrdinalIgnoreCase)))
-            {
-                text.AppendLine("This step writes its own test, so the test can be the mistake: for each failing test, compare what it " +
-                    "sets up and expects with this step's instructions before you change the code.");
-            }
-            if (lastFailure.Contains("timeout", StringComparison.OrdinalIgnoreCase) ||
-                lastFailure.Contains("ran out of time", StringComparison.OrdinalIgnoreCase))
-            {
-                text.AppendLine("A command that never finishes usually means something keeps the process alive: a timer (setInterval), " +
-                    "an open server or socket, a background thread, a watch mode. Find and remove or release that.");
-            }
+        if (!string.IsNullOrWhiteSpace(brief))
+        {
+            text.AppendLine();
+            text.Append(brief);
         }
 
         if (durableContext)

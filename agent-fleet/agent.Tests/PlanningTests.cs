@@ -187,6 +187,20 @@ public sealed class PlanToolsTests : PlanTestBase
     }
 
     [Fact]
+    public async Task A_proposed_plan_offers_the_hub_the_steps_its_workers_cannot_fix_and_the_user_can_still_choose_worker_only_at_approval()
+    {
+        await Tools(Pass).ProposePlanAsync("T", "G", @"C:\p", Items("a"), null, Items("r"), null, Steps(Step("x")), default);
+        PlanRecord proposed = Store.Get(Assert.Single(Store.List()).Id)!;
+
+        // The ladder follows the plan's scope, whatever the fleet mode: unattended runs escalate unless told not to.
+        Assert.Equal(PlanRecoveryScope.AllowHubRescue, proposed.RecoveryScope);
+        Assert.Equal(PlanRecoveryScope.AllowHubRescue, Store.Approve(proposed.Id)!.RecoveryScope);
+
+        PlanRecord other = NewPlan();
+        Assert.Equal(PlanRecoveryScope.WorkerOnly, Store.Approve(other.Id, recoveryScope: PlanRecoveryScope.WorkerOnly)!.RecoveryScope);
+    }
+
+    [Fact]
     public async Task A_plan_without_steps_is_refused()
     {
         string reply = await Tools(Pass).ProposePlanAsync("T", "G", null, null, null, null, null, Steps(), default);

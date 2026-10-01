@@ -26,7 +26,6 @@ internal sealed partial class PlanTools
     private readonly FleetContextJournal? _journal;
     private readonly Func<string, bool>? _programExists;
     private readonly bool _workerWorkspacesEnabled;
-    private readonly FleetModeService? _modeService;
     private readonly ConcurrentDictionary<string, int> _diagramAttempts = new(StringComparer.Ordinal);
 
     /// <param name="programExists">Whether a check's program is installed; defaults to looking on PATH (a seam for tests).</param>
@@ -36,12 +35,10 @@ internal sealed partial class PlanTools
         Func<string, string?, CancellationToken, Task<string>> runCommand,
         FleetContextJournal? journal = null,
         Func<string, bool>? programExists = null,
-        bool workerWorkspacesEnabled = false,
-        FleetModeService? modeService = null)
+        bool workerWorkspacesEnabled = false)
     {
         _programExists = programExists;
         _workerWorkspacesEnabled = workerWorkspacesEnabled;
-        _modeService = modeService;
         _store = store;
         _validator = validator;
         _runCommand = runCommand;
@@ -134,9 +131,10 @@ internal sealed partial class PlanTools
                 diagramCode,
                 diagramNote,
                 stepInputs,
-                _modeService?.Mode == FleetMode.Aggressive
-                    ? PlanRecoveryScope.AllowHubRescue
-                    : PlanRecoveryScope.WorkerOnly);
+                // Escalation to the hub follows the plan's scope, not the fleet mode (see RepairLadder): a plan runs
+                // unattended, so a step its worker cannot fix is offered to the hub unless the user keeps the plan on
+                // its workers at approval, where the choice is shown.
+                PlanRecoveryScope.AllowHubRescue);
         }
         catch (ArgumentException exception)
         {
