@@ -98,7 +98,9 @@ recorded file, or deleted it, the next agent is told before it relies on it, and
 A step that names a file it is meant to create is not done until that file exists, even if its check passes. (A check such
 as `node --test` passes when there are no tests at all.)
 
-If the backend restarts while a plan is running, the plan resumes in the same context with its handoff intact.
+If the backend restarts while a plan is running, the plan keeps its context and its handoff. It carries on by itself only
+when the interrupted step was marked safe to replay and ran on the hub; otherwise it waits for you to approve it (see
+[planning.md](planning.md)).
 
 ## Continuing a conversation somewhere else
 

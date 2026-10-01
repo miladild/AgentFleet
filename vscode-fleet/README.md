@@ -78,7 +78,8 @@ kind of machine does each, any diagram), followed by buttons:
 - **Stop** halts a running plan. The plan card also shows the plan's status.
 
 You can close VS Code once a plan is approved. The backend keeps running it,
-spreading the steps over your machines by tier, and carries on after a restart.
+spreading the steps over your machines by tier, and keeps its place after a restart (it
+waits for your approval if a step was interrupted in a worker workspace).
 `@fleet /status` shows the current plan's report in the chat (steps, attempts,
 which machine did what, the files changed) with **Stop it**, or **Approve and
 resume** when it is blocked. The web UI's **Plans** button shows the same.
