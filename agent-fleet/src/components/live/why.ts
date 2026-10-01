@@ -1,4 +1,4 @@
-import type { PlanRunEvent, PlanStep } from "../PlanCard";
+import type { PlanStep } from "../PlanCard";
 import type { LivePlan } from "./useLiveFeed";
 
 /** Why a step failed, in a few words, and what the user can do about it. */
@@ -16,6 +16,18 @@ export function failureLine(detail: string): string {
 
 export function explain(detail: string | null | undefined, step: PlanStep | null): Why {
   const text = detail ?? "";
+  if (/^Environment issue:/im.test(text)) {
+    const cause = text.split("\n", 1)[0].replace(/^Environment issue:\s*/i, "").trim();
+    return {
+      short: `environment issue: ${cause}`,
+      hint:
+        "Fleet stopped retries because the selected worker cannot run or verify this step. Check that its limited SSH workspace account, pinned host key, platform and project toolchain are configured in Config > Machines, then retry the step.",
+    };
+  }
+  if (/plan reached its run deadline/i.test(text)) {
+    return { short: "run deadline reached", hint: "The plan stopped with its changes preserved. Review the run log, then approve it to continue with a fresh eight-hour window." };
+  }
+
   const missing = text.match(/still do not exist: (.+?)\.?$/m);
   if (missing) {
     return {
@@ -47,8 +59,8 @@ export function explain(detail: string | null | undefined, step: PlanStep | null
   return {
     short: line ? `check failed: ${line}` : "its check failed",
     hint:
-      "Three attempts did not pass the check, the later ones on the strongest machine. Read the output in the step's panel, " +
-      "then retry (three fresh attempts) or skip the step.",
+      "Three attempts did not pass the check. Read the output, choose another ready machine in the step panel if useful, " +
+      "then retry or skip the step.",
   };
 }
 
@@ -58,18 +70,10 @@ export function stepFailures(plan: LivePlan): Map<number, Why> {
   for (const event of plan.events ?? []) {
     if (event.stepId === null) continue;
     const step = plan.steps.find((candidate) => candidate.id === event.stepId) ?? null;
-    if (event.kind === "check-failed" || (event.kind === "plan-blocked" && /does not exit/.test(event.detail))) {
+    if (event.kind === "check-failed" || event.kind === "final-validation-failed" || event.kind === "run-deadline-exceeded" ||
+        (event.kind === "plan-blocked" && /does not exit/.test(event.detail))) {
       byStep.set(event.stepId, explain(event.detail, step));
     }
-  }
-  return byStep;
-}
-
-/** The tier each step's latest attempt ran on: retries go to the heavy tier. */
-export function stepTiers(events: PlanRunEvent[] | null | undefined): Map<number, string> {
-  const byStep = new Map<number, string>();
-  for (const event of events ?? []) {
-    if (event.kind === "attempt-started" && event.stepId !== null && event.tier) byStep.set(event.stepId, event.tier);
   }
   return byStep;
 }
@@ -80,7 +84,9 @@ export function stepTiers(events: PlanRunEvent[] | null | undefined): Map<number
  */
 export function withRunAttempts(plan: LivePlan): LivePlan {
   const latest = new Map<number, number>();
-  for (const event of plan.events ?? []) {
+  const events = plan.events ?? [];
+  const boundary = events.findLastIndex((event) => event.kind === "run-started" || event.kind === "resumed" || event.kind === "retry-approved");
+  for (const event of events.slice(boundary + 1)) {
     if (event.kind === "attempt-started" && event.stepId !== null && event.attempt) latest.set(event.stepId, event.attempt);
   }
   if (latest.size === 0) return plan;
@@ -123,7 +129,8 @@ export function blockOf(plan: LivePlan): Block | null {
     .slice(Math.max(0, since))
     .filter((event) => event.kind === "attempt-started" && event.stepId === step?.id && event.tier)
     .map((event) => event.tier as string);
-  const failure = [...events].reverse().find((event) => event.stepId === step?.id && event.kind === "check-failed");
+  const failure = [...events].reverse().find((event) => event.stepId === step?.id &&
+    (event.kind === "check-failed" || event.kind === "final-validation-failed" || event.kind === "run-deadline-exceeded"));
   const endless = last && /does not exit on its own/.test(last.detail) ? last.detail : null;
   return { step, stopped, why: explain(endless ?? failure?.detail ?? last?.detail, step), tiers };
 }

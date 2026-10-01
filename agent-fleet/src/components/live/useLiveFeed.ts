@@ -16,7 +16,7 @@ export type LiveEvent = {
   target?: string;
 };
 
-export type LiveNode = { name: string; model: string; ready: boolean };
+export type LiveNode = { name: string; model: string; tier?: string | null; ready: boolean; vision?: boolean; workspace?: boolean };
 
 export type LivePlan = Plan & { approvedUtc?: string | null; createdUtc?: string | null };
 
@@ -33,6 +33,7 @@ export type LogLine = {
 
 export type StepActivity = {
   node: string | null;
+  workspaceNode: string | null;
   lastAction: string | null;
   lastAt: number | null;
   toolCalls: number;
@@ -46,7 +47,9 @@ const RUN_TONE: Record<string, LogLine["tone"]> = {
   "step-done": "good",
   "plan-done": "good",
   "check-failed": "bad",
+  "final-validation-failed": "bad",
   "model-failed": "bad",
+  "workspace-failed": "bad",
   "attempt-timed-out": "bad",
   "plan-blocked": "bad",
   "parallel-fallback": "warn",
@@ -57,15 +60,27 @@ const RUN_TONE: Record<string, LogLine["tone"]> = {
   "parallel-started": "accent",
   "run-started": "accent",
   resumed: "accent",
+  "machine-selected": "accent",
+  "recovery-routed": "warn",
+  "final-validation-started": "accent",
+  "final-validation-passed": "good",
+  "run-deadline-exceeded": "bad",
+  "run-lease-busy": "warn",
+  "retry-approved": "accent",
 };
 
 // A line of the run log in words: which attempt, on which tier, and the part of the detail that matters.
 function runText(event: PlanRunEvent): string {
   const firstLine = (event.detail ?? "").split("\n").find((line) => line.trim())?.trim() ?? "";
   const tail = (text: string) => (text ? ` · ${text.slice(0, 200)}` : "");
+  const route = [
+    (event.modelNode ?? event.node) ? `model ${(event.modelNode ?? event.node)}` : null,
+    event.workspaceNode ? `workspace ${event.workspaceNode}` : null,
+  ].filter(Boolean).join(" · ");
+  const routeText = route ? ` · ${route}` : "";
   switch (event.kind) {
     case "attempt-started":
-      return `attempt ${event.attempt ?? "?"} on ${event.tier ?? "?"}${tail(firstLine)}`;
+      return `attempt ${event.attempt ?? "?"} on ${event.tier ?? "?"}${routeText}${tail(firstLine)}`;
     case "attempt-ended":
       return `attempt ${event.attempt ?? "?"} ended${tail(firstLine)}`;
     case "check-failed":
@@ -73,7 +88,7 @@ function runText(event: PlanRunEvent): string {
     case "check-passed":
       return `✔ check passed${tail(firstLine)}`;
     default:
-      return `${event.kind.replace(/-/g, " ")}${tail(firstLine)}`;
+      return `${event.kind.replace(/-/g, " ")}${routeText}${tail(firstLine)}`;
   }
 }
 
@@ -125,6 +140,7 @@ export function useLiveFeed(planId: string) {
           setPlan(data.plan);
           setNodes(data.nodes ?? []);
           const fresh: LiveEvent[] = data.events ?? [];
+          after = Math.max(after, Number(data.nextAfter) || 0);
           if (fresh.length > 0) {
             after = Math.max(after, ...fresh.map((event) => event.id));
             setEvents((current) => {
@@ -164,7 +180,7 @@ export function useLiveFeed(planId: string) {
     const byStep = new Map<number, StepActivity>();
     for (const event of events) {
       if (event.step === null) continue;
-      const entry = byStep.get(event.step) ?? { node: null, lastAction: null, lastAt: null, toolCalls: 0 };
+      const entry = byStep.get(event.step) ?? { node: null, workspaceNode: null, lastAction: null, lastAt: null, toolCalls: 0 };
       if (event.kind === "route" && event.node) entry.node = event.node;
       if (event.kind === "tool-call") {
         entry.toolCalls += 1;
@@ -173,8 +189,15 @@ export function useLiveFeed(planId: string) {
       entry.lastAt = Date.parse(event.at);
       byStep.set(event.step, entry);
     }
+    for (const event of plan?.events ?? []) {
+      if (event.stepId === null) continue;
+      const entry = byStep.get(event.stepId) ?? { node: null, workspaceNode: null, lastAction: null, lastAt: null, toolCalls: 0 };
+      if (event.modelNode ?? event.node) entry.node = event.modelNode ?? event.node;
+      if (event.workspaceNode) entry.workspaceNode = event.workspaceNode;
+      byStep.set(event.stepId, entry);
+    }
     return byStep;
-  }, [events]);
+  }, [events, plan?.events]);
 
   const log = useMemo(() => {
     // Tool calls and results carry no machine in the record: they belong to the machine that took the step's latest
@@ -197,7 +220,7 @@ export function useLiveFeed(planId: string) {
         key: `p${index}`,
         at: Date.parse(event.atUtc),
         step: event.stepId,
-        node: event.node,
+        node: event.modelNode ?? event.node,
         kind: event.kind,
         text: runText(event),
         tone: RUN_TONE[event.kind] ?? "info",

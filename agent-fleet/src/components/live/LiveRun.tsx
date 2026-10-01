@@ -3,7 +3,7 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { PlanStep } from "../PlanCard";
 import { useLiveFeed, type LiveNode, type LivePlan, type LogLine, type StepActivity } from "./useLiveFeed";
-import { blockOf, stepFailures, stepTiers, withRunAttempts, type Why } from "./why";
+import { blockOf, stepFailures, withRunAttempts, type Why } from "./why";
 
 // ---------- colours and helpers ----------
 
@@ -36,13 +36,10 @@ const TIERS: Record<string, { bars: number; hint: string }> = {
 
 const NO_SIBLINGS: number[] = [];
 
-export function TierMeter({ tier, planned }: { tier: string; planned?: string }) {
+export function TierMeter({ tier }: { tier: string }) {
   const known = TIERS[tier] ?? { bars: 0, hint: tier };
-  // A retry runs on the heavy tier whatever the step was planned for: the arrow says it was raised.
-  const raised = planned && planned !== tier;
   return (
-    <span className={`tier ${tier}${raised ? " raised" : ""}`} title={raised ? `Planned as ${planned}; retried on ${tier}. ${known.hint}` : known.hint}>
-      {raised && <b>↑</b>}
+    <span className={`tier ${tier}`} title={known.hint}>
       {[1, 2, 3].map((bar) => (
         <i key={bar} className={bar <= known.bars ? "on" : ""} />
       ))}
@@ -313,8 +310,8 @@ const StepNode = memo(function StepNode({
   siblings,
   activity,
   color,
+  colorOf,
   failure,
-  tierNow,
   selected,
   burst,
   glitch,
@@ -325,8 +322,8 @@ const StepNode = memo(function StepNode({
   siblings: number[];
   activity: StepActivity | undefined;
   color: string;
+  colorOf: (name: string | null | undefined) => string;
   failure: Why | undefined;
-  tierNow: string | undefined;
   selected: boolean;
   burst: boolean;
   glitch: boolean;
@@ -364,7 +361,7 @@ const StepNode = memo(function StepNode({
     >
       <div className="head">
         <span className="num">#{step.id}</span>
-        <TierMeter tier={tierNow ?? step.tier} planned={step.tier} />
+        <TierMeter tier={step.tier} />
         {siblings.length > 0 && (
           <span
             className="with"
@@ -377,8 +374,11 @@ const StepNode = memo(function StepNode({
       </div>
       <div className="name">{step.title}</div>
       <div className="foot">
-        {node && (step.status === "running" || step.status === "done") && !skipped && (
-          <span className="live-chip" style={{ ["--m" as string]: color }}>{node}</span>
+        {node && (step.status === "running" || step.status === "done" || step.status === "failed") && !skipped && (
+          <span className="live-chip" title="Model route" style={{ ["--m" as string]: color }}>{node}</span>
+        )}
+        {activity?.workspaceNode && activity.workspaceNode !== node && (step.status === "running" || step.status === "done" || step.status === "failed") && !skipped && (
+          <span className="live-chip workspace" title="Worker workspace" style={{ ["--m" as string]: colorOf(activity.workspaceNode) }}>{activity.workspaceNode}</span>
         )}
         <span className="act" title={failure && step.status === "failed" ? `${failure.short}\n\n${failure.hint}` : footer}>
           {footer}
@@ -404,14 +404,12 @@ function Pipeline({
   onHover,
   reducedMotion,
   failures,
-  tiers,
 }: {
   steps: PlanStep[];
   stages: Stage[];
   activity: Map<number, StepActivity>;
   colorOf: (name: string | null | undefined) => string;
   failures: Map<number, Why>;
-  tiers: Map<number, string>;
   selected: number | null;
   onSelect: (id: number) => void;
   onHover: (id: number | null, element: HTMLElement | null) => void;
@@ -473,8 +471,8 @@ function Pipeline({
               siblings={siblingsOf.get(placed.step.id) ?? NO_SIBLINGS}
               activity={activity.get(placed.step.id)}
               color={colorOf(activity.get(placed.step.id)?.node)}
+              colorOf={colorOf}
               failure={failures.get(placed.step.id)}
-              tierNow={tiers.get(placed.step.id)}
               selected={selected === placed.step.id}
               burst={burst.has(placed.step.id)}
               glitch={glitch.has(placed.step.id)}
@@ -507,7 +505,7 @@ function Machines({
     const counts = new Map<string, number[]>();
     for (const line of log) {
       if (line.kind !== "tool-call" || line.step === null || now - line.at > 120_000) continue;
-      const node = activity.get(line.step)?.node;
+      const node = activity.get(line.step)?.workspaceNode ?? activity.get(line.step)?.node;
       if (!node) continue;
       const slots = counts.get(node) ?? new Array(12).fill(0);
       slots[Math.min(11, Math.floor((now - line.at) / 10_000))] += 1;
@@ -519,7 +517,8 @@ function Machines({
   return (
     <div className="live-machines">
       {nodes.map((node) => {
-        const working = steps.filter((step) => step.status === "running" && activity.get(step.id)?.node === node.name);
+        const working = steps.filter((step) => step.status === "running" &&
+          (activity.get(step.id)?.node === node.name || activity.get(step.id)?.workspaceNode === node.name));
         const slots = (bars.get(node.name) ?? new Array(12).fill(0)).slice().reverse();
         const peak = Math.max(1, ...slots);
         return (
@@ -538,7 +537,11 @@ function Machines({
               <small>{node.model}</small>
             </div>
             <div className="doing">
-              {!node.ready ? "not reachable" : working.length ? working.map((step) => `#${step.id} ${step.title}`).join(" · ") : "idle"}
+              {!node.ready ? "not reachable" : working.length ? working.map((step) => {
+                const route = activity.get(step.id);
+                const role = route?.node === node.name ? "model" : "workspace";
+                return `#${step.id} ${role}: ${step.title}`;
+              }).join(" · ") : "idle"}
             </div>
             <div className="live-bars" aria-hidden="true">
               {slots.map((count, index) => (
@@ -555,17 +558,17 @@ function Machines({
 function Inspector({
   plan,
   step,
+  nodes,
   activity,
   log,
   failure,
-  tierNow,
 }: {
   plan: LivePlan;
   step: PlanStep | null;
+  nodes: LiveNode[];
   activity: StepActivity | undefined;
   log: LogLine[];
   failure: Why | undefined;
-  tierNow: string | undefined;
 }) {
   if (!step) {
     return (
@@ -583,7 +586,8 @@ function Inspector({
       </div>
     );
   }
-  const lastCheck = [...(plan.events ?? [])].reverse().find((event) => event.stepId === step.id && (event.kind === "check-failed" || event.kind === "check-passed"));
+  const lastCheck = [...(plan.events ?? [])].reverse().find((event) => event.stepId === step.id &&
+    (event.kind === "check-failed" || event.kind === "check-passed" || event.kind === "final-validation-failed" || event.kind === "final-validation-passed"));
   const lines = log.filter((line) => line.step === step.id).slice(-12);
   return (
     <div className="live-inspector">
@@ -591,9 +595,11 @@ function Inspector({
         #{step.id} {step.title}
       </h3>
       <div>
-        <span className="live-glow-text">{step.status}</span> · <TierMeter tier={tierNow ?? step.tier} planned={step.tier} /> tier · {step.attempts} of 3 attempts
-        {activity?.node ? ` · on ${activity.node}` : ""} · {activity?.toolCalls ?? 0} tool calls
+        <span className="live-glow-text">{step.status}</span> · <TierMeter tier={step.tier} /> tier · {step.attempts} of 3 attempts
+        {activity?.node ? ` · model ${activity.node}` : ""}
+        {activity?.workspaceNode ? ` · workspace ${activity.workspaceNode}` : ""} · {activity?.toolCalls ?? 0} tool calls
       </div>
+      <MachineChoice plan={plan} step={step} nodes={nodes} />
       {step.status === "failed" && failure && (
         <>
           <div className="label">why it stopped</div>
@@ -617,7 +623,7 @@ function Inspector({
       )}
       {lastCheck && (
         <>
-          <div className="label">last check ({lastCheck.kind === "check-passed" ? "passed" : "failed"})</div>
+          <div className="label">{lastCheck.kind.startsWith("final-validation") ? "final validation" : "last check"} ({lastCheck.kind.endsWith("passed") ? "passed" : "failed"})</div>
           <pre>{lastCheck.detail || "(no output)"}</pre>
         </>
       )}
@@ -633,6 +639,81 @@ function Inspector({
   );
 }
 
+function canChangeMachine(plan: LivePlan, step: PlanStep): boolean {
+  if (plan.status === "awaiting-approval" && step.status === "pending") return true;
+  if (plan.status === "blocked" && step.status === "failed") {
+    return !hasRunningParallelPeer(plan, step);
+  }
+  if (step.status !== "pending" || !["approved", "running", "blocked"].includes(plan.status)) return false;
+
+  const index = plan.steps.findIndex((candidate) => candidate.id === step.id);
+  return index >= 0 && !hasRunningParallelPeer(plan, step) && plan.steps.slice(0, index).every((previous) =>
+      (step.parallelGroup && previous.parallelGroup === step.parallelGroup) || previous.status === "done",
+    );
+}
+
+function hasRunningParallelPeer(plan: LivePlan, step: PlanStep): boolean {
+  return Boolean(step.parallelGroup && plan.steps.some((candidate) =>
+    candidate.id !== step.id && candidate.parallelGroup === step.parallelGroup && candidate.status === "running",
+  ));
+}
+
+function MachineChoice({ plan, step, nodes }: { plan: LivePlan; step: PlanStep; nodes: LiveNode[] }) {
+  const [machine, setMachine] = useState(step.machine ?? "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const canChange = canChangeMachine(plan, step);
+  const textNodes = nodes.filter((node) => !node.vision && node.workspace && node.tier === step.tier);
+
+  useEffect(() => setMachine(step.machine ?? ""), [step.id, step.machine]);
+
+  async function choose(next: string) {
+    const previous = machine;
+    setMachine(next);
+    setSaving(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/plans/${plan.id}/machine`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ stepId: step.id, machine: next || null }),
+      });
+      if (!response.ok) {
+        const result = await response.json().catch(() => null);
+        throw new Error(result?.error ?? "Could not change this step's machine.");
+      }
+    } catch (caught) {
+      setMachine(previous);
+      setError(caught instanceof Error ? caught.message : "Could not change this step's machine.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="live-route-choice">
+      <label className="label" htmlFor={`step-machine-${step.id}`}>next attempt machine</label>
+      <select
+        id={`step-machine-${step.id}`}
+        aria-label={`Machine for step #${step.id}`}
+        value={machine}
+        disabled={!canChange || saving}
+        onChange={(event) => void choose(event.currentTarget.value)}
+      >
+        <option value="">Automatic ({step.tier} tier)</option>
+        {machine && !textNodes.some((node) => node.name === machine) && <option value={machine}>{machine} (not configured)</option>}
+        {textNodes.map((node) => (
+          <option key={node.name} value={node.name} disabled={!node.ready && node.name !== machine}>
+            {node.name} · {node.model}{node.ready ? "" : " (offline)"}
+          </option>
+        ))}
+      </select>
+      <small>{saving ? "saving…" : canChange ? `The task stays ${step.tier}; this only changes its machine.` : step.status === "running" ? "A running step cannot be moved." : "Available when this step is ready or failed."}</small>
+      {error && <span role="alert" className="live-route-error">{error}</span>}
+    </div>
+  );
+}
+
 function HoverCard({ step, anchor, log, activity }: { step: PlanStep; anchor: DOMRect; log: LogLine[]; activity: StepActivity | undefined }) {
   const lines = log.filter((line) => line.step === step.id).slice(-8);
   const width = 380;
@@ -644,7 +725,7 @@ function HoverCard({ step, anchor, log, activity }: { step: PlanStep; anchor: DO
         #{step.id} {step.title}
       </div>
       <div style={{ color: "var(--muted)", fontSize: 11, marginBottom: 6 }}>
-        {step.status} · {activity?.node ?? "no machine yet"} · {activity?.toolCalls ?? 0} tool calls
+        {step.status} · model {activity?.node ?? "not routed"}{activity?.workspaceNode ? ` · workspace ${activity.workspaceNode}` : ""} · {activity?.toolCalls ?? 0} tool calls
       </div>
       {lines.length === 0 ? (
         <div style={{ color: "var(--muted)" }}>Nothing yet.</div>
@@ -685,6 +766,7 @@ export function LogPane({
       filter === null ? log : filter === "errors" ? log.filter((line) => line.tone === "bad" || line.tone === "warn") : log.filter((line) => line.step === filter);
     return filtered.slice(-400);
   }, [log, filter]);
+  const alerts = useMemo(() => log.filter((line) => line.tone === "bad" || line.tone === "warn").length, [log]);
 
   // Lines that arrived since the last render slide in; the first screenful does not.
   const fresh = useMemo(() => {
@@ -708,46 +790,53 @@ export function LogPane({
   }, [shown]);
 
   return (
-    <section className="live-tile live-logtile">
-      <header>
-        <b>journalctl</b> -f -u fleet
+    <details className="live-tile live-logtile" open>
+      <summary className="live-log-summary">
+        <b>journalctl</b> <span>-f -u fleet</span>
         <span className="spacer" />
-        <span className="live-filter">
-          <button type="button" className={filter === null ? "on" : ""} onClick={() => setFilter(null)}>
-            all
-          </button>
-          {steps.map((step) => (
-            <button key={step.id} type="button" className={filter === step.id ? "on" : ""} onClick={() => setFilter(filter === step.id ? null : step.id)}>
-              #{step.id}
+        <span>{log.length} events</span>
+        <span className={`live-log-alerts${alerts ? " has-alerts" : ""}`}>{alerts} alert{alerts === 1 ? "" : "s"}</span>
+        <span className="live-disclosure" aria-hidden="true">›</span>
+      </summary>
+      <div className="live-log-body">
+        <header className="live-log-tools">
+          <span className="live-filter">
+            <button type="button" className={filter === null ? "on" : ""} onClick={() => setFilter(null)}>
+              all
             </button>
+            {steps.map((step) => (
+              <button key={step.id} type="button" className={filter === step.id ? "on" : ""} onClick={() => setFilter(filter === step.id ? null : step.id)}>
+                #{step.id}
+              </button>
+            ))}
+            <button type="button" className={filter === "errors" ? "on" : ""} onClick={() => setFilter(filter === "errors" ? null : "errors")}>
+              errors
+            </button>
+          </span>
+        </header>
+        <div
+          className="live-log"
+          ref={box}
+          onScroll={(event) => {
+            const element = event.currentTarget;
+            pinned.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24;
+          }}
+        >
+          {shown.map((line) => (
+            <div key={line.key} className={`line ${line.tone}${fresh.has(line.key) ? " fresh" : ""}`} title={line.text}>
+              <span className="t">{hhmmss(line.at)}</span>
+              <span className="n" style={{ color: colorOf(line.node) }}>{line.node ?? "fleet"}</span>
+              <span className="s">{line.step === null ? "" : `#${line.step}`}</span>
+              <span className="x">{line.text}</span>
+            </div>
           ))}
-          <button type="button" className={filter === "errors" ? "on" : ""} onClick={() => setFilter(filter === "errors" ? null : "errors")}>
-            errors
-          </button>
-        </span>
-      </header>
-      <div
-        className="live-log"
-        ref={box}
-        onScroll={(event) => {
-          const element = event.currentTarget;
-          pinned.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24;
-        }}
-      >
-        {shown.map((line) => (
-          <div key={line.key} className={`line ${line.tone}${fresh.has(line.key) ? " fresh" : ""}`} title={line.text}>
-            <span className="t">{hhmmss(line.at)}</span>
-            <span className="n" style={{ color: colorOf(line.node) }}>{line.node ?? "fleet"}</span>
-            <span className="s">{line.step === null ? "" : `#${line.step}`}</span>
-            <span className="x">{line.text}</span>
+          <div>
+            <span className="prompt">❯ </span>
+            {live ? <span className="cursor" /> : <span style={{ color: "var(--muted)" }}>the plan has stopped changing</span>}
           </div>
-        ))}
-        <div>
-          <span className="prompt">❯ </span>
-          {live ? <span className="cursor" /> : <span style={{ color: "var(--muted)" }}>the plan has stopped changing</span>}
         </div>
       </div>
-    </section>
+    </details>
   );
 }
 
@@ -798,6 +887,7 @@ function PlanBanner({ plan, onInspect }: { plan: LivePlan; onInspect: (id: numbe
   if (!block) return null;
   const { step, stopped, why, tiers } = block;
   const endless = why.short.includes("never finishes");
+  const environment = why.short.startsWith("environment issue:");
   return (
     <div className={`live-banner ${stopped ? "warn" : "bad"}`}>
       <div className="head">
@@ -813,7 +903,11 @@ function PlanBanner({ plan, onInspect }: { plan: LivePlan; onInspect: (id: numbe
         )}
         {!stopped && step && (
           <span className="muted">
-            {step.attempts > 0 ? `${step.attempts} of 3 attempts` : "no attempt spent"}{tiers.length > 0 ? ` · ${tiers.join(" → ")}` : ""}
+            {step.attempts > 0
+              ? environment
+                ? `stopped after ${step.attempts} attempt${step.attempts === 1 ? "" : "s"}`
+                : `${step.attempts} of 3 attempts`
+              : "no attempt spent"}{tiers.length > 0 ? ` · ${tiers.join(" → ")}` : ""}
           </span>
         )}
       </div>
@@ -827,7 +921,7 @@ function PlanBanner({ plan, onInspect }: { plan: LivePlan; onInspect: (id: numbe
         ) : (
           <>
             {!endless && (
-              <button type="button" className="primary" disabled={acting} onClick={() => act("approve")} title="Three fresh attempts at this step, then the rest of the plan">
+              <button type="button" className="primary" disabled={acting} onClick={() => act("approve")} title={environment ? "Fix the hub toolchain first, then try this step again" : "Three fresh attempts at this step, then the rest of the plan"}>
                 ↻ retry step {step?.id}
               </button>
             )}
@@ -902,6 +996,7 @@ export function LiveRun({ planId, following = false }: { planId: string; followi
   const reducedMotion = useReducedMotion();
   const [selected, setSelected] = useState<number | null>(null);
   const [filter, setFilter] = useState<number | "errors" | null>(null);
+  const [railOpen, setRailOpen] = useState(true);
   const [hover, setHover] = useState<{ id: number; rect: DOMRect } | null>(null);
   const [hidden, setHidden] = useState(false);
   const newer = useNewer(plan, following);
@@ -919,7 +1014,6 @@ export function LiveRun({ planId, following = false }: { planId: string; followi
   const steps = useMemo(() => plan?.steps ?? [], [plan?.steps]);
   const stages = useMemo(() => stagesOf(steps), [steps]);
   const failures = useMemo(() => (plan ? stepFailures(plan) : new Map<number, Why>()), [plan]);
-  const tiers = useMemo(() => stepTiers(plan?.events), [plan?.events]);
   const busyNodes = useMemo(
     () => new Set(steps.filter((step) => step.status === "running").map((step) => activity.get(step.id)?.node).filter((name): name is string => !!name)),
     [steps, activity],
@@ -939,6 +1033,7 @@ export function LiveRun({ planId, following = false }: { planId: string; followi
   const hoverStep = hover ? steps.find((step) => step.id === hover.id) ?? null : null;
   const live = plan.status === "running" || plan.status === "approved";
   const done = steps.filter((step) => step.status === "done").length;
+  const failedSteps = steps.filter((step) => step.status === "failed").length;
   const inspect = (id: number) => {
     setSelected(id);
     setFilter(id);
@@ -951,7 +1046,7 @@ export function LiveRun({ planId, following = false }: { planId: string; followi
         <div className="fill" style={{ transform: `scaleX(${steps.length ? done / steps.length : 0})` }} />
         {live && !reducedMotion && <div className="shine" />}
       </div>
-      <div className="live-main">
+      <div className={`live-main${railOpen ? "" : " rail-collapsed"}`}>
         <section className="live-tile focus">
           <header>
             <b>pipeline</b> {stages.length} stages · {steps.length} steps
@@ -979,7 +1074,6 @@ export function LiveRun({ planId, following = false }: { planId: string; followi
             activity={activity}
             colorOf={colorOf}
             failures={failures}
-            tiers={tiers}
             selected={selected}
             onSelect={(id) => {
               setSelected((current) => (current === id ? null : id));
@@ -989,35 +1083,48 @@ export function LiveRun({ planId, following = false }: { planId: string; followi
             reducedMotion={reducedMotion}
           />
         </section>
-        <div className="live-side">
-          <section className="live-tile">
-            <header>
-              <b>machines</b>
-              <span className="spacer" />
-              {busyNodes.size} busy
-            </header>
-            <Machines nodes={nodes} steps={steps} activity={activity} log={log} colorOf={colorOf} />
-          </section>
-          <section className="live-tile">
-            <header>
-              <b>{selectedStep ? `step #${selectedStep.id}` : "plan"}</b>
-              <span className="spacer" />
-              {selectedStep && (
-                <button type="button" onClick={() => setSelected(null)} style={{ color: "var(--muted)" }}>
-                  ✕
-                </button>
-              )}
-            </header>
-            <Inspector
-              plan={plan}
-              step={selectedStep}
-              activity={selectedStep ? activity.get(selectedStep.id) : undefined}
-              log={log}
-              failure={selectedStep ? failures.get(selectedStep.id) : undefined}
-              tierNow={selectedStep ? tiers.get(selectedStep.id) : undefined}
-            />
-          </section>
-        </div>
+        <details
+          className="live-rail"
+          open={railOpen}
+          onToggle={(event) => setRailOpen(event.currentTarget.open)}
+        >
+          <summary className="live-rail-summary">
+            <b>machines</b>
+            <span className="spacer" />
+            <span>{busyNodes.size} busy</span>
+            <span className={`live-rail-failures${failedSteps ? " has-failures" : ""}`}>{failedSteps} failed</span>
+            <span className="live-disclosure" aria-hidden="true">›</span>
+          </summary>
+          <div className="live-side">
+            <section className="live-tile">
+              <header>
+                <b>machines</b>
+                <span className="spacer" />
+                {busyNodes.size} busy
+              </header>
+              <Machines nodes={nodes} steps={steps} activity={activity} log={log} colorOf={colorOf} />
+            </section>
+            <section className="live-tile">
+              <header>
+                <b>{selectedStep ? `step #${selectedStep.id}` : "plan"}</b>
+                <span className="spacer" />
+                {selectedStep && (
+                  <button type="button" onClick={() => setSelected(null)} style={{ color: "var(--muted)" }}>
+                    ✕
+                  </button>
+                )}
+              </header>
+              <Inspector
+                plan={plan}
+                step={selectedStep}
+                nodes={nodes}
+                activity={selectedStep ? activity.get(selectedStep.id) : undefined}
+                log={log}
+                failure={selectedStep ? failures.get(selectedStep.id) : undefined}
+              />
+            </section>
+          </div>
+        </details>
       </div>
       <LogPane log={log} steps={steps} filter={filter} setFilter={setFilter} colorOf={colorOf} live={live} />
       {hover && hoverStep && <HoverCard step={hoverStep} anchor={hover.rect} log={log} activity={activity.get(hover.id)} />}

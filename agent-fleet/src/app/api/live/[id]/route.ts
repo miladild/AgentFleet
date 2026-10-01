@@ -33,18 +33,20 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
   }
 
   const root = plan.workingDirectory ?? null;
-  const [events, nodes] = await Promise.all([
+  const [contextEvents, nodes] = await Promise.all([
     plan.contextId
-      ? backend<RecordEvent[]>(`/api/contexts/${plan.contextId}/events?limit=${after > 0 ? 150 : 500}`).then((list) =>
-          (list ?? [])
-            .filter((event) => event.id > after)
-            .map((event) => toLive(event, id, root))
-            .filter((event): event is LiveEvent => event !== null)
-            .sort((a, b) => a.id - b.id),
+      ? backend<RecordEvent[]>(`/api/contexts/${plan.contextId}/events?afterEventId=${after}&limit=1000`).then((list) =>
+          list ?? [],
         )
-      : Promise.resolve([] as LiveEvent[]),
+      : Promise.resolve([] as RecordEvent[]),
     nodesOf(),
   ]);
+  const events = contextEvents
+    .filter((event) => event.id > after)
+    .map((event) => toLive(event, id, root))
+    .filter((event): event is LiveEvent => event !== null)
+    .sort((a, b) => a.id - b.id);
+  const nextAfter = contextEvents.length > 0 ? contextEvents[contextEvents.length - 1].id : after;
 
   // The run log's details (a failing check's output) are long; the view shows a few lines of each.
   const runEvents = (plan.events ?? []).map((event) => {
@@ -52,7 +54,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     return { ...event, detail: detail.length > 1500 ? `${detail.slice(0, 1499)}…` : detail };
   });
   return Response.json(
-    { plan: { ...plan, events: runEvents }, events, nodes, serverTime: new Date().toISOString() },
+    { plan: { ...plan, events: runEvents }, events, nodes, nextAfter, serverTime: new Date().toISOString() },
     { headers: { "cache-control": "no-store" } },
   );
 }

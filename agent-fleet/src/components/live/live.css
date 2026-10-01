@@ -26,7 +26,7 @@
   inset: 0;
   z-index: 5000;
   display: grid;
-  grid-template-rows: auto 3px minmax(0, 1fr) minmax(170px, 30vh);
+  grid-template-rows: auto 3px minmax(0, 1fr) auto;
   gap: 0;
   color: var(--fg);
   background:
@@ -172,6 +172,7 @@
   padding: 10px 10px 0;
   min-height: 0;
 }
+.live-main.rail-collapsed { grid-template-columns: minmax(0, 1fr) 44px; }
 .live-tile {
   position: relative;
   display: flex;
@@ -209,6 +210,62 @@
   grid-template-rows: auto minmax(0, 1fr);
   gap: 10px;
   min-height: 0;
+}
+.live-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  min-height: 0;
+}
+.live-rail[open]::details-content,
+.live-logtile[open]::details-content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.live-rail[open] > .live-side { flex: 1; }
+.live-rail-summary,
+.live-log-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+.live-rail-summary::-webkit-details-marker,
+.live-log-summary::-webkit-details-marker { display: none; }
+.live-rail-summary b,
+.live-log-summary b { color: var(--cyan); font-weight: 600; }
+.live-rail[open] > .live-rail-summary {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.live-rail-summary .spacer,
+.live-log-summary .spacer { flex: 1; }
+.live-rail-failures.has-failures,
+.live-log-alerts.has-alerts { color: var(--red); font-weight: 600; }
+.live-disclosure { color: var(--cyan); font-size: 16px; line-height: 1; transition: transform 150ms ease; }
+.live-rail[open] .live-disclosure,
+.live-logtile[open] .live-disclosure { transform: rotate(90deg); }
+.live-rail:not([open]) { width: 44px; height: 100%; }
+.live-rail:not([open]) > .live-rail-summary {
+  box-sizing: border-box;
+  width: 44px;
+  height: 100%;
+  justify-content: space-between;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  writing-mode: vertical-rl;
 }
 
 /* ---------- the pipeline ---------- */
@@ -342,9 +399,6 @@
 .live-node.skipped { border-color: rgba(224, 175, 104, 0.6); border-style: dashed; }
 .live-node.skipped .glyph { color: var(--yellow); }
 .live-node.failed .foot .act { color: var(--red); }
-/* A retry raised to the heavy tier: the arrow says it was not planned that way. */
-.live-root .tier.raised b { font-weight: 700; margin-right: 3px; }
-
 .live-node.pending { opacity: 0.62; }
 .live-node.done { border-color: rgba(158, 206, 106, 0.6); }
 .live-node.done .glyph { color: var(--green); }
@@ -403,6 +457,12 @@
   color: var(--bg);
   background: var(--m, var(--blue));
   white-space: nowrap;
+}
+
+.live-chip.workspace {
+  color: var(--m);
+  background: transparent;
+  border: 1px solid var(--m);
 }
 
 /* ---------- machines ---------- */
@@ -670,6 +730,11 @@
 .live-inspector > * { flex-shrink: 0; }
 .live-inspector h3 { color: var(--fg); font-size: 13px; }
 .live-inspector .label { color: var(--muted); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; }
+.live-route-choice { display: grid; gap: 5px; }
+.live-route-choice select { min-width: 0; padding: 6px 8px; color: var(--fg); background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px; font: inherit; font-size: 11px; }
+.live-route-choice select:disabled { opacity: 0.65; }
+.live-route-choice small { color: var(--muted); font-size: 10px; }
+.live-route-error { color: var(--red); font-size: 11px; }
 .live-inspector pre {
   white-space: pre-wrap;
   word-break: break-word;
@@ -691,6 +756,24 @@
 
 /* ---------- the log (journalctl -f) ---------- */
 .live-logtile { margin: 10px; }
+.live-logtile[open] { height: 30vh; min-height: 170px; overflow: hidden; }
+.live-rail[open] > .live-side,
+.live-logtile[open] > .live-log-body { flex: 1; min-height: 0; overflow: hidden; }
+.live-log-summary { flex: none; padding: 7px 12px; border-radius: 9px; }
+.live-logtile[open] > .live-log-summary { border-bottom: 1px solid var(--line); border-radius: 9px 9px 0 0; }
+.live-log-summary .live-log-alerts { margin-left: 4px; }
+.live-log-body { display: flex; flex: 1; flex-direction: column; min-height: 0; }
+.live-log-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+}
+.live-log-tools b { color: var(--cyan); font-weight: 600; }
 .live-log {
   flex: 1;
   overflow: auto;
@@ -805,14 +888,21 @@
 }
 
 /* Narrow (a VS Code side panel, a phone): one column that scrolls, the pipeline first. */
+@media (min-width: 901px) and (max-height: 850px) {
+  .live-side { grid-template-rows: minmax(0, 30vh) minmax(0, 1fr); }
+}
+
 @media (max-width: 900px) {
   /* max-content, not auto: in a page of fixed height, auto rows shrink under their content instead of scrolling. */
   .live-root { grid-template-rows: auto 3px max-content max-content; overflow-y: auto; }
-  .live-main { grid-template-columns: minmax(0, 1fr); }
+  .live-main,
+  .live-main.rail-collapsed { grid-template-columns: minmax(0, 1fr); }
   .live-main > .live-tile.focus { height: 62vh; min-height: 360px; }
   .live-side { grid-template-rows: auto auto; }
+  .live-rail:not([open]) { width: auto; height: auto; }
+  .live-rail:not([open]) > .live-rail-summary { width: auto; height: auto; writing-mode: horizontal-tb; }
   .live-inspector { max-height: 50vh; }
-  .live-logtile { height: 46vh; min-height: 240px; }
+  .live-logtile[open] { height: 46vh; min-height: 240px; }
   .live-bar { flex-wrap: wrap; }
   .live-bar .hide-narrow { display: none; }
 }

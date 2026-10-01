@@ -22,13 +22,27 @@ downloading a model that suits this computer, starting Ollama, downloading a
 missing model onto another machine. **Config > Sandbox** sets up the code
 sandbox, including Docker on another machine over SSH.
 
+In **Config > Machines**, set a response style for each model:
+
+- **Caveman** makes replies shorter: Lite removes filler, Full is very concise,
+  and Ultra uses the fewest clear words while keeping technical details and
+  safety conditions.
+- **Ponytail** guides coding work toward the smallest correct change, reusing
+  existing code and avoiding speculative abstractions or dependencies.
+
+Choose Off, Lite, Full or Ultra. These are prompt styles, not software installed
+on the worker. The selected styles follow a request through fallback; match the
+levels on machines that hand work to each other for consistent replies.
+
 ## Two toggles (top right)
 
 - **Hub mode** - *Conservative* keeps the strongest machine for complex work
   and protects its GPU for your own use; ordinary tasks go to the standard
-  machine and trivial ones to the light machine. *Aggressive* lets the strongest
-  machine take ordinary tasks too, for when you are not using it (overnight).
-  Takes effect on your next message.
+  machine and trivial ones to the light machine. *Aggressive* sends ordinary
+  chat and unpinned plan steps to the hub when you are not using it (overnight).
+  A step's requested tier remains visible, and an explicit machine choice takes
+  priority. The setting is saved across backend restarts and takes effect on
+  the next chat message or plan step.
 - **Plan mode** - see below.
 
 ## Plan mode: plan first, then act
@@ -47,21 +61,52 @@ Turn it on when you would want to review the approach before anything changes.
    `.agent-fleet/plans/` in the project folder. You can also reply `approve` in
    chat; chat and VS Code approvals do not export a copy. If you want changes,
    just say what to change and it proposes a revised plan.
-5. After approval the plan runs **in the background**, in order. Steps run one
-   at a time by default. Consecutive steps explicitly marked as an independent
-   parallel group may run together when their project-local files do not
-   overlap and their distinct model tiers have ready nodes. The fleet checks
-   group edits after they finish; checks and retries run sequentially. Each
+5. After approval the plan runs **in the background**, in order. Each step needs
+   a configured worker workspace and runs sequentially, so its changes sync back
+   before the next worker stages the project. Parallel groups stay visible in
+   the plan but do not run together in worker mode. Each
    attempt also gets bounded context from the text files named by that step,
    labeled as untrusted data. If a check fails, the model gets the real error
-   and tries again (the last attempt goes to the strongest model). If a step
-   still cannot pass, the plan stops as *Blocked* and tells you where.
+   and retries at the same requested tier, on another ready worker with a
+   workspace configured where possible. It never falls back to hub work. The run log shows the selected machine;
+   a user-selected machine takes priority. During a plan, files and verification
+   commands run in that machine's staged project, then changes sync back to the
+   hub checkout for review. A missing-runtime or SDK error stops retries and
+   identifies the worker to repair. Project edits, Git commands and checks do
+   not fall back to the hub; hub-only Docker and HTTP request tools are refused
+   during worker plan steps.
+   In **Config > Machines**, configure a worker workspace with its dedicated
+   non-admin SSH account, private key path on the hub, verified SHA256 host key,
+   platform and workspace root. The setup scripts `Setup-WorkerWorkspace.ps1`
+   and `setup-worker-workspace.sh` create the limited account; they do not change
+   firewall rules. In **Live**, choose a configured text machine for an awaiting,
+   ready or failed step; its requested tier stays the same. Running steps,
+   dependency-waiting steps and parallel peers already in flight cannot move.
+   If a step still cannot pass, the plan stops as *Blocked* and tells you where.
 
 You can close the chat and come back: the **Plans** button lists every plan and
 how far it got, and a plan that was running when the backend restarted picks up
 where it left off. When you reopen the web app, a dismissible notice calls out
 plans that finished or became blocked in the last 36 hours; **Open plan** takes
 you to its run log. **Stop** halts a running plan.
+
+To follow the work as it happens, use **Live** beside Plans or **Watch it live**
+in VS Code. The live view shows planning activity, the step pipeline, assigned
+tier and machine, current tool activity, retries, and check output. A blocked
+step explains why and offers retry or skip. Select a step to change its next
+machine while it is awaiting approval, ready to run, or failed; its requested
+task tier stays the same. Running steps and steps waiting on earlier work cannot
+be moved. The final report includes attempts,
+checks, errors, and the paths Git detected as changed in a Git project.
+On a busy screen, collapse the machine/step rail and event journal independently
+from their headings. The closed headings keep the busy and failed step counts,
+and the journal's alert count, in view; reopen either panel to inspect details.
+
+In Copilot Chat, `@fleet /status` shows a plan report and its current progress.
+The extension reconnects to a running plan after VS Code restarts, and reports
+backend or stream errors in the chat. For an incomplete response or a failed
+handoff, open the web UI's **Context** panel to see the error, partial output,
+what the next agent will receive, and what earlier agents actually received.
 
 Planning on a large model can take a few minutes. Small tasks do not need a
 diagram.
@@ -72,19 +117,23 @@ Built-in tools:
 
 - **read_file**, **write_file**, **edit_file**, **list_directory**,
   **find_files** (by name), **search_files** (by content), **move_file**,
-  **delete_file** - work on real files on the hub machine. `edit_file` changes
+  **delete_file** - work on real files on the hub during chat, and on the selected
+  worker's staged project during an approved plan. `edit_file` changes
   part of a file by replacing exact text, which is far safer than rewriting the
   whole file. `delete_file` removes single files and empty folders only.
 - **project_overview** - a project at a glance: its layout, how to build and
   test it, and the start of its README. Ask "give me an overview of
   C:\path\to\project" to see it.
-- **run_command** - runs any shell command on the hub (build, test, install).
-- **run_git_command** - git in a repository folder.
-- **run_sandboxed_code** - runs a snippet in a throwaway Docker container, when
-  Docker is set up.
+- **run_command** - runs a shell command on the hub during chat and on the
+  selected worker during a plan (build, test, install).
+- **run_git_command** - runs git in the hub repository during chat and the staged
+  worker project during a plan.
+- **run_sandboxed_code** - runs a snippet in a throwaway Docker container on the
+  hub during chat. It is unavailable in a worker plan; use `run_command` there.
 - **web_search**, **web_fetch** - look things up online and read a page.
-- **http_request** - call an API, such as the one you are building on
-  localhost, and see the raw response.
+- **http_request** - call an API from the hub and see the raw response. In a
+  worker plan, use `run_command` (for example `curl`) to make requests from the
+  selected worker.
 - **validate_diagram** - checks Mermaid source with the real parser and returns
   a corrected version when the checker can reach the web app. Fenced Mermaid
   diagrams in ordinary answers show a render control in the chat.
@@ -101,9 +150,9 @@ Every tool has a **Try** link that runs it with values you type. New tools appea
 
 To work on a project, give the full path:
 
-> In C:\Users\you\source\myapp, find where the login is handled and explain it.
+> In C:\fleet-test\project, find where the login is handled and explain it.
 
-> In C:\Users\you\source\myapp\app.py, fix the bug where X happens.
+> In C:\fleet-test\project\app.py, fix the bug where X happens.
 
 You can attach a screenshot: it goes to the vision machine, if one is set up.
 
