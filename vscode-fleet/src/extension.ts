@@ -361,7 +361,7 @@ function planConfirmation(payload: ReturnType<typeof planPayload>, machines?: st
   lines.push(
     "",
     "It starts now and runs in the background on your machines, each step checked with its command before the next begins. " +
-      "Retries keep the step's requested tier; connection failures may fall back to the hub. In Live, you can choose another configured machine for a waiting or failed step before its next attempt. VS Code shows live progress, and `@fleet /status` prints the full report in chat.",
+      "A failing check goes back to the model in the same conversation, and a step that stops improving may move up to the hub model when the plan's recovery choice allows it; the requested tier stays the same. In Live, you can choose another configured machine for a waiting or failed step before its next attempt. VS Code shows live progress, and `@fleet /status` prints the full report in chat.",
   );
   return new vscode.MarkdownString(lines.join("\n"));
 }
@@ -413,8 +413,9 @@ class RunPlanTool implements vscode.LanguageModelTool<PlanToolInput> {
         await followPlan(body.id);
         text =
           `Agent Fleet accepted the plan "${body.title}" (id ${body.id}) and started it. It runs in the background on the user's ` +
-          "machines, each step checked with its verify command before the next begins. Retries keep the step's requested " +
-          "tier; connection failures may fall back to the hub, and the user can choose another configured machine in Live. " +
+          "machines, each step checked with its verify command before the next begins. A failing check goes back to the model " +
+          "in the same conversation, and a step that stops improving may move up to the hub model when the plan's recovery " +
+          "choice allows it; the requested tier stays the same, and the user can choose another configured machine in Live. " +
           "A step that still fails stops the plan as blocked " +
           "without undoing anything. Tell the user in a sentence or two that VS Code will keep showing its progress and that " +
           "`@fleet /status` prints the full report in chat. Do not carry out the steps yourself.";

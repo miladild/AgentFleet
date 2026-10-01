@@ -99,8 +99,12 @@ without server-side conversation state.
   worker workspaces always block and are preserved. Requests from the runner carry `fleet.runner.tier` in
   `ChatOptions.AdditionalProperties` and pass through a separate execution-time tool policy. Conservative mode routes by
   the requested tier; Aggressive mode sends unpinned model calls to the hub while all file tools and checks use a configured
-  worker workspace. An explicitly pinned worker normally handles its own model call; a saved plan recovery scope may route
-  a failed retry's model call to the hub without moving that workspace or changing the tier. Before model tools run, a worker
+  worker workspace. An explicitly pinned worker normally handles its own model call. When a step's check fails, its output
+  goes back into the same model conversation (`IStepSession`, a round) and the step climbs a repair ladder in `PlanRepair.cs`:
+  more rounds on its machine, then the same conversation on the hub model if the saved plan recovery scope allows it, then a
+  fresh conversation with a brief of what was tried. A round that changed nothing, or repeated the same failures with no file
+  changed, climbs at once; climbing changes only the model route, never the workspace or the tier, and the rung survives a
+  restart through the run log. Before model tools run, a worker
   staging transport failure may move to a ready same-tier workspace; a workspace conflict or sync failure blocks. The route
   journal records both machines. Every step has a bounded check, the last step must provide whole-project validation, a
   cross-process lease prevents duplicate runners, and an eight-hour deadline bounds a run.

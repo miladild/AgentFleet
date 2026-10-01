@@ -33,7 +33,9 @@ flowchart LR
   Cursor. Every tool can be tried from the settings.
 - **Plan mode and live progress.** The strongest model explores with read-only tools and proposes steps, files, checks,
   and an optional diagram. After you approve, the backend runs and checks the plan in the background. Watch planning and
-  step activity live; the report records attempts, check output, errors, and changed paths in Git projects. See
+  step activity live; a failing check goes back into the same model conversation, and a step that stops improving climbs
+  to a stronger machine; the report records attempts, repair rounds, check output, errors, and changed paths in Git
+  projects. See
   [docs/planning.md](docs/planning.md).
 - **Shared context and visible failures.** Conversations, machine routes, tool calls, errors, partial answers, decisions,
   and plan handoffs are recorded together. The Context panel shows what the next machine will receive and what earlier

@@ -66,9 +66,14 @@ Turn it on when you would want to review the approach before anything changes.
    before the next worker stages the project. Parallel groups stay visible in
    the plan but do not run together in worker mode. Each
    attempt also gets bounded context from the text files named by that step,
-   labeled as untrusted data. If a check fails, the model gets the real error
-   and retries at the same requested tier, on another ready worker with a
-   workspace configured where possible. It never falls back to hub work. The run log shows the selected machine;
+   labeled as untrusted data. If a check fails, the real output goes back into
+   the same conversation, with what changed since the last round, so the model
+   keeps working on what it started. A round that changes nothing, or rounds
+   that stop paying off, move the step up a repair ladder: the hub model
+   continues the same conversation when the plan's **Recovery** choice allows
+   it, then a fresh conversation starts from a brief of what was tried. File
+   edits, Git commands and checks stay on the selected worker, and the requested
+   tier stays the same. The run log shows the selected machine and each climb;
    a user-selected machine takes priority. During a plan, files and verification
    commands run in that machine's staged project, then changes sync back to the
    hub checkout for review. A missing-runtime or SDK error stops retries and
@@ -97,7 +102,7 @@ tier and machine, current tool activity, retries, and check output. A blocked
 step explains why and offers retry or skip. Select a step to change its next
 machine while it is awaiting approval, ready to run, or failed; its requested
 task tier stays the same. Running steps and steps waiting on earlier work cannot
-be moved. The final report includes attempts,
+be moved. The final report includes attempts, repair rounds,
 checks, errors, and the paths Git detected as changed in a Git project.
 On a busy screen, collapse the machine/step rail and event journal independently
 from their headings. The closed headings keep the busy and failed step counts,

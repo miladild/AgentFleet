@@ -29,8 +29,9 @@ steps, and checks each step with a real command instead of trusting itself.
    route code work to the hub.
 5. **You decide.** Review each step's restart setting and the **Recovery** choice, then press **Approve and run**, press **Reject**, or reply in the chat with what to change and it proposes a
    revised plan. Typing `approve` also works. (`approve the idea but change step 3` counts as feedback, not approval.)
-   New plans proposed in Aggressive mode allow hub-model rescue after a failed, worker-pinned attempt; choose **Worker only**
-   to keep every model retry on that worker. Existing plans keep their saved recovery scope. Each step also says whether it
+   New plans allow hub-model rescue: when a step's worker cannot get a failing check to pass, the hub model takes over (see
+   the repair ladder below). Choose **Worker only** to keep every model call on the step's workers. Existing plans keep
+   their saved recovery scope. Each step also says whether it
    may resume automatically after a backend restart; steps not marked restart-safe stop for review if interrupted.
    In the web UI, you can optionally check **Save a Markdown copy** before approving; it writes the plan into the project
    folder shown on the card. The default is off.
@@ -58,9 +59,21 @@ steps, and checks each step with a real command instead of trusting itself.
      each attempt and, when the attempt has deleted one or put it back to the committed version, writes it back and
      logs **work-restored**, unless a step that has not finished yet names that file. Outside git this protection does
      not exist, so put a project under git before leaving a plan to run.
-  - A failed check goes back with its real output, for up to three model attempts. The runner executes the last step's approved
+  - A failed check does not restart the model. The runner sends the check's real output back into the **same conversation**,
+    with what changed since the round before (failing names fixed or new, files changed), so the model still has the task and
+    everything it already did. One **round** is: the model works, then the runner runs the approved check. The step climbs a
+    **repair ladder**, three rounds on each rung (`FLEET_PLAN_ROUNDS_PER_RUNG`):
+    1. the machine the step was given, at its own tier;
+    2. the hub model, continuing the same conversation, while file tools and checks stay on the selected worker (only when
+       the plan allows hub rescue, and only when the hub answers a small test request);
+    3. a fresh conversation, on the hub when the plan allows it and otherwise on a worker, that starts from a brief of what
+       the earlier rounds tried and is told to find the root cause first.
+
+    A round that changed nothing (no edit, and no file changed), or that leaves the same failures with no file changed, does
+    not wait for its three rounds: the step climbs at once. Every climb is a **rung changed** line in the run log with its
+    reason. When the last rung has had its rounds, the plan stops as **Blocked**. The runner executes the last step's approved
     whole-project validation on the worker after edits are synced, records the source snapshot ID and bounded command output,
-    and gives failures to a bounded repair attempt. The requested task tier stays fixed. If worker staging has a connection
+    and gives failures the same repair rounds. The requested task tier stays fixed. If worker staging has a connection
     failure before model tools or edits run, Fleet can move to another ready worker at the same tier; it waits for the original
     worker when no alternative is ready. Workspace conflicts, security/configuration failures and sync failures stop for review.
      A permitted hub-model rescue does not move files or checks to the hub. In **Live**, select a waiting or failed step to
@@ -70,13 +83,15 @@ steps, and checks each step with a real command instead of trusting itself.
   - Checks run on the selected worker. Provision coding workers with their required runtimes before approval (Windows
     setup supports `Setup-Worker.ps1 -AllowFrom <hub-private-ip> -InstallToolchains`; other platforms use the operator's
     trusted package manager).
-    If a check reports a missing runtime or incompatible .NET SDK, Fleet may retry on another ready worker at the same
-    tier while attempts remain; if no candidate can run the check, it stops and identifies
+    If a check reports a missing runtime or incompatible .NET SDK, Fleet may start a fresh conversation on another ready
+    worker at the same tier while attempts remain; if no candidate can run the check, it stops and identifies
     the worker so its toolchain can be installed. Plan proposal checks the syntax and declared paths but
     does not assume a worker has the hub's toolchain.
   - A plan has an eight-hour default run deadline and a cross-process lease prevents two backend instances from running
-    it at once. Infrastructure waits and attempt counts survive backend restarts. A restart-safe step may resume after a
-    restart if its workspace was synced; an interrupted unsynced workspace is always preserved and blocked for review.
+    it at once. Infrastructure waits, attempt counts and a step's place on the repair ladder survive backend restarts; the
+    open conversation does not, so a step resumes in a new conversation that starts from a brief of the rounds before. A
+    restart-safe step may resume after a restart if its workspace was synced; an interrupted unsynced workspace is always
+    preserved and blocked for review.
    - If a step still fails, the plan stops as **Blocked**, says which step and why, and leaves your files as they are.
 7. **Afterwards.** The **Plans** button lists every plan and how far it got; in VS Code, **`@fleet /status`** shows the
    current plan's report in the chat, with **Stop it**, or **Approve and resume** for a blocked plan. Close the browser and
@@ -99,17 +114,17 @@ backend's machine at port 3000).
   a plan (it had a question, or the request was not for one), the page says so and shows the answer.
 - **Pipeline.** The steps from left to right, a parallel group stacked in one column (top to bottom in a narrow pane).
   A running step glows and labels the model machine separately from its worker workspace, alongside its latest tool call; data flows along the edges into
-  it. A retried step shows its attempts (`↻ 2/3`) and keeps its requested tier visible. The machine chip and run log
-  show the selected and actual responder, including an automatic retry move or hub fallback. Hover a step for its
+  it. A step that needed repair shows where it is on the repair ladder (`↻ rung 2 · round 2`) and keeps its requested tier
+  visible. The machine chip and run log show the selected and actual responder, including an automatic climb to the hub. Hover a step for its
   latest lines, click it for its instructions, its check, its next-attempt machine selector and the output of its last
   check.
 - **What needs you.** A plan waiting for approval has **approve and run** and **reject** at the top. A blocked plan
-  says at which step, after which attempts on which tiers, and why in plain words (the check's failing line, a check
-  that never finishes, a file that was never created), with **retry** (three fresh attempts at that step),
+  says at which step, after how many rounds and on which machines, and why in plain words (the check's failing line, a
+  check that never finishes, a file that was never created), with **retry** (a fresh repair ladder for that step),
   **skip the step and go on** (it counts as done without its check) and **details**. A stopped plan offers **resume**.
 - **Machines.** Each machine, what it is working on, and its tool calls over the last two minutes.
 - **Log.** Everything the machines do, as a terminal: model calls, tool calls and results, what the model said, and
-  the runner's own events with the attempt and tier. Filter it by step, or to errors only.
+  the runner's own events with the attempt, rung and round. Filter it by step, or to errors only.
 
 It asks the web server for news every two seconds while the plan runs (every fifteen once it has stopped), and not at
 all while the tab is hidden; each answer carries only what is new, cut down to a line per event. Animations move only
@@ -202,19 +217,21 @@ What keeps a plan going when something happens in the night:
 - **A machine goes down or slows down.** Each call goes to a ready machine of the step's tier; a machine that is off, or
   fails a call, is replaced by the fallback machine. A machine that times out rests for ten minutes, so the rest of the
   step does not wait for it again. If no machine can answer at all (the network is down, the fallback is rebooting), the
-  step waits and tries again: after 30 seconds, then 1, 2, 4 and 8 minutes, then every 15 minutes, about an hour in all.
-  Those waits do not count as attempts; the run log shows each one.
+  step waits and tries again, with a pause that doubles from 30 seconds to 15 minutes (plus a little jitter), and sends a
+  small real test request to the machine each time it wakes. It keeps waiting until the machine answers or the plan's run
+  deadline passes. Those waits do not count as attempts or rounds; the run log shows each one.
 - **The hub goes to sleep.** While a plan runs, the backend asks the operating system to stay awake (Windows, macOS and
   Linux with systemd). It cannot stop someone closing a laptop's lid or choosing Sleep, and it does nothing for the other
   machines: set those to stay awake (the worker setup's `-KeepAwake`).
 
 ## Reading what happened overnight
 
-Every plan keeps a **run log**: when the run started, each attempt with the tier and the machine that answered, what the
-model said it did, whether the check passed (and, when it failed, the real output), timeouts, and how the run ended. Open a
+Every plan keeps a **run log**: when the run started, each round with its rung, the tier and the machine that answered,
+what the model said it did, whether the check passed (and, when it failed, the real output), every climb up the repair
+ladder with its reason, timeouts, and how the run ended. Open a
 plan from the **Plans** panel and expand **Run log**. **Open the full report** shows the same as a readable page: how the
-run ended, where it stopped and why, the files git says changed (when the project is a git repository), per-step attempts
-and timings, and the timeline in your local time. In VS Code, **Show status** opens the same report. The report is also
+run ended, where it stopped and why, the files git says changed (when the project is a git repository), per-step attempts,
+repair rounds and timings, and the timeline in your local time. In VS Code, **Show status** opens the same report. The report is also
 saved next to the plan as `<id>.report.md` and served at `/api/plans/<id>/report`. The log keeps the first line and the most
 recent 400 lines, and cuts long outputs, so it stays small however long a plan retries.
 
@@ -286,8 +303,8 @@ says so, the request is asked again with a bigger window, and that machine's lat
 
 ## What to expect from small local models
 
-They are noisy. Expect one to three attempts per step, occasionally a plan that needs a second proposal, and now and then
-a step that blocks. That is what the retry loop and the checks are for. A block is a good outcome compared with a
+They are noisy. Expect a step to need a repair round or two, an occasional climb to the hub, occasionally a plan that
+needs a second proposal, and now and then a step that blocks. That is what the repair rounds and the checks are for. A block is a good outcome compared with a
 confident wrong answer. The strongest machine plans; ordinary steps start on the machine assigned to their tier, and
 retries keep that task tier. From Live, choose another ready machine for an awaiting, ready, or failed step; running and
 dependency-waiting steps cannot be moved. Planning on a large model can take a few minutes, especially if the model does
