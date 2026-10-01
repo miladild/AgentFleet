@@ -6,25 +6,78 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AgentFleet.Tests;
 
+/// <summary>One message sent to a fake conversation: which one, which message of it, and where it went.</summary>
+internal sealed record FakeStepCall(int Session, int Message, string Tier, string Text, string? Machine);
+
+/// <summary>
+/// A stand-in for the model. By default a call reports that the model used a tool and edited a file, as a model that
+/// works does; a test that needs a model that only reads, or edits on some machines only, sets <see cref="ToolsOf"/>.
+/// Every conversation it opens is kept in <see cref="Sessions"/>, with the messages that went into it.
+/// </summary>
 internal sealed class FakeStepAgent(
     Func<string, string, CancellationToken, Task<string>> run,
-    int toolCalls = 0,
-    bool editToolCalled = false) : IStepAgent
+    int toolCalls = 1,
+    bool editToolCalled = true) : IStepAgent
 {
+    private readonly object _gate = new();
+
     public List<(string Tier, string Prompt, string? Machine)> Calls { get; } = [];
+
+    public List<FakeStepSession> Sessions { get; } = [];
+
+    /// <summary>What a call reports about the model's tool use: tool calls made, and whether one edited a file.</summary>
+    public Func<FakeStepCall, (int ToolCalls, bool EditToolCalled)>? ToolsOf { get; init; }
 
     public Task<StepAgentReply> RunStepAsync(string prompt, string tier, CancellationToken cancellationToken)
         => RunStepAsync(prompt, tier, null, cancellationToken);
 
-    public async Task<StepAgentReply> RunStepAsync(string prompt, string tier, string? machine, CancellationToken cancellationToken)
+    public Task<StepAgentReply> RunStepAsync(string prompt, string tier, string? machine, CancellationToken cancellationToken)
+        => OpenSession().SendAsync(prompt, tier, machine, cancellationToken);
+
+    public IStepSession OpenSession()
     {
-        Calls.Add((tier, prompt, machine));
-        string text = await run(prompt, tier, cancellationToken);
-        return new StepAgentReply(text, toolCalls, editToolCalled);
+        lock (_gate)
+        {
+            var session = new FakeStepSession(this, Sessions.Count);
+            Sessions.Add(session);
+            return session;
+        }
+    }
+
+    internal async Task<StepAgentReply> SendAsync(FakeStepSession session, string message, string tier, string? machine, CancellationToken cancellationToken)
+    {
+        FakeStepCall call;
+        lock (_gate)
+        {
+            call = new FakeStepCall(session.Index, session.Messages.Count, tier, message, machine);
+            session.Messages.Add(call);
+            Calls.Add((tier, message, machine));
+        }
+
+        string text = await run(message, tier, cancellationToken);
+        (int tools, bool edited) = ToolsOf?.Invoke(call) ?? (toolCalls, editToolCalled);
+        return new StepAgentReply(text, tools, edited);
     }
 }
 
-public sealed class PlanRunnerTests : PlanTestBase
+internal sealed class FakeStepSession(FakeStepAgent owner, int index) : IStepSession
+{
+    public int Index => index;
+
+    public List<FakeStepCall> Messages { get; } = [];
+
+    /// <summary>As in the real conversation: a message that failed left nothing in it.</summary>
+    public bool HasHistory { get; private set; }
+
+    public async Task<StepAgentReply> SendAsync(string message, string tier, string? machine, CancellationToken cancellationToken)
+    {
+        StepAgentReply reply = await owner.SendAsync(this, message, tier, machine, cancellationToken);
+        HasHistory = true;
+        return reply;
+    }
+}
+
+public sealed partial class PlanRunnerTests : PlanTestBase
 {
     private static readonly FakeValidator Valid = new(code => new DiagramCheck(true, true, code, null));
 
@@ -192,21 +245,30 @@ public sealed class PlanRunnerTests : PlanTestBase
     }
 
     [Fact]
-    public async Task Each_attempt_is_recorded_on_the_step_when_it_starts_not_when_it_is_checked()
+    public async Task Each_conversation_is_recorded_on_the_step_when_it_starts_not_when_it_is_checked()
     {
         PlanRecord plan = ApprovedPlan(Step("build it"));
         var seenWhileWorking = new List<int>();
+        // The first conversation only reads (a round that changes nothing), so the ladder starts a second one. An attempt
+        // is a conversation: rounds inside it do not count again.
         FakeStepAgent agent = new((_, _, _) =>
         {
             seenWhileWorking.Add(Store.Get(plan.Id)!.Steps[0].Attempts);
             return Task.FromResult("Done.");
-        });
-        int verifications = 0;
+        })
+        {
+            ToolsOf = call => (1, call.Session > 0)
+        };
+        int checks = 0;
 
-        await Runner(agent, command => ++verifications < 3 ? Fail(command) : Pass(command)).RunPlanAsync(plan.Id, default);
+        await Runner(agent, command => command.StartsWith("git ", StringComparison.Ordinal)
+            ? Pass(command)
+            : ++checks switch { 1 => "Exit code: 1\nerror CS1002: ; expected", 2 => "Exit code: 1\nerror CS1003: syntax error", _ => Pass(command) })
+            .RunPlanAsync(plan.Id, default);
 
-        Assert.Equal([1, 2, 3], seenWhileWorking);
-        Assert.Equal(3, Store.Get(plan.Id)!.Steps[0].Attempts);
+        Assert.Equal([1, 2, 2], seenWhileWorking);
+        Assert.Equal(2, Store.Get(plan.Id)!.Steps[0].Attempts);
+        Assert.Equal(2, agent.Sessions.Count);
     }
 
     [Fact]
@@ -295,7 +357,9 @@ public sealed class PlanRunnerTests : PlanTestBase
 
         await Runner(agent, Fail).RunPlanAsync(plan.Id, default);
 
-        Assert.Equal(PlanRunner.MaxAttemptsPerStep, agent.Calls.Count);
+        // Without a hub to climb to: the worker's rounds, then a fresh conversation with a brief, each with its round budget.
+        Assert.Equal(2 * RepairLadder.DefaultRoundsPerRung, agent.Calls.Count);
+        Assert.Equal(2, agent.Sessions.Count);
         PlanRecord after = Store.Get(plan.Id)!;
         Assert.Equal(PlanStatus.Blocked, after.Status);
         Assert.Equal(StepStatus.Failed, after.Steps[0].Status);

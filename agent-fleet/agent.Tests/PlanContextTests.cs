@@ -560,7 +560,7 @@ public sealed class PlanContextTests : ContextTestBase
     }
 
     [Fact]
-    public async Task A_step_retried_after_its_plan_blocked_is_told_what_went_wrong_and_gets_three_fresh_attempts()
+    public async Task A_step_retried_after_its_plan_blocked_is_told_what_went_wrong_and_starts_its_attempts_again()
     {
         // Measured: after "retry" on a blocked plan, the step's first attempt had nothing of the failure in its prompt,
         // and its attempt count went on from three ("4 of 3").
@@ -580,7 +580,10 @@ public sealed class PlanContextTests : ContextTestBase
 
         await Runner().RunPlanAsync(plan.Id, default);
         Assert.Equal(PlanStatus.Blocked, Plans.Get(plan.Id)!.Status);
-        Assert.Equal(3, Plans.Get(plan.Id)!.Steps[0].Attempts);
+        // Two conversations: the first one's rounds changed no file and brought the same failure back, so the second one
+        // (a fresh start with a brief) got the step; it too brought the same failure back with no file changed.
+        Assert.Equal(2, Plans.Get(plan.Id)!.Steps[0].Attempts);
+        Assert.Equal(3, agent.Calls.Count);
 
         fixedNow = true;
         Plans.Approve(plan.Id);
@@ -650,7 +653,8 @@ public sealed class PlanContextTests : ContextTestBase
         string contextId = Plans.Get(plan.Id)!.ContextId!;
         Assert.Equal(PlanStatus.Blocked, Plans.Get(plan.Id)!.Status);
         Assert.Contains(Store.EventsOfKinds(contextId, [FleetContextEventKind.Error], 10), e => ContextText.String(e.Payload, "message")!.Contains("did not pass"));
-        Assert.Equal(3, Store.EventsOfKinds(contextId, [FleetContextEventKind.Verification], 10).Count);
+        // Every round's check is in the record: the worker's three rounds, then the fresh conversation's three.
+        Assert.Equal(2 * RepairLadder.DefaultRoundsPerRung, Store.EventsOfKinds(contextId, [FleetContextEventKind.Verification], 10).Count);
         Assert.Equal("plan-blocked", Store.LatestCheckpoint(contextId)!.Kind);
     }
 }

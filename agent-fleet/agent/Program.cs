@@ -368,8 +368,7 @@ var planTools = new PlanTools(
     (command, workingDirectory, cancellationToken) =>
         WorkspaceTools.RunCommandAsync(command, workingDirectory, shellOptions, shellLogger, cancellationToken),
     contextJournal,
-    workerWorkspacesEnabled: true,
-    modeService: modeService);
+    workerWorkspacesEnabled: true);
 
 AITool proposePlanTool = AIFunctionFactory.Create(
     // The descriptions are not decoration: a raw JsonElement parameter is described to the model as
@@ -554,11 +553,17 @@ bool ToolReturnedError(string result)
 }
 
 // How many tool rounds one attempt at a plan step gets. Measured: a small worker wrote and ran the same test file for more
-// than ten minutes, and the hub once spent 34 rounds on one step. After the budget the attempt ends and the step's own
-// check decides; a failure goes to the next attempt with the real output at the same requested tier.
+// than ten minutes, and the hub once spent 34 rounds on one step. After the budget the model's turn ends and the step's own
+// check decides; a failure goes back into the same conversation as the next round (see RepairLadder).
 int planStepToolRounds = int.TryParse(builder.Configuration["FLEET_PLAN_STEP_TOOL_ROUNDS"], out int stepRounds) && stepRounds is >= 5 and <= 200
     ? stepRounds
     : 25;
+
+// How many rounds (model works, then the approved check runs) a step gets on each rung of the repair ladder before it
+// climbs to the next one.
+int planRoundsPerRung = int.TryParse(builder.Configuration["FLEET_PLAN_ROUNDS_PER_RUNG"], out int roundsPerRung) && roundsPerRung is >= 1 and <= 10
+    ? roundsPerRung
+    : RepairLadder.DefaultRoundsPerRung;
 
 IChatClient agentClient = new ChatClientBuilder(fleetClient)
     // Outermost: the current tool list goes onto the request before anything looks for a tool by name.
@@ -742,7 +747,8 @@ var planRunner = new PlanRunner(
     healthMonitor: healthMonitor,
     recorder: new PlanContextRecorder(contextStore, planStore, loggerFactory.CreateLogger("AgentFleet.PlanContext")),
     journal: contextJournal,
-    sleepGuard: new SystemSleepGuard(loggerFactory.CreateLogger("AgentFleet.Power")));
+    sleepGuard: new SystemSleepGuard(loggerFactory.CreateLogger("AgentFleet.Power")),
+    roundsPerRung: planRoundsPerRung);
 planStore.Approved += planRunner.Enqueue;
 app.Lifetime.ApplicationStarted.Register(() => planRunner.Start(app.Lifetime.ApplicationStopping));
 

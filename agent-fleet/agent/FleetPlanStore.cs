@@ -362,6 +362,7 @@ internal sealed partial class FleetPlanStore
     public const int MaxEvents = 400;
     public const int MaxEventDetailCharacters = 1200;
     public const int MaxFilesChangedCharacters = 4000;
+    public const int MaxChangedFilesPerEvent = 12;
 
     // Appends to the run log. Bounded, so a plan that retries for days cannot grow its file without
     // limit: the oldest lines go first, but the first line (when the run started) is kept.
@@ -380,7 +381,10 @@ internal sealed partial class FleetPlanStore
         int? failureSignatureSize = null,
         int? filesChanged = null,
         int? toolCalls = null,
-        bool? editToolCalled = null)
+        bool? editToolCalled = null,
+        int? rung = null,
+        int? round = null,
+        IReadOnlyList<string>? changedFiles = null)
     {
         string text = detail ?? string.Empty;
         int limit = kind == RunEventKind.FilesChanged ? MaxFilesChangedCharacters : MaxEventDetailCharacters;
@@ -390,7 +394,8 @@ internal sealed partial class FleetPlanStore
         }
 
         var entry = new PlanRunEvent(DateTimeOffset.UtcNow, stepId, attempt, kind, tier, node, text, modelNode, workspaceNode,
-            failureClass, failureSignature, failureSignatureSize, filesChanged, toolCalls, editToolCalled);
+            failureClass, failureSignature, failureSignatureSize, filesChanged, toolCalls, editToolCalled, rung, round,
+            changedFiles is { Count: > 0 } ? changedFiles.Take(MaxChangedFilesPerEvent).ToList() : null);
         return Update(id, plan =>
         {
             List<PlanRunEvent> events = [.. plan.Events ?? [], entry];
@@ -682,6 +687,14 @@ internal sealed partial class FleetPlanStore
             {
                 text.AppendLine($"  - Workspace and checks: {string.Join(", ", workspaces)}");
             }
+
+            PlanRunEvent[] stepEvents = events.Where(e => e.StepId == step.Id).ToArray();
+            int failedRounds = stepEvents.Count(RepairLadder.IsVerdictRound);
+            int highestRung = stepEvents.Where(e => e.Rung is not null).Select(e => e.Rung!.Value).DefaultIfEmpty(RepairLadder.RequestedTierRung).Max();
+            if (failedRounds > 0 || highestRung > RepairLadder.RequestedTierRung)
+            {
+                text.AppendLine($"  - Repair ladder: {failedRounds} failed round{(failedRounds == 1 ? string.Empty : "s")}, reached rung {highestRung} ({RepairLadder.Name(highestRung)})");
+            }
         }
 
         text.AppendLine();
@@ -693,7 +706,8 @@ internal sealed partial class FleetPlanStore
 
         foreach (PlanRunEvent e in events)
         {
-            string where = e.StepId is null ? string.Empty : $" step {e.StepId}{(e.Attempt is null ? string.Empty : $" attempt {e.Attempt}")}";
+            string ladder = e.Rung is null ? string.Empty : $", rung {e.Rung}{(e.Round is null ? string.Empty : $" round {e.Round}")}";
+            string where = e.StepId is null ? string.Empty : $" step {e.StepId}{(e.Attempt is null ? string.Empty : $" attempt {e.Attempt}")}{ladder}";
             string via = string.Join(", ", new[] { e.Tier, e.ModelNode ?? e.Node, e.WorkspaceNode is null ? null : $"workspace {e.WorkspaceNode}" }.Where(part => !string.IsNullOrEmpty(part)));
             text.AppendLine($"- {Local(e.AtUtc)}{where}: {e.Kind.Replace('-', ' ')}{(via.Length > 0 ? $" ({via})" : string.Empty)}");
             if (e.Kind == RunEventKind.FilesChanged)

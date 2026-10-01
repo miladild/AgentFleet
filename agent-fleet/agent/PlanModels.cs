@@ -79,6 +79,7 @@ internal static class RunEventKind
     public const string RoundClassified = "round-classified";
     public const string InferenceProbePassed = "inference-probe-passed";
     public const string WorkspaceReconciled = "workspace-reconciled";
+    public const string RungChanged = "rung-changed";
 }
 
 /// <summary>
@@ -87,6 +88,12 @@ internal static class RunEventKind
 /// </summary>
 /// <param name="Node">The machine that answered, when known.</param>
 /// <param name="Detail">Short text: what the model said it did, or the failing check's output.</param>
+/// <param name="Rung">The repair ladder's rung the step was on (1 requested tier, 2 hub model, 3 fresh conversation).</param>
+/// <param name="Round">
+/// The round within that rung: the model works, then the runner runs the approved check. On a round-classified event it
+/// is set only when the check ran, so a restart can count the rounds that really happened.
+/// </param>
+/// <param name="ChangedFiles">The project files the round changed (the first few), where git could tell.</param>
 internal sealed record PlanRunEvent(
     DateTimeOffset AtUtc,
     int? StepId,
@@ -102,7 +109,10 @@ internal sealed record PlanRunEvent(
     int? FailureSignatureSize = null,
     int? FilesChanged = null,
     int? ToolCalls = null,
-    bool? EditToolCalled = null);
+    bool? EditToolCalled = null,
+    int? Rung = null,
+    int? Round = null,
+    IReadOnlyList<string>? ChangedFiles = null);
 
 /// <summary>
 /// A plan is a durable artifact, not chat text: it is saved as a file, shown to the user
