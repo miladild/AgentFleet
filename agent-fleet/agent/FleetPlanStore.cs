@@ -14,6 +14,7 @@ namespace AgentFleet;
 internal sealed partial class FleetPlanStore
 {
     public const int MaxSteps = 20;
+    public static readonly TimeSpan DefaultRunDuration = TimeSpan.FromHours(8);
 
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
@@ -85,7 +86,8 @@ internal sealed partial class FleetPlanStore
         IEnumerable<string>? risks,
         string? diagram,
         string? diagramNote,
-        IReadOnlyList<PlanStepInput> steps)
+        IReadOnlyList<PlanStepInput> steps,
+        string? recoveryScope = null)
     {
         if (string.IsNullOrWhiteSpace(title))
         {
@@ -117,7 +119,8 @@ internal sealed partial class FleetPlanStore
             steps.Select((step, index) => ToStep(step, index + 1)).ToList(),
             now,
             now,
-            null);
+            null,
+            RecoveryScope: NormalizeRecoveryScope(recoveryScope));
 
         Save(plan);
         return plan;
@@ -136,6 +139,25 @@ internal sealed partial class FleetPlanStore
             return File.Exists(path)
                 ? JsonSerializer.Deserialize<PlanRecord>(File.ReadAllText(path), SerializerOptions)
                 : null;
+        }
+    }
+
+    /// <summary>Cross-process plan lease; the OS releases it automatically if the backend exits.</summary>
+    public FileStream? TryAcquireRunLease(string id)
+    {
+        if (!IsValidId(id)) return null;
+        try
+        {
+            return new FileStream(PathFor(id) + ".lease", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1,
+                FileOptions.WriteThrough);
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
         }
     }
 
@@ -197,13 +219,121 @@ internal sealed partial class FleetPlanStore
         }
     }
 
+    /// <summary>Changes the next route only while the step is waiting or has failed.</summary>
+    public PlanRecord? SelectMachine(string id, int stepId, string? machine, out string? error)
+    {
+        error = null;
+        if (!IsValidId(id))
+        {
+            return null;
+        }
+
+        lock (_lock)
+        {
+            PlanRecord? current = Get(id);
+            if (current is null)
+            {
+                return null;
+            }
+
+            PlanStep? step = current.Steps.FirstOrDefault(candidate => candidate.Id == stepId);
+            if (step is null)
+            {
+                error = "That step no longer exists.";
+                return current;
+            }
+
+            bool editable =
+                (current.Status == PlanStatus.AwaitingApproval && step.Status == StepStatus.Pending) ||
+                (current.Status == PlanStatus.Blocked && step.Status == StepStatus.Failed && !HasRunningParallelPeer(current, step)) ||
+                ((current.Status is PlanStatus.Approved or PlanStatus.Running or PlanStatus.Blocked) &&
+                    step.Status == StepStatus.Pending && IsReady(current, step) && !HasRunningParallelPeer(current, step));
+            if (!editable)
+            {
+                error = step.Status == StepStatus.Running
+                    ? "This step is running and cannot be moved."
+                    : "This step is waiting for an earlier step, or the plan is no longer editable.";
+                return current;
+            }
+
+            if (string.Equals(step.Machine, machine, StringComparison.OrdinalIgnoreCase))
+            {
+                return current;
+            }
+
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+            IReadOnlyList<PlanStep> steps = current.Steps
+                .Select(candidate => candidate.Id == stepId ? candidate with { Machine = machine } : candidate)
+                .ToList();
+            var routeEvent = new PlanRunEvent(
+                now,
+                stepId,
+                null,
+                RunEventKind.MachineSelected,
+                step.Tier,
+                null,
+                machine is null
+                    ? $"Automatic routing restored; requested tier remains {step.Tier}."
+                    : $"Machine selected by the user; requested tier remains {step.Tier}.",
+                ModelNode: null,
+                WorkspaceNode: machine);
+            List<PlanRunEvent> events = [.. current.Events ?? [], routeEvent];
+            if (events.Count > MaxEvents)
+            {
+                events = [events[0], .. events.Skip(events.Count - (MaxEvents - 1))];
+            }
+
+            PlanRecord updated = current with { Steps = steps, Events = events, UpdatedUtc = now };
+            Save(updated);
+            return updated;
+        }
+    }
+
+    private static bool IsReady(PlanRecord plan, PlanStep step)
+    {
+        int target = 0;
+        while (target < plan.Steps.Count && plan.Steps[target].Id != step.Id)
+        {
+            target++;
+        }
+
+        for (int index = 0; index < target; index++)
+        {
+            PlanStep previous = plan.Steps[index];
+            if (step.ParallelGroup is not null && previous.ParallelGroup == step.ParallelGroup)
+            {
+                continue;
+            }
+
+            if (previous.Status != StepStatus.Done)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool HasRunningParallelPeer(PlanRecord plan, PlanStep step) =>
+        step.ParallelGroup is not null && plan.Steps.Any(candidate =>
+            candidate.Id != step.Id && candidate.ParallelGroup == step.ParallelGroup && candidate.Status == StepStatus.Running);
+
     public const int MaxEvents = 400;
     public const int MaxEventDetailCharacters = 1200;
     public const int MaxFilesChangedCharacters = 4000;
 
     // Appends to the run log. Bounded, so a plan that retries for days cannot grow its file without
     // limit: the oldest lines go first, but the first line (when the run started) is kept.
-    public PlanRecord? AddEvent(string id, int? stepId, int? attempt, string kind, string? tier = null, string? node = null, string detail = "")
+    public PlanRecord? AddEvent(
+        string id,
+        int? stepId,
+        int? attempt,
+        string kind,
+        string? tier = null,
+        string? node = null,
+        string detail = "",
+        string? modelNode = null,
+        string? workspaceNode = null)
     {
         string text = detail ?? string.Empty;
         int limit = kind == RunEventKind.FilesChanged ? MaxFilesChangedCharacters : MaxEventDetailCharacters;
@@ -212,7 +342,7 @@ internal sealed partial class FleetPlanStore
             text = text[..limit].TrimEnd() + "...";
         }
 
-        var entry = new PlanRunEvent(DateTimeOffset.UtcNow, stepId, attempt, kind, tier, node, text);
+        var entry = new PlanRunEvent(DateTimeOffset.UtcNow, stepId, attempt, kind, tier, node, text, modelNode, workspaceNode);
         return Update(id, plan =>
         {
             List<PlanRunEvent> events = [.. plan.Events ?? [], entry];
@@ -229,9 +359,10 @@ internal sealed partial class FleetPlanStore
     public event Action<string>? Approved;
 
     // Only a plan that is waiting (or blocked and needs another go-ahead) can be approved.
-    public PlanRecord? Approve(string id, bool exportToProject = false)
+    public PlanRecord? Approve(string id, bool exportToProject = false, string? recoveryScope = null)
     {
         bool changed = false;
+        bool retryingBlockedPlan = false;
         PlanRecord? approved = Update(id, plan =>
         {
             if (plan.Status is not (PlanStatus.AwaitingApproval or PlanStatus.Blocked))
@@ -240,7 +371,21 @@ internal sealed partial class FleetPlanStore
             }
 
             changed = true;
-            PlanRecord approved = plan with { Status = PlanStatus.Approved, ApprovedUtc = DateTimeOffset.UtcNow };
+            DateTimeOffset approvedAt = DateTimeOffset.UtcNow;
+            retryingBlockedPlan = plan.Status == PlanStatus.Blocked;
+            IReadOnlyList<PlanStep> steps = retryingBlockedPlan
+                ? plan.Steps.Select(step => step.Status is StepStatus.Running or StepStatus.Failed
+                    ? step with { Attempts = 0 }
+                    : step).ToList()
+                : plan.Steps;
+            PlanRecord approved = plan with
+            {
+                Status = PlanStatus.Approved,
+                ApprovedUtc = approvedAt,
+                RunDeadlineUtc = approvedAt + DefaultRunDuration,
+                RecoveryScope = NormalizeRecoveryScope(recoveryScope) ?? NormalizeRecoveryScope(plan.RecoveryScope) ?? PlanRecoveryScope.WorkerOnly,
+                Steps = steps
+            };
             if (exportToProject)
             {
                 string path = ExportToProject(approved);
@@ -253,6 +398,13 @@ internal sealed partial class FleetPlanStore
         // Outside the store's lock: a listener may call straight back into the store.
         if (changed && approved is not null)
         {
+            if (retryingBlockedPlan)
+            {
+                // The explicit re-approval starts a fresh bounded wait budget as well as a new deadline.
+                // The durable prior waits remain in the report.
+                AddEvent(id, null, null, RunEventKind.RetryApproved,
+                    detail: "The user approved another run; a fresh deadline and bounded infrastructure-wait budget started.");
+            }
             Approved?.Invoke(approved.Id);
         }
 
@@ -309,6 +461,12 @@ internal sealed partial class FleetPlanStore
             text.AppendLine($"Working directory: `{plan.WorkingDirectory}`");
         }
 
+        text.AppendLine($"Recovery scope: {(PlanRecoveryScope.AllowsHubRescue(plan.RecoveryScope) ? "hub model rescue allowed after worker failure" : "worker only")}");
+        if (plan.RunDeadlineUtc is { } deadline)
+        {
+            text.AppendLine($"Run deadline: {Local(deadline)}.");
+        }
+
         if (plan.ExportedPlanPath is not null)
         {
             text.AppendLine($"Exported copy: `{plan.ExportedPlanPath}`");
@@ -348,7 +506,8 @@ internal sealed partial class FleetPlanStore
                 StepStatus.Running => "[~]",
                 _ => "[ ]"
             };
-            text.AppendLine($"- {box} **{step.Id}. {step.Title}** ({step.Tier})");
+            string machine = step.Machine is null ? string.Empty : $", machine: {step.Machine}";
+            text.AppendLine($"- {box} **{step.Id}. {step.Title}** ({step.Tier}{machine})");
             if (!string.IsNullOrWhiteSpace(step.Detail))
             {
                 text.AppendLine($"  - {step.Detail.ReplaceLineEndings(" ")}");
@@ -366,8 +525,10 @@ internal sealed partial class FleetPlanStore
 
             if (step.Verify is not null)
             {
-                text.AppendLine($"  - Verify: `{step.Verify}`");
+                text.AppendLine($"  - {(step.Id == plan.Steps[^1].Id ? "Runner final validation" : "Verify")}: `{step.Verify}`");
             }
+
+            text.AppendLine($"  - Backend restart: {(step.RetrySafe ? "this local step may resume automatically" : "pause for review before retrying")}");
 
             if (!string.IsNullOrWhiteSpace(step.Note))
             {
@@ -388,6 +549,7 @@ internal sealed partial class FleetPlanStore
         text.AppendLine($"# Run report: {plan.Title}");
         text.AppendLine();
         text.AppendLine($"Status: **{plan.Status.Replace('-', ' ')}**. {Marker(plan.Id)}");
+        text.AppendLine($"Recovery scope: {(PlanRecoveryScope.AllowsHubRescue(plan.RecoveryScope) ? "hub model rescue allowed after worker failure" : "worker only")}");
         if (plan.WorkingDirectory is not null)
         {
             text.AppendLine($"Working directory: `{plan.WorkingDirectory}`");
@@ -402,6 +564,10 @@ internal sealed partial class FleetPlanStore
                 : DateTimeOffset.UtcNow;
             text.AppendLine($"Started {Local(started.Value)}, {(plan.Status is PlanStatus.Running or PlanStatus.Approved ? "running for" : "took")} {Duration(end - started.Value)}.");
         }
+        if (plan.RunDeadlineUtc is { } deadline)
+        {
+            text.AppendLine($"Run deadline {Local(deadline)}.");
+        }
 
         int done = plan.Steps.Count(step => step.Status == StepStatus.Done);
         text.AppendLine($"{done} of {plan.Steps.Count} steps done, {plan.Steps.Sum(step => step.Attempts)} attempt(s) in all.");
@@ -409,7 +575,8 @@ internal sealed partial class FleetPlanStore
         PlanStep? blocked = plan.Steps.FirstOrDefault(step => step.Status == StepStatus.Failed);
         if (plan.Status == PlanStatus.Blocked && blocked is not null)
         {
-            PlanRunEvent? lastCheck = events.LastOrDefault(e => e.StepId == blocked.Id && e.Kind == RunEventKind.CheckFailed);
+            PlanRunEvent? lastCheck = events.LastOrDefault(e => e.StepId == blocked.Id &&
+                (e.Kind is RunEventKind.CheckFailed or RunEventKind.FinalValidationFailed or RunEventKind.RunDeadlineExceeded));
             text.AppendLine();
             text.AppendLine($"## Where it stopped");
             text.AppendLine($"Step {blocked.Id}, {blocked.Title}: {blocked.Note}");
@@ -447,10 +614,26 @@ internal sealed partial class FleetPlanStore
                 text.AppendLine($"  - {step.Note.ReplaceLineEndings(" ")}");
             }
 
-            IEnumerable<string> nodes = events.Where(e => e.StepId == step.Id && e.Node is not null).Select(e => e.Node!).Distinct();
-            if (nodes.Any())
+            string[] modelNodes = events.Where(e => e.StepId == step.Id &&
+                    (e.Kind is RunEventKind.AttemptStarted or RunEventKind.AttemptEnded or RunEventKind.ModelFailed) &&
+                    !string.IsNullOrWhiteSpace(e.ModelNode ?? e.Node))
+                .Select(e => e.ModelNode ?? e.Node!)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (modelNodes.Length > 0)
             {
-                text.AppendLine($"  - Answered by: {string.Join(", ", nodes)}");
+                text.AppendLine($"  - Model: {string.Join(", ", modelNodes)}");
+            }
+
+            string[] workspaces = events.Where(e => e.StepId == step.Id &&
+                    (e.Kind is RunEventKind.WorkspaceStaged or RunEventKind.WorkspaceSynced) &&
+                    !string.IsNullOrWhiteSpace(e.WorkspaceNode ?? e.Node))
+                .Select(e => e.WorkspaceNode ?? e.Node!)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (workspaces.Length > 0)
+            {
+                text.AppendLine($"  - Workspace and checks: {string.Join(", ", workspaces)}");
             }
         }
 
@@ -464,7 +647,7 @@ internal sealed partial class FleetPlanStore
         foreach (PlanRunEvent e in events)
         {
             string where = e.StepId is null ? string.Empty : $" step {e.StepId}{(e.Attempt is null ? string.Empty : $" attempt {e.Attempt}")}";
-            string via = string.Join(", ", new[] { e.Tier, e.Node }.Where(part => !string.IsNullOrEmpty(part)));
+            string via = string.Join(", ", new[] { e.Tier, e.ModelNode ?? e.Node, e.WorkspaceNode is null ? null : $"workspace {e.WorkspaceNode}" }.Where(part => !string.IsNullOrEmpty(part)));
             text.AppendLine($"- {Local(e.AtUtc)}{where}: {e.Kind.Replace('-', ' ')}{(via.Length > 0 ? $" ({via})" : string.Empty)}");
             if (e.Kind == RunEventKind.FilesChanged)
             {
@@ -526,8 +709,17 @@ internal sealed partial class FleetPlanStore
             0,
             null,
             null,
-            CleanParallelGroup(input.ParallelGroup));
+            CleanParallelGroup(input.ParallelGroup),
+            RetrySafe: input.RetrySafe);
     }
+
+    internal static string? NormalizeRecoveryScope(string? scope) =>
+        scope?.Trim().ToLowerInvariant() switch
+        {
+            PlanRecoveryScope.WorkerOnly => PlanRecoveryScope.WorkerOnly,
+            PlanRecoveryScope.AllowHubRescue => PlanRecoveryScope.AllowHubRescue,
+            _ => null
+        };
 
     private static string? CleanParallelGroup(string? group)
     {

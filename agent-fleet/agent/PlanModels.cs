@@ -20,6 +20,15 @@ internal static class StepStatus
     public const string Failed = "failed";
 }
 
+internal static class PlanRecoveryScope
+{
+    public const string WorkerOnly = "worker-only";
+    public const string AllowHubRescue = "allow-hub-rescue";
+
+    public static bool AllowsHubRescue(string? scope) =>
+        string.Equals(scope, AllowHubRescue, StringComparison.OrdinalIgnoreCase);
+}
+
 internal sealed record PlanStep(
     int Id,
     string Title,
@@ -32,7 +41,9 @@ internal sealed record PlanStep(
     int Attempts,
     DateTimeOffset? StartedUtc,
     DateTimeOffset? CompletedUtc,
-    string? ParallelGroup = null);
+    string? ParallelGroup = null,
+    string? Machine = null,
+    bool RetrySafe = false);
 
 internal static class RunEventKind
 {
@@ -54,6 +65,17 @@ internal static class RunEventKind
     public const string Waiting = "waiting";
     public const string WorkRestored = "work-restored";
     public const string StepSkipped = "step-skipped";
+    public const string MachineSelected = "machine-selected";
+    public const string WorkspaceFailed = "workspace-failed";
+    public const string WorkspaceStaged = "workspace-staged";
+    public const string WorkspaceSynced = "workspace-synced";
+    public const string RecoveryRouted = "recovery-routed";
+    public const string FinalValidationStarted = "final-validation-started";
+    public const string FinalValidationPassed = "final-validation-passed";
+    public const string FinalValidationFailed = "final-validation-failed";
+    public const string RunLeaseBusy = "run-lease-busy";
+    public const string RunDeadlineExceeded = "run-deadline-exceeded";
+    public const string RetryApproved = "retry-approved";
 }
 
 /// <summary>
@@ -69,7 +91,9 @@ internal sealed record PlanRunEvent(
     string Kind,
     string? Tier,
     string? Node,
-    string Detail);
+    string Detail,
+    string? ModelNode = null,
+    string? WorkspaceNode = null);
 
 /// <summary>
 /// A plan is a durable artifact, not chat text: it is saved as a file, shown to the user
@@ -93,7 +117,9 @@ internal sealed record PlanRecord(
     DateTimeOffset? ApprovedUtc,
     IReadOnlyList<PlanRunEvent>? Events = null,
     string? ExportedPlanPath = null,
-    string? ContextId = null);
+    string? ContextId = null,
+    string? RecoveryScope = null,
+    DateTimeOffset? RunDeadlineUtc = null);
 
 internal sealed record PlanSummary(
     string Id,
@@ -111,4 +137,11 @@ internal sealed record PlanStepInput(
     [property: Description("Files this step reads or changes")] string[]? Files = null,
     [property: Description("A shell command that succeeds only if this step actually worked, for example: dotnet build, or npm test. Leave empty only if nothing can be checked automatically")] string? Verify = null,
     [property: Description("How capable a model the step needs: heavy for hard or risky work, standard for ordinary work, light for trivial edits")] string? Tier = null,
-    [property: Description("Optional shared short label for two or more consecutive, independent steps that can run at the same time. Leave empty unless their files are disjoint and neither depends on the other")] string? ParallelGroup = null);
+    [property: Description("Optional shared short label for two or more consecutive, independent steps that can run at the same time. Leave empty unless their files are disjoint and neither depends on the other")] string? ParallelGroup = null,
+    [property: Description("Set true only when this step's project-local edits and commands are safe to repeat if the backend restarts mid-step. Otherwise false; interrupted steps then wait for user review")] bool RetrySafe = false);
+
+internal sealed record StepMachineRequest(int StepId, string? Machine);
+
+internal sealed record PlanApprovalRequest(
+    bool ExportToProject = false,
+    string? RecoveryScope = null);

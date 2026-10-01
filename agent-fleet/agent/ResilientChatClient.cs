@@ -110,7 +110,9 @@ internal sealed class ResilientChatClient : DelegatingChatClient
         IReadOnlyList<ChatMessage> messages,
         CancellationToken cancellationToken)
     {
-        if (_fallbackClient is null)
+        // A plan workspace pins model execution to its selected worker. Falling back to the hub would
+        // split the model and its tools across machines and violate the worker-only execution contract.
+        if (_fallbackClient is null || WorkerWorkspaceContext.Current is not null)
         {
             return (InnerClient, messages);
         }
@@ -165,6 +167,7 @@ internal sealed class ResilientChatClient : DelegatingChatClient
 
     private bool CanFailOver(Exception exception, IChatClient selectedClient, CancellationToken cancellationToken) =>
         _fallbackClient is not null &&
+        WorkerWorkspaceContext.Current is null &&
         ReferenceEquals(selectedClient, InnerClient) &&
         !cancellationToken.IsCancellationRequested &&
         // Unreachable, timed out, or Ollama itself failed (it crashed loading the model, ran out of memory): another

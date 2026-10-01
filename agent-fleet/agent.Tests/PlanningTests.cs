@@ -256,7 +256,7 @@ public sealed class PlanToolsTests : PlanTestBase
     }
 
     [Fact]
-    public async Task A_failing_verify_leaves_the_step_open_shows_the_output_and_counts_attempts()
+    public async Task A_failing_verify_leaves_the_step_open_and_shows_the_output()
     {
         PlanRecord plan = Approved(Step("a"));
         PlanTools tools = Tools(Fail);
@@ -266,10 +266,11 @@ public sealed class PlanToolsTests : PlanTestBase
 
         Assert.Contains("NOT done", first);
         Assert.Contains("CS1002", first);
-        Assert.Contains("attempt 2", second);
+        Assert.Contains("NOT done", second);
         PlanStep step = Store.Get(plan.Id)!.Steps[0];
         Assert.Equal(StepStatus.Failed, step.Status);
-        Assert.Equal(2, step.Attempts);
+        // Attempts are counted by the runner when an attempt starts (see PlanRunnerTests), not by the check.
+        Assert.Equal(0, step.Attempts);
     }
 
     [Fact]
@@ -374,9 +375,12 @@ public sealed class PlanToolsTests : PlanTestBase
             Json("[\"Create ratelimit.js with a TokenBucket class taking capacity and refillPerSecond, and a tryTake() method\",\"Create ratelimit.test.js using node:test\"]"),
             default);
 
-        // Steps as bare strings are read, but they carry no checks, and a plan without checks is sent back.
+        // Steps as bare strings are read (each one is named in the review), but they carry no checks, and a plan
+        // without checks is sent back.
         Assert.Contains("NOT saved", reply);
         Assert.Contains("No step has a check", reply);
+        Assert.Contains("Step 1 (Create ratelimit.js", reply);
+        Assert.Contains("has no bounded check", reply);
 
         reply = await Tools(Pass).ProposePlanAsync(
             "Create Token Bucket Rate Limiter Module",
@@ -386,9 +390,10 @@ public sealed class PlanToolsTests : PlanTestBase
             Json("\"None\""),
             Json("\"None significant\""),
             "",
-            Json("[\"Create ratelimit.js with a TokenBucket class taking capacity and refillPerSecond, and a tryTake() method\",{\"title\":\"Create ratelimit.test.js using node:test\",\"verify\":\"dotnet --version\"}]"),
+            Json("[{\"title\":\"Create ratelimit.js with a TokenBucket class taking capacity and refillPerSecond, and a tryTake() method\",\"verify\":\"dotnet --version\"},{\"title\":\"Create ratelimit.test.js using node:test\",\"verify\":\"dotnet build\"}]"),
             default);
 
+        // Every step carries a check and the last one checks the whole project.
         Assert.Contains("Plan saved", reply);
         PlanRecord plan = Store.Get(Store.List()[0].Id)!;
         Assert.Equal(2, plan.Steps.Count);

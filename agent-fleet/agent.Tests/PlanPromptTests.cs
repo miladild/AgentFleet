@@ -119,6 +119,23 @@ public sealed class PlanPromptTests : PlanTestBase
         Assert.Null(tools.StepWorkingDirectory([new Microsoft.Extensions.AI.ChatMessage(Microsoft.Extensions.AI.ChatRole.User, PlanRunner.BuildPrompt(elsewhere, elsewhere.Steps[0], 1, null))]));
     }
 
+    [Theory]
+    [InlineData("windows", "Windows PowerShell 5.1 for ordinary commands; && and || chains use cmd.exe")]
+    [InlineData("linux", "bash")]
+    public void Worker_prompts_use_the_worker_shell_and_hide_the_hub_path(string platform, string shell)
+    {
+        PlanRecord plan = NewApproved();
+
+        string prompt = PlanRunner.BuildPrompt(
+            plan, plan.Steps[0], 1, null, workerWorkspace: true, workerMachine: "worker-test", workerPlatform: platform);
+
+        Assert.Contains("isolated workspace of the selected worker", prompt);
+        Assert.Contains("Use project-relative paths", prompt);
+        Assert.Contains(shell, prompt);
+        Assert.DoesNotContain(plan.WorkingDirectory!, prompt);
+        Assert.DoesNotContain("Project folder:", prompt);
+    }
+
     [Fact]
     public void A_long_check_output_keeps_every_failing_test_and_the_totals_ahead_of_its_end()
     {

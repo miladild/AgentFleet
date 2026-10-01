@@ -39,11 +39,13 @@ public sealed class PlanRunLogTests : PlanTestBase
             [
                 RunEventKind.RunStarted,
                 RunEventKind.AttemptStarted, RunEventKind.AttemptEnded, RunEventKind.CheckPassed, RunEventKind.StepDone,
-                RunEventKind.AttemptStarted, RunEventKind.AttemptEnded, RunEventKind.CheckPassed, RunEventKind.StepDone,
+                // The last step's check is the runner's final validation, and the log says so.
+                RunEventKind.AttemptStarted, RunEventKind.AttemptEnded,
+                RunEventKind.FinalValidationStarted, RunEventKind.CheckPassed, RunEventKind.FinalValidationPassed, RunEventKind.StepDone,
                 RunEventKind.PlanDone
             ],
             events.Select(e => e.Kind));
-        Assert.Equal([null, 1, 1, 1, 1, 2, 2, 2, 2, null], events.Select(e => e.StepId));
+        Assert.Equal([null, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, null], events.Select(e => e.StepId));
         Assert.All(events.Where(e => e.Kind == RunEventKind.AttemptEnded), e => Assert.Equal("worker1", e.Node));
         Assert.Contains("Wrote it.", events.First(e => e.Kind == RunEventKind.AttemptEnded).Detail);
     }
@@ -111,7 +113,8 @@ public sealed class PlanRunLogTests : PlanTestBase
     [Fact]
     public async Task A_failing_check_is_logged_with_its_output_and_the_tier_of_each_attempt()
     {
-        PlanRecord plan = Approved(Step("hard", tier: "standard"));
+        // Step 1 fails its check twice; step 2 is the last step and passes at once.
+        PlanRecord plan = Approved(Step("hard", tier: "standard"), Step("all tests"));
         int checks = 0;
 
         await Runner(Agent(), command => ++checks < 3 ? Fail(command) : Pass(command)).RunPlanAsync(plan.Id, default);
@@ -119,8 +122,27 @@ public sealed class PlanRunLogTests : PlanTestBase
         IReadOnlyList<PlanRunEvent> events = Store.Get(plan.Id)!.Events!;
         PlanRunEvent[] failures = events.Where(e => e.Kind == RunEventKind.CheckFailed).ToArray();
         Assert.Equal(2, failures.Length);
+        Assert.All(failures, e => Assert.Equal(1, e.StepId));
         Assert.All(failures, e => Assert.Contains("expected 3 got 2", e.Detail));
-        Assert.Equal(["standard", "heavy", "heavy"], events.Where(e => e.Kind == RunEventKind.AttemptStarted).Select(e => e.Tier));
+        Assert.Equal(["standard", "standard", "standard"],
+            events.Where(e => e.Kind == RunEventKind.AttemptStarted && e.StepId == 1).Select(e => e.Tier));
+    }
+
+    [Fact]
+    public async Task A_failing_last_check_is_logged_as_a_failed_final_validation_with_its_output()
+    {
+        PlanRecord plan = Approved(Step("everything", tier: "standard"));
+        int checks = 0;
+
+        await Runner(Agent(), command => ++checks < 3 ? Fail(command) : Pass(command)).RunPlanAsync(plan.Id, default);
+
+        IReadOnlyList<PlanRunEvent> events = Store.Get(plan.Id)!.Events!;
+        PlanRunEvent[] failures = events.Where(e => e.Kind == RunEventKind.FinalValidationFailed).ToArray();
+        Assert.Equal(2, failures.Length);
+        Assert.All(failures, e => Assert.Contains("expected 3 got 2", e.Detail));
+        Assert.Equal(3, events.Count(e => e.Kind == RunEventKind.FinalValidationStarted));
+        Assert.Single(events, e => e.Kind == RunEventKind.FinalValidationPassed);
+        Assert.DoesNotContain(events, e => e.Kind == RunEventKind.CheckFailed);
     }
 
     [Fact]
@@ -137,7 +159,8 @@ public sealed class PlanRunLogTests : PlanTestBase
         Assert.Contains("## Where it stopped", report);
         Assert.Contains("expected 3 got 2", report);
         Assert.Contains("## Timeline", report);
-        Assert.Contains("Answered by: worker1", report);
+        // The report names the model that answered; a worker workspace has its own line when one was used.
+        Assert.Contains("Model: worker1", report);
     }
 
     [Fact]

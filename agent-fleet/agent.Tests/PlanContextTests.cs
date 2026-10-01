@@ -36,8 +36,8 @@ public sealed class PlanContextTests : ContextTestBase
         return plans.Approve(plan.Id)!;
     }
 
-    private static PlanStepInput Step(string title, string file, string? tier = "standard") =>
-        new(title, "detail of " + title, [file], "check", tier);
+    private static PlanStepInput Step(string title, string file, string? tier = "standard", bool retrySafe = false) =>
+        new(title, "detail of " + title, [file], "check", tier, RetrySafe: retrySafe);
 
     [Fact]
     public async Task Step_two_receives_what_step_one_decided_handed_over_and_produced()
@@ -234,7 +234,9 @@ public sealed class PlanContextTests : ContextTestBase
     [Fact]
     public async Task After_a_backend_restart_the_plan_resumes_in_the_same_context_with_the_handoff_intact()
     {
-        PlanRecord plan = Approved(Plans, Step("Step one", "a.txt"), Step("Step two", "b.txt"));
+        // Step two only writes one file, so it is marked safe to replay: without that mark an interrupted step waits for
+        // the user (see the test below).
+        PlanRecord plan = Approved(Plans, Step("Step one", "a.txt"), Step("Step two", "b.txt", retrySafe: true));
         using var shutdown = new CancellationTokenSource();
         var firstRun = new FakeStepAgent((prompt, _, _) =>
         {
@@ -273,6 +275,50 @@ public sealed class PlanContextTests : ContextTestBase
         Assert.Contains("Handoff from step 1", injected);
         Assert.Contains(Store.EventsOfKinds(contextId, [FleetContextEventKind.PlanTransition], 50),
             e => ContextText.String(e.Payload, "note")!.Contains("resumed", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task After_a_backend_restart_a_step_not_marked_safe_to_replay_waits_for_the_user_and_then_goes_on()
+    {
+        PlanRecord plan = Approved(Plans, Step("Step one", "a.txt"), Step("Step two", "b.txt"));
+        using var shutdown = new CancellationTokenSource();
+        var firstRun = new FakeStepAgent((prompt, _, _) =>
+        {
+            if (prompt.Contains("(1 of 2)"))
+            {
+                File.WriteAllText(File1, "one");
+                return Task.FromResult("ok");
+            }
+
+            shutdown.Cancel();
+            throw new OperationCanceledException(shutdown.Token);
+        });
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Runner(firstRun).RunPlanAsync(plan.Id, shutdown.Token));
+
+        SqliteConnection.ClearAllPools();
+        Restart();
+        Plans = new FleetPlanStore(Configuration);
+        var secondRun = new FakeStepAgent((_, _, _) =>
+        {
+            File.WriteAllText(Path.Combine(_project, "b.txt"), "step two");
+            return Task.FromResult("ok");
+        });
+
+        await Runner(secondRun, Plans).RunPlanAsync(plan.Id, default);
+
+        // Nothing is replayed on its own: the plan pauses with the reason, and the model is not called.
+        PlanRecord paused = Plans.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Blocked, paused.Status);
+        Assert.Empty(secondRun.Calls);
+        Assert.Contains("not marked safe to replay", paused.Steps[1].Note);
+        Assert.Contains(paused.Events!, e => e.Kind == RunEventKind.PlanBlocked && e.StepId == 2);
+
+        // The user has looked and approves another run: the step goes again and the plan finishes.
+        Plans.Approve(plan.Id);
+        await Runner(secondRun, Plans).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(PlanStatus.Done, Plans.Get(plan.Id)!.Status);
+        Assert.Single(secondRun.Calls);
     }
 
     [Fact]
@@ -373,7 +419,8 @@ public sealed class PlanContextTests : ContextTestBase
         Assert.Contains("scratch-experiment.txt", agent.Calls[1].Prompt);
         Assert.Contains("does not name", agent.Calls[1].Prompt);
         PlanRecord after = Plans.Get(plan.Id)!;
-        Assert.Contains(after.Events!, e => e.Kind == RunEventKind.CheckFailed && e.Detail.Contains("scratch-experiment.txt"));
+        // The only step is the last one, so its check is the runner's final validation.
+        Assert.Contains(after.Events!, e => e.Kind == RunEventKind.FinalValidationFailed && e.Detail.Contains("scratch-experiment.txt"));
         Assert.Contains(after.Events!, e => e.Kind == RunEventKind.StepDone && e.Detail.Contains("scratch-experiment.txt"));
         Assert.True(File.Exists(Path.Combine(_project, "scratch-experiment.txt")), "the fleet reports leftovers, it never deletes them");
     }
@@ -454,7 +501,7 @@ public sealed class PlanContextTests : ContextTestBase
         PlanRecord after = Plans.Get(plan.Id)!;
         Assert.Equal(PlanStatus.Done, after.Status);
         Assert.Equal(2, agent.Calls.Count);
-        Assert.Contains(after.Events!, e => e.Kind == RunEventKind.CheckFailed && e.Detail.Contains("*.test.ts"));
+        Assert.Contains(after.Events!, e => e.Kind == RunEventKind.FinalValidationFailed && e.Detail.Contains("*.test.ts"));
         Assert.DoesNotContain(after.Events!, e => e.Kind == RunEventKind.StepDone && e.Detail.Contains("does not name"));
     }
 
@@ -545,7 +592,7 @@ public sealed class PlanContextTests : ContextTestBase
         PlanRecord after = Plans.Get(plan.Id)!;
         Assert.Equal(PlanStatus.Done, after.Status);
         Assert.Equal(1, after.Steps[0].Attempts);
-        Assert.Contains(after.Events!, e => e.Kind == RunEventKind.AttemptStarted && e.Detail.Contains("last failure"));
+        Assert.Contains(after.Events!, e => e.Kind == RunEventKind.RetryApproved);
     }
 
     [Fact]

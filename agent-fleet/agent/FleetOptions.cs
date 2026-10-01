@@ -14,7 +14,8 @@ internal sealed record FleetNodeDefinition(
     int? ContextLength = null,
     string? Api = null,
     string Caveman = AgentStylePrompt.Off,
-    string Ponytail = AgentStylePrompt.Off)
+    string Ponytail = AgentStylePrompt.Off,
+    FleetWorkerWorkspaceConfig? Workspace = null)
 {
     /// <summary>The machine's Ollama root, http://host:11434/, for the native API.</summary>
     public Uri OllamaRoot => new UriBuilder(OpenAiEndpoint.Scheme, OpenAiEndpoint.Host, OpenAiEndpoint.IsDefaultPort ? -1 : OpenAiEndpoint.Port, "/").Uri;
@@ -131,7 +132,8 @@ internal sealed class FleetOptions
             config.ContextLength,
             config.Api,
             AgentStylePrompt.Normalize(config.Caveman),
-            AgentStylePrompt.Normalize(config.Ponytail));
+            AgentStylePrompt.Normalize(config.Ponytail),
+            config.Workspace);
     }
 
     private static TimeSpan ReadDuration(

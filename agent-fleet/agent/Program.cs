@@ -20,8 +20,7 @@ builder.Host.UseWindowsService();
 // Deployed as a Windows Service, stdout goes nowhere and nothing was reaching
 // Windows Event Log either - there was no way to see what the backend was
 // doing short of attaching a debugger. A plain rolling text file next to the
-// exe (dev or C:\AgentFleet\backend, whichever this happens to be running
-// from) fixes that: `tail`/open logs\agent-*.log to watch requests, routing
+// exe fixes that: `tail`/open logs\agent-*.log to watch requests, routing
 // decisions, and errors as they happen.
 builder.Host.UseSerilog((context, loggerConfiguration) => loggerConfiguration
     .MinimumLevel.Information()
@@ -96,11 +95,10 @@ var readOnlyTools = new SwappableNameSet(PlanGate.BuiltInReadOnlyTools);
 // Builds the router from the machines in the config. Called at startup and again whenever the saved
 // machines or triage model change, so those apply without a restart (see SwappableChatClient).
 //
-// Every node comes from fleet.config.json. Text nodes fall back to the fallback node
-// when they are down; vision nodes have no fallback: no text node can see images, so
-// silently rerouting on failure would produce a confident-sounding answer about an
-// image nobody looked at. Better to surface a clear error and let the user retry once
-// the vision node is up.
+// Every node comes from fleet.config.json. Text nodes normally fall back to the fallback
+// node when they are down; a worker plan scope disables that cross-machine fallback so
+// a model and its workspace tools cannot silently split across machines. Vision nodes
+// also have no fallback: no text node can see images, so surface a clear error instead.
 FleetRoutingChatClient BuildRouter(FleetConfig config)
 {
     IReadOnlyList<FleetNodeDefinition> nodes = fleetOptions.ReplaceNodes(config);
@@ -170,6 +168,7 @@ var sandbox = new SandboxHolder(
 
 HubShellOptions shellOptions = HubShellOptions.Load(builder.Configuration);
 Microsoft.Extensions.Logging.ILogger shellLogger = loggerFactory.CreateLogger("AgentFleet.Shell");
+var workerWorkspaces = new WorkerWorkspaceManager(fleetOptions, loggerFactory.CreateLogger("AgentFleet.WorkerWorkspace"), shellOptions.ExecutionTimeout);
 
 [Description("""
     Runs code in a locked-down, throwaway Docker container and returns its combined
@@ -185,6 +184,11 @@ static async Task<string> RunSandboxedCodeAsync(
     [Description("The code to run. Sent to the interpreter's stdin, not a shell - no need to escape quotes.")] string code,
     CancellationToken cancellationToken)
 {
+    if (WorkerWorkspaceContext.Current is not null)
+    {
+        return "Error: the Docker code sandbox runs on the hub and is unavailable during a worker plan step. Use run_command to execute checks in the selected worker workspace.";
+    }
+
     if (sandbox.Executor is not { } executor)
     {
         return "Error: the code sandbox is switched off. The user can set it up in the web UI under Config, Sandbox.";
@@ -204,23 +208,22 @@ static async Task<string> RunSandboxedCodeAsync(
 // panel shows), so the UI never drifts from what the model was actually told.
 Dictionary<string, string> toolDescriptions = new(StringComparer.Ordinal)
 {
-    ["run_sandboxed_code"] = "Runs code in a locked-down, throwaway Docker container and returns its output.",
-    ["read_file"] = "Reads a text file from the hub machine's local filesystem and returns its contents. For a large file, pass startLine and endLine (1-based, inclusive) to read just that part.",
-    ["write_file"] = "Writes (creates or overwrites) a text file on the hub machine's local filesystem, creating parent directories if needed. Use it for new files; to change part of an existing file, use edit_file instead.",
+    ["run_sandboxed_code"] = "Runs code in a locked-down, throwaway Docker container on the hub. During worker plan steps, use run_command for checks on the selected worker.",
+    ["read_file"] = "Reads a text file from the local project. During an approved plan step, this is the selected worker's staged project; otherwise it is the hub filesystem. For a large file, pass startLine and endLine (1-based, inclusive).",
+    ["write_file"] = "Writes a text file in the local project. During an approved plan step, writes only inside the selected worker's staged project; otherwise writes on the hub. Use edit_file for a small change to an existing file.",
     ["edit_file"] = "Changes part of an existing file by replacing exact text: oldText must match the file exactly (including indentation) and appear only once, unless replaceAll is true. " +
         "Prefer this over write_file for any change to an existing file - it is faster and cannot accidentally drop the rest of the file. Read the file first so oldText is copied exactly.",
-    ["list_directory"] = "Lists files and subdirectories at a path on the hub machine's local filesystem.",
+    ["list_directory"] = "Lists files and subdirectories in the local project. During an approved plan step, this is the selected worker's staged project; otherwise it is the hub filesystem.",
     ["find_files"] = "Finds files by name with a glob pattern such as \"*.cs\" or \"src/**/*.tsx\" under a directory and returns their relative paths. Skips node_modules, bin, obj, .git and similar folders.",
     ["search_files"] = "Searches file contents under a directory for a regular expression, like grep -rn, and returns matching lines as path:line: text. " +
         "Skips binary files and folders such as node_modules, bin, obj and .git. Optionally restrict it with fileGlob (for example \"*.cs\") and ignoreCase.",
-    ["run_git_command"] = "Runs a git command (e.g. \"status\", \"diff\", \"add -A\", \"commit -m 'message'\", \"log --oneline -10\") in the given repository directory on the hub machine and returns its output.",
-    ["run_command"] = "Runs any shell command on the hub machine and returns its output - not limited to a fixed list. " +
-        "This includes invoking any CLI toolchain already installed on the hub: dotnet (new/build/run/test, " +
+    ["run_git_command"] = "Runs a git command (e.g. \"status\", \"diff\", \"log --oneline -10\") in the local project. During an approved plan step, it runs in the selected worker's isolated staged project, with local-only git metadata and no remote history; otherwise on the hub.",
+    ["run_command"] = "Runs a shell command in the local project. During an approved plan step, it runs on the selected worker in its isolated staged project; otherwise on the hub. " +
+        "This includes invoking any CLI toolchain already installed on the current execution machine: dotnet (new/build/run/test, " +
         "including Blazor/ASP.NET Core/console/WPF projects), npm/yarn/pnpm, pip, cargo, go, mvn/gradle, " +
-        $"docker (outside the sandbox), or anything else runnable from {HubPlatform.ShellDescription}. If a request needs a " +
+        "docker, or anything else runnable from its shell. If a request needs a " +
         "toolchain's CLI and it's plausibly installed, call this instead of concluding the fleet \"doesn't " +
-        "support\" that language or framework. Not sandboxed - runs directly on the hub with the backend's own " +
-        "permissions.",
+        "support\" that language or framework. Plan commands run as the configured limited worker account; ordinary chat commands run as the local Fleet account.",
     ["propose_plan"] = "Saves a plan for the user to review and approve before any change is made. Use it in plan mode after exploring the code. It does not start the work; the plan then waits for the user's approval. " +
         "When the user points to a plan file in the fleet's plan format (\"## Step 1: title\" sections with \"- Tier:\", \"- Files:\" and \"- Check:\" lines), pass only title and planFile (its full path): the fleet reads the steps from the file exactly as written. " +
         "Arguments: title (short), goal (one or two sentences), workingDirectory (the project folder), assumptions (array of strings), openQuestions (array of strings, empty if none), " +
@@ -244,13 +247,12 @@ Dictionary<string, string> toolDescriptions = new(StringComparer.Ordinal)
         "afterward to actually read it.",
     ["web_fetch"] = "Fetches a URL and returns its readable text content (HTML tags, scripts, and styles stripped) " +
         "- not raw markup. Use this to actually read a page found via web_search, or any URL you already have.",
-    ["project_overview"] = "Shows a project folder at a glance: its folders and files a few levels deep (dependency and build folders skipped), " +
-        "how to build and test it from its project files (package.json scripts, .csproj, pyproject.toml, Cargo.toml, go.mod, Makefile...), and the start of its README. " +
-        "Use it first on an unfamiliar project instead of listing folders one by one.",
-    ["move_file"] = "Moves or renames a file or folder on the hub. Creates the destination's parent folders. Refuses to replace an existing file unless overwrite is true.",
-    ["delete_file"] = "Deletes one file, or an empty folder, on the hub. It will not delete a folder that has contents.",
-    ["http_request"] = "Sends an HTTP request (GET, POST, PUT, PATCH, DELETE) to any URL, including a local server such as http://localhost:5000, and returns the status, " +
-        "main headers and the raw body (JSON pretty-printed). Use it to try an API; use web_fetch to read a web page. " +
+    ["project_overview"] = "Shows a local project folder at a glance. In chat it includes build/test hints from project manifests; in a plan step it shows the selected worker's staged tree, so use read_file on manifests or the README for details. " +
+        "Dependency and build folders are skipped. Use it first on an unfamiliar project instead of listing folders one by one.",
+    ["move_file"] = "Moves or renames a file in the local project. During a plan step, operates in the selected worker workspace. Creates destination parent folders and refuses replacement unless overwrite is true.",
+    ["delete_file"] = "Deletes one file or an empty folder in the local project. During a plan step, operates in the selected worker workspace.",
+    ["http_request"] = "Sends an HTTP request (GET, POST, PUT, PATCH, DELETE) from the hub to any URL, including a local server such as http://localhost:5000, and returns the status, " +
+        "main headers and the raw body (JSON pretty-printed). During worker plan steps, use run_command on the selected worker for requests from that machine. Use web_fetch to read a web page. " +
         "headers is optional, one \"Name: value\" per line; body is sent as JSON when it looks like JSON."
 };
 
@@ -274,47 +276,47 @@ AITool searchContextTool = AIFunctionFactory.Create(
 
 AITool readFileTool = AIFunctionFactory.Create(
     (string path, int? startLine = null, int? endLine = null, CancellationToken cancellationToken = default) =>
-        HubFileSystemTools.ReadFileAsync(path, startLine, endLine, cancellationToken),
+        WorkspaceTools.ReadFileAsync(path, startLine, endLine, cancellationToken),
     name: "read_file",
     description: toolDescriptions["read_file"]);
 
 AITool editFileTool = AIFunctionFactory.Create(
     (string path, string oldText, string newText, bool? replaceAll = null, CancellationToken cancellationToken = default) =>
-        HubFileSystemTools.EditFileAsync(path, oldText, newText, replaceAll, cancellationToken),
+        WorkspaceTools.EditFileAsync(path, oldText, newText, replaceAll, cancellationToken),
     name: "edit_file",
     description: toolDescriptions["edit_file"]);
 
 AITool findFilesTool = AIFunctionFactory.Create(
-    (string pattern, string? path = null) => HubFileSystemTools.FindFiles(pattern, path),
+    (string pattern, string? path = null) => WorkspaceTools.FindFiles(pattern, path),
     name: "find_files",
     description: toolDescriptions["find_files"]);
 
 AITool searchFilesTool = AIFunctionFactory.Create(
     (string pattern, string? path = null, string? fileGlob = null, bool? ignoreCase = null) =>
-        HubFileSystemTools.SearchFiles(pattern, path, fileGlob, ignoreCase),
+        WorkspaceTools.SearchFiles(pattern, path, fileGlob, ignoreCase),
     name: "search_files",
     description: toolDescriptions["search_files"]);
 
 AITool writeFileTool = AIFunctionFactory.Create(
     (string path, string content, CancellationToken cancellationToken) =>
-        HubFileSystemTools.WriteFileAsync(path, content, cancellationToken),
+        WorkspaceTools.WriteFileAsync(path, content, cancellationToken),
     name: "write_file",
     description: toolDescriptions["write_file"]);
 
 AITool listDirectoryTool = AIFunctionFactory.Create(
-    (string path) => HubFileSystemTools.ListDirectory(path),
+    (string path) => WorkspaceTools.ListDirectory(path),
     name: "list_directory",
     description: toolDescriptions["list_directory"]);
 
 AITool runGitCommandTool = AIFunctionFactory.Create(
     (string repositoryPath, string arguments, CancellationToken cancellationToken) =>
-        HubShellTools.RunGitCommandAsync(repositoryPath, arguments, shellOptions, shellLogger, cancellationToken),
+        WorkspaceTools.RunGitCommandAsync(repositoryPath, arguments, shellOptions, shellLogger, cancellationToken),
     name: "run_git_command",
     description: toolDescriptions["run_git_command"]);
 
 AITool runCommandTool = AIFunctionFactory.Create(
     (string command, string? workingDirectory = null, CancellationToken cancellationToken = default) =>
-        HubShellTools.RunCommandAsync(command, workingDirectory, shellOptions, shellLogger, cancellationToken),
+        WorkspaceTools.RunCommandAsync(command, workingDirectory, shellOptions, shellLogger, cancellationToken),
     name: "run_command",
     description: toolDescriptions["run_command"]);
 
@@ -334,23 +336,25 @@ AITool webFetchTool = AIFunctionFactory.Create(
 
 AITool projectOverviewTool = AIFunctionFactory.Create(
     ([Description("The project's folder")] string path, [Description("How many folder levels to show, 1 to 6 (default 3)")] int? depth = null) =>
-        ProjectTools.ProjectOverview(path, depth),
+        WorkspaceTools.ProjectOverview(path, depth),
     name: "project_overview",
     description: toolDescriptions["project_overview"]);
 
 AITool moveFileTool = AIFunctionFactory.Create(
-    (string source, string destination, bool? overwrite = null) => ProjectTools.MoveFile(source, destination, overwrite),
+    (string source, string destination, bool? overwrite = null) => WorkspaceTools.MoveFile(source, destination, overwrite),
     name: "move_file",
     description: toolDescriptions["move_file"]);
 
 AITool deleteFileTool = AIFunctionFactory.Create(
-    (string path) => ProjectTools.DeleteFile(path),
+    (string path) => WorkspaceTools.DeleteFile(path),
     name: "delete_file",
     description: toolDescriptions["delete_file"]);
 
 AITool httpRequestTool = AIFunctionFactory.Create(
-    (string url, string? method = null, [Description("Optional, one \"Name: value\" per line")] string? headers = null, string? body = null, CancellationToken cancellationToken = default) =>
-        ProjectTools.HttpRequestAsync(url, method, headers, body, httpClientFactory, webLogger, cancellationToken),
+    async (string url, string? method = null, [Description("Optional, one \"Name: value\" per line")] string? headers = null, string? body = null, CancellationToken cancellationToken = default) =>
+        WorkerWorkspaceContext.Current is not null
+            ? "Error: http_request originates on the hub and is unavailable during worker plan steps. Use run_command for requests from the selected worker."
+            : await ProjectTools.HttpRequestAsync(url, method, headers, body, httpClientFactory, webLogger, cancellationToken),
     name: "http_request",
     description: toolDescriptions["http_request"]);
 
@@ -362,8 +366,10 @@ var planTools = new PlanTools(
     planStore,
     new FrontendDiagramValidator(httpClientFactory, frontendUrl),
     (command, workingDirectory, cancellationToken) =>
-        HubShellTools.RunCommandAsync(command, workingDirectory, shellOptions, shellLogger, cancellationToken),
-    contextJournal);
+        WorkspaceTools.RunCommandAsync(command, workingDirectory, shellOptions, shellLogger, cancellationToken),
+    contextJournal,
+    workerWorkspacesEnabled: true,
+    modeService: modeService);
 
 AITool proposePlanTool = AIFunctionFactory.Create(
     // The descriptions are not decoration: a raw JsonElement parameter is described to the model as
@@ -376,7 +382,7 @@ AITool proposePlanTool = AIFunctionFactory.Create(
         [Description("Array of strings: questions for the user, empty if none")] System.Text.Json.JsonElement? openQuestions = null,
         [Description("Array of strings: what could go wrong")] System.Text.Json.JsonElement? risks = null,
         string? diagram = null,
-        [Description("Array of step objects, each with title, detail, files (array), verify and tier")] System.Text.Json.JsonElement? steps = null,
+        [Description("Array of step objects, each with title, detail, files (array), verify, tier, and retrySafe. Set retrySafe true only for project-local work and commands that are safe to repeat after a backend restart; otherwise false")] System.Text.Json.JsonElement? steps = null,
         [Description("Full path of a plan file the user pointed to, written in the fleet's plan format (\"## Step 1: title\" sections with Tier, Files and Check lines). The fleet reads every step from the file exactly as written; leave steps empty.")] string? planFile = null,
         CancellationToken cancellationToken = default) =>
         !string.IsNullOrWhiteSpace(planFile)
@@ -549,7 +555,7 @@ bool ToolReturnedError(string result)
 
 // How many tool rounds one attempt at a plan step gets. Measured: a small worker wrote and ran the same test file for more
 // than ten minutes, and the hub once spent 34 rounds on one step. After the budget the attempt ends and the step's own
-// check decides; a failure goes to the next attempt with the real output, on the strongest machine.
+// check decides; a failure goes to the next attempt with the real output at the same requested tier.
 int planStepToolRounds = int.TryParse(builder.Configuration["FLEET_PLAN_STEP_TOOL_ROUNDS"], out int stepRounds) && stepRounds is >= 5 and <= 200
     ? stepRounds
     : 25;
@@ -573,6 +579,20 @@ IChatClient agentClient = new ChatClientBuilder(fleetClient)
             string toolName = context.Function.Name;
             // The plan runner is the executor: its requests carry the runner key and are exempt.
             bool fromRunner = context.Options?.AdditionalProperties?.ContainsKey(FleetRoutingChatClient.RunnerTierKey) == true;
+            if (fromRunner)
+            {
+                string? command = null;
+                if (toolName == "run_command" && context.Arguments.TryGetValue("command", out object? commandValue))
+                    command = commandValue?.ToString();
+                else if (toolName == "run_git_command" && context.Arguments.TryGetValue("arguments", out object? gitArguments))
+                    command = gitArguments?.ToString();
+                if (PlanRunnerToolPolicy.Refusal(toolName, command) is { } refusal)
+                {
+                    context.Terminate = true;
+                    RecordToolCall(context, toolName, refusal, isError: true);
+                    return refusal;
+                }
+            }
             if (toolName != PlanGate.BlockedToolName && !fromRunner)
             {
                 PlanGateResult gate = PlanGate.Evaluate(
@@ -648,22 +668,23 @@ var fleetAgent = new ChatClientAgent(
           with no access to the user's real files - use it for quick, self-contained
           snippets, not for anything touching a real project.
         - read_file, write_file, edit_file, list_directory, find_files, search_files,
-          project_overview, move_file, delete_file: direct access to the hub machine's
-          own local filesystem (the same machine you're running on) - use these to look
-          at and change files in the user's actual projects. On an unfamiliar project,
-          start with project_overview: it shows the layout and how to build and test it.
+          project_overview, move_file, delete_file: during an approved plan step, these
+          operate on that step's selected worker and its staged project. In ordinary chat,
+          they use the hub's local filesystem. On an unfamiliar project, start with
+          project_overview to see its layout.
           To change an existing file, read it and then use edit_file with the exact old
           text; only use write_file for new files or a complete rewrite. To locate
           something, use search_files (contents) or find_files (names) instead of
-          guessing paths. There is no path restriction, so confirm the exact path with
-          the user if it's ambiguous rather than guessing, and ask before deleting.
-        - run_git_command: runs git in a given repository directory on the hub - status,
-          diff, add, commit, branch, log, etc.
-        - run_command: runs any shell command directly on the hub, not limited to a
-          fixed list - this is how you invoke any CLI toolchain already installed on
-          the hub (dotnet, npm/yarn/pnpm, pip, cargo, go, mvn/gradle, docker outside
-          the sandbox, etc.) to scaffold, build, run, or test a real project in any
-          language or framework. Not sandboxed, real effects on this machine. Prefer
+          guessing paths. Worker file tools stay inside the staged project. Do not
+          delete project data unless the user's request or approved plan calls for it.
+        - run_git_command: runs git in the local repository; during a plan step it runs
+          in the selected worker workspace, and in ordinary chat it runs on the hub.
+        - run_command: runs a shell command in the local project; during a plan step it
+          runs on the selected worker, and in ordinary chat it runs on the hub. Use it
+          to invoke available project toolchains (dotnet, npm/yarn/pnpm, pip, cargo,
+          go, mvn/gradle, etc.) for real project builds and checks. Plan checks always
+          run on the selected worker. Commands run with that machine account's OS rights.
+          Prefer
           the most specific tool for the job (run_git_command for git,
           run_sandboxed_code for a quick isolated snippet with no real project
           involved) and use run_command for everything else.
@@ -716,11 +737,12 @@ var planRunner = new PlanRunner(
     new FleetStepAgent(fleetAgent),
     loggerFactory.CreateLogger("AgentFleet.PlanRunner"),
     fleetOptions: fleetOptions,
+    workerWorkspaces: workerWorkspaces,
+    modeService: modeService,
     healthMonitor: healthMonitor,
     recorder: new PlanContextRecorder(contextStore, planStore, loggerFactory.CreateLogger("AgentFleet.PlanContext")),
     journal: contextJournal,
-    sleepGuard: new SystemSleepGuard(loggerFactory.CreateLogger("AgentFleet.Power")),
-    cheapAttempts: int.TryParse(builder.Configuration["FLEET_PLAN_CHEAP_ATTEMPTS"], out int cheapAttempts) ? cheapAttempts : 1);
+    sleepGuard: new SystemSleepGuard(loggerFactory.CreateLogger("AgentFleet.Power")));
 planStore.Approved += planRunner.Enqueue;
 app.Lifetime.ApplicationStarted.Register(() => planRunner.Start(app.Lifetime.ApplicationStopping));
 
@@ -780,8 +802,11 @@ app.MapGet("/api/fleet-status", async (CancellationToken cancellationToken) =>
         {
             name = node.Name,
             model = node.Model,
+            tier = fleetOptions.GetNode(node.Name).Tier,
             ready = node.Ready,
-            reachable = node.Reachable
+            reachable = node.Reachable,
+            vision = fleetOptions.GetNode(node.Name).Vision,
+            workspace = fleetOptions.GetNode(node.Name).Workspace is not null && !fleetOptions.GetNode(node.Name).Fallback
         }),
         recentActivity = activityLog.Recent().Select(entry => new
         {
@@ -798,7 +823,7 @@ app.MapGet("/api/fleet-config", () =>
     return Results.Json(new
     {
         triageModel = config.TriageModel,
-        nodes = config.Nodes.Select(node => new { node.Name, node.Url, node.Model, node.Purpose, node.Tier, node.Vision, node.Fallback, node.ContextLength, node.Api, node.Caveman, node.Ponytail }),
+        nodes = config.Nodes.Select(node => new { node.Name, node.Url, node.Model, node.Purpose, node.Tier, node.Vision, node.Fallback, node.ContextLength, node.Api, node.Caveman, node.Ponytail, node.Workspace }),
         tools = ToolsPayload(config),
         mcpServers = config.McpServerMap,
         // What actually happened at the last startup, which can differ from the saved
@@ -921,7 +946,8 @@ app.MapPut("/api/fleet-config", async (FleetConfigUpdateRequest request, Cancell
                         node.ContextLength,
                         node.Api,
                         node.Caveman ?? previous?.Caveman,
-                        node.Ponytail ?? previous?.Ponytail);
+                        node.Ponytail ?? previous?.Ponytail,
+                        node.ClearWorkspace ? null : node.Workspace ?? previous?.Workspace);
                 }).ToList()
                 : current.Nodes,
             Tools = request.Tools is { Count: > 0 }
@@ -970,7 +996,7 @@ app.MapPut("/api/fleet-config", async (FleetConfigUpdateRequest request, Cancell
         return Results.Json(new
         {
             triageModel = saved.TriageModel,
-            nodes = saved.Nodes.Select(node => new { node.Name, node.Url, node.Model, node.Purpose, node.Tier, node.Vision, node.Fallback, node.ContextLength, node.Api, node.Caveman, node.Ponytail }),
+            nodes = saved.Nodes.Select(node => new { node.Name, node.Url, node.Model, node.Purpose, node.Tier, node.Vision, node.Fallback, node.ContextLength, node.Api, node.Caveman, node.Ponytail, node.Workspace }),
             tools = ToolsPayload(saved),
             mcpServers = saved.McpServerMap,
             mcpStatus = toolRegistry.Mcp.Statuses,
@@ -994,6 +1020,47 @@ app.MapGet("/api/plans", () => Results.Json(planStore.List()));
 app.MapGet("/api/plans/{id}", (string id) =>
     planStore.Get(id) is { } plan ? Results.Json(plan) : Results.NotFound());
 
+app.MapPost("/api/plans/{id}/machine", (string id, StepMachineRequest request) =>
+{
+    if (planStore.Get(id) is null)
+    {
+        return Results.NotFound();
+    }
+
+    string? machine = null;
+    if (!string.IsNullOrWhiteSpace(request.Machine))
+    {
+        FleetNodeDefinition? node = fleetOptions.Nodes.FirstOrDefault(candidate =>
+            !candidate.Vision && !candidate.Fallback && candidate.Workspace is not null &&
+            string.Equals(candidate.Name, request.Machine.Trim(), StringComparison.OrdinalIgnoreCase));
+        if (node is null)
+        {
+            return Results.BadRequest(new { error = "Choose a configured worker with its own workspace; hub and vision machines cannot own plan workspaces." });
+        }
+
+        PlanStep? selectedStep = planStore.Get(id)?.Steps.FirstOrDefault(step => step.Id == request.StepId);
+        if (selectedStep is not null && !string.Equals(node.Tier, selectedStep.Tier, StringComparison.OrdinalIgnoreCase))
+        {
+            return Results.BadRequest(new { error = $"Choose a worker on the requested {selectedStep.Tier} tier so the task level stays unchanged." });
+        }
+
+        machine = node.Name;
+    }
+
+    PlanRecord? updated = planStore.SelectMachine(id, request.StepId, machine, out string? error);
+    if (updated is null)
+    {
+        return Results.NotFound();
+    }
+
+    if (error is not null)
+    {
+        return error == "That step no longer exists." ? Results.NotFound() : Results.Conflict(new { error });
+    }
+
+    return Results.Json(updated);
+});
+
 app.MapGet("/api/plans/{id}/markdown", (string id) =>
     planStore.Get(id) is { } plan
         ? Results.Text(FleetPlanStore.ToMarkdown(plan), "text/markdown")
@@ -1005,7 +1072,7 @@ app.MapGet("/api/plans/{id}/report", (string id) =>
         ? Results.Text(FleetPlanStore.ToReportMarkdown(plan), "text/markdown")
         : Results.NotFound());
 
-app.MapPost("/api/plans/{id}/approve", (string id, bool exportToProject = false) =>
+app.MapPost("/api/plans/{id}/approve", (string id, PlanApprovalRequest request) =>
 {
     PlanRecord? plan = planStore.Get(id);
     if (plan is null)
@@ -1020,7 +1087,7 @@ app.MapPost("/api/plans/{id}/approve", (string id, bool exportToProject = false)
 
     try
     {
-        PlanRecord? approved = planStore.Approve(id, exportToProject);
+        PlanRecord? approved = planStore.Approve(id, request.ExportToProject, request.RecoveryScope);
         return approved is null
             ? Results.NotFound()
             : Results.Json(approved);
@@ -1246,7 +1313,7 @@ app.MapGet("/api/contexts/{id}", (string id, string? taskId) =>
         contextStore.EventsOfKinds(id, [FleetContextEventKind.Decision], 100, pinnedOnly: true)));
 });
 
-app.MapGet("/api/contexts/{id}/events", (string id, int? limit, string? kind) =>
+app.MapGet("/api/contexts/{id}/events", (string id, int? limit, string? kind, long? afterEventId) =>
 {
     if (contextStore.GetContext(id) is null)
     {
@@ -1254,6 +1321,18 @@ app.MapGet("/api/contexts/{id}/events", (string id, int? limit, string? kind) =>
     }
 
     // kind may list several ("route,assistant-output"), so a caller can leave out the tool results that hold whole files.
+    if (afterEventId is >= 0)
+    {
+        IReadOnlyList<FleetContextEvent> events = contextStore.AllEvents(id, afterEventId.Value, Math.Clamp(limit ?? 1000, 1, 1000));
+        if (kind is { Length: > 0 })
+        {
+            HashSet<string> kinds = kind.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            events = events.Where(contextEvent => kinds.Contains(contextEvent.Kind)).ToArray();
+        }
+        return Results.Json(events);
+    }
+
     return Results.Json(kind is { Length: > 0 }
         ? contextStore.EventsOfKinds(id, kind.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), limit ?? 100)
         : contextStore.RecentEvents(id, limit ?? 100));
@@ -1485,7 +1564,7 @@ app.MapPost("/api/setup/pull", (ModelPullRequest request) =>
 {
     if (!OllamaAddress.TryGetRoot(request.Url, out Uri root))
     {
-        return Results.BadRequest(new { error = "url must be the machine's address, for example http://192.168.1.20:11434." });
+        return Results.BadRequest(new { error = "url must be the machine's address, for example http://192.0.2.20:11434." });
     }
 
     try
@@ -1732,7 +1811,9 @@ internal sealed record FleetConfigNodeUpdate(
     int? ContextLength = null,
     string? Api = null,
     string? Caveman = null,
-    string? Ponytail = null);
+    string? Ponytail = null,
+    FleetWorkerWorkspaceConfig? Workspace = null,
+    bool ClearWorkspace = false);
 
 internal sealed record FleetConfigUpdateRequest(
     string? TriageModel,

@@ -23,10 +23,11 @@ internal sealed class FleetRoutingChatClient : IChatClient
         RegexOptions.Compiled);
 
     /// <summary>
-    /// Set in a request's ChatOptions.AdditionalProperties by the plan runner: route every model call of
-    /// this request to that tier, and skip triage and the plan gate (the runner is the executor).
+    /// Set by the plan runner to preserve the step's requested tier. Conservative mode routes by tier;
+    /// Aggressive mode prefers the hub unless the step has an explicit machine choice.
     /// </summary>
     public const string RunnerTierKey = "fleet.runner.tier";
+    public const string RunnerMachineKey = "fleet.runner.machine";
 
     private readonly IChatClient _triageClient;
     private readonly IReadOnlyList<FleetRouteTarget> _targets;
@@ -86,15 +87,16 @@ internal sealed class FleetRoutingChatClient : IChatClient
     {
         IReadOnlyList<ChatMessage> messageList = PrepareMessages(messages);
         string? runnerTier = RunnerTier(options);
+        string? runnerMachine = RunnerMachine(options);
         PlanGateResult gate = runnerTier is null
             ? PlanGate.Evaluate(_planModeService.Effective, messageList, _planStore)
             : new PlanGateResult(PlanPhase.Off, null);
         // Non-streaming path isn't used by the AG-UI chat flow today, so it doesn't get
         // the "answered by" footer that GetStreamingResponseAsync appends.
-        FleetRouteTarget target = await SelectTargetWithJournalAsync(messageList, gate, runnerTier, cancellationToken);
+        (FleetRouteTarget target, string routeReason) = await SelectTargetWithJournalAsync(messageList, gate, runnerTier, runnerMachine, cancellationToken);
         options = StripRunnerKey(options);
         (IReadOnlyList<ChatMessage> sendMessages, ChatOptions? sendOptions) = ApplyPlanMode(messageList, options, gate);
-        RecordRoute(target, gate, runnerTier);
+        RecordRoute(target, gate, runnerTier, routeReason);
         sendMessages = InjectContext(sendMessages, target.Node);
         ChatResponse response;
         try
@@ -134,15 +136,16 @@ internal sealed class FleetRoutingChatClient : IChatClient
         // Worked out once per request: it can approve a plan (an approval word from the user), so
         // routing and the tool filter must both see the same result.
         string? runnerTier = RunnerTier(options);
+        string? runnerMachine = RunnerMachine(options);
         PlanGateResult gate = runnerTier is null
             ? PlanGate.Evaluate(_planModeService.Effective, messageList, _planStore)
             : new PlanGateResult(PlanPhase.Off, null);
-        FleetRouteTarget target = await SelectTargetWithJournalAsync(messageList, gate, runnerTier, cancellationToken);
+        (FleetRouteTarget target, string routeReason) = await SelectTargetWithJournalAsync(messageList, gate, runnerTier, runnerMachine, cancellationToken);
         string route = target.Node.Name;
         options = StripRunnerKey(options);
 
         (IReadOnlyList<ChatMessage> sendMessages, ChatOptions? sendOptions) = ApplyPlanMode(messageList, options, gate);
-        RecordRoute(target, gate, runnerTier);
+        RecordRoute(target, gate, runnerTier, routeReason);
         sendMessages = InjectContext(sendMessages, target.Node);
 
         bool sawToolCall = false;
@@ -249,24 +252,48 @@ internal sealed class FleetRoutingChatClient : IChatClient
         _logger.LogInformation("Fleet request {CompletionState} via {FleetNode}.", responseFailed ? "stopped early" : "completed", servedBy);
     }
 
-    private void RecordRoute(FleetRouteTarget target, PlanGateResult gate, string? runnerTier) =>
+    private void RecordRoute(FleetRouteTarget target, PlanGateResult gate, string? runnerTier, string routeReason) =>
         _journal?.RecordRoute(
             target.Node.Name,
             runnerTier ?? target.Node.Tier,
             gate.Phase.ToString(),
-            runnerTier is not null ? $"plan step ({runnerTier})" : gate.Phase == PlanPhase.Planning ? "planning" : "routed");
+            routeReason);
 
-    private async Task<FleetRouteTarget> SelectTargetWithJournalAsync(
+    private async Task<(FleetRouteTarget Target, string Reason)> SelectTargetWithJournalAsync(
         IReadOnlyList<ChatMessage> messages,
         PlanGateResult gate,
         string? runnerTier,
+        string? runnerMachine,
         CancellationToken cancellationToken)
     {
         try
         {
-            return runnerTier is null
-                ? await SelectTargetAsync(messages, gate, cancellationToken)
-                : await PickForTierAsync(runnerTier, cancellationToken);
+            if (runnerTier is null)
+            {
+                FleetRouteTarget target = await SelectTargetAsync(messages, gate, cancellationToken);
+                return (target, gate.Phase == PlanPhase.Planning ? "planning" : "routed");
+            }
+
+            if (runnerMachine is null)
+            {
+                if (_modeService.Mode == FleetMode.Aggressive)
+                {
+                    string reason = $"plan step ({runnerTier}), aggressive hub mode";
+                    _activityLog.Record(_fallback.Node.Name, reason);
+                    return (_fallback, reason);
+                }
+
+                return (await PickForTierAsync(runnerTier, cancellationToken), $"plan step ({runnerTier})");
+            }
+
+            if (!_byName.TryGetValue(runnerMachine, out FleetRouteTarget? selected) || selected.Node.Vision)
+            {
+                throw new InvalidOperationException($"Plan step machine '{runnerMachine}' is not a configured text machine.");
+            }
+
+            string selectedReason = $"plan step ({runnerTier}), selected machine ({runnerMachine})";
+            _activityLog.Record(selected.Node.Name, selectedReason);
+            return (selected, selectedReason);
         }
         catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
         {
@@ -307,7 +334,8 @@ internal sealed class FleetRoutingChatClient : IChatClient
         // model call in a tool loop and needs no memory between calls. Planning always goes to
         // the heavy tier: the plan is the most consequential thing the fleet writes, so it is not
         // left to a triage guess. While a plan runs, each call goes to the tier the plan gave the
-        // step currently in progress, so a trivial edit does not occupy the big machine.
+        // step currently in progress, so a trivial edit does not occupy the big machine in Conservative mode.
+        // Aggressive mode sends unpinned plan steps to the hub.
         if (gate.Phase != PlanPhase.Off)
         {
             FleetRouteTarget planned = await PickForPlanAsync(gate, cancellationToken);
@@ -432,16 +460,26 @@ internal sealed class FleetRoutingChatClient : IChatClient
             ? tier
             : null;
 
+    private static string? RunnerMachine(ChatOptions? options) =>
+        options?.AdditionalProperties is { } properties &&
+        properties.TryGetValue(RunnerMachineKey, out object? value) &&
+        value is string machine &&
+        !string.IsNullOrWhiteSpace(machine)
+            ? machine
+            : null;
+
     // The key is for this class only; do not pass it on to the model's API.
     private static ChatOptions? StripRunnerKey(ChatOptions? options)
     {
-        if (options?.AdditionalProperties is null || !options.AdditionalProperties.ContainsKey(RunnerTierKey))
+        if (options?.AdditionalProperties is null ||
+            (!options.AdditionalProperties.ContainsKey(RunnerTierKey) && !options.AdditionalProperties.ContainsKey(RunnerMachineKey)))
         {
             return options;
         }
 
         ChatOptions cleaned = options.Clone();
         cleaned.AdditionalProperties!.Remove(RunnerTierKey);
+        cleaned.AdditionalProperties.Remove(RunnerMachineKey);
         return cleaned;
     }
 

@@ -4,11 +4,14 @@ namespace AgentFleet.Tests;
 
 internal sealed class FakeStepAgent(Func<string, string, CancellationToken, Task<string>> run) : IStepAgent
 {
-    public List<(string Tier, string Prompt)> Calls { get; } = [];
+    public List<(string Tier, string Prompt, string? Machine)> Calls { get; } = [];
 
     public Task<string> RunStepAsync(string prompt, string tier, CancellationToken cancellationToken)
+        => RunStepAsync(prompt, tier, null, cancellationToken);
+
+    public Task<string> RunStepAsync(string prompt, string tier, string? machine, CancellationToken cancellationToken)
     {
-        Calls.Add((tier, prompt));
+        Calls.Add((tier, prompt, machine));
         return run(prompt, tier, cancellationToken);
     }
 }
@@ -16,6 +19,14 @@ internal sealed class FakeStepAgent(Func<string, string, CancellationToken, Task
 public sealed class PlanRunnerTests : PlanTestBase
 {
     private static readonly FakeValidator Valid = new(code => new DiagramCheck(true, true, code, null));
+
+    [Fact]
+    public void Aggressive_mode_routes_unpinned_models_to_hub_without_changing_the_worker_workspace()
+    {
+        Assert.Equal("primary", PlanRunner.ModelMachineFor(FleetMode.Aggressive, null, "worker-a", "primary"));
+        Assert.Equal("worker-a", PlanRunner.ModelMachineFor(FleetMode.Conservative, null, "worker-a", "primary"));
+        Assert.Equal("worker-b", PlanRunner.ModelMachineFor(FleetMode.Aggressive, "worker-b", "worker-a", "primary"));
+    }
 
     private PlanRunner Runner(FakeStepAgent agent, Func<string, string> verify, TimeSpan? timeout = null, ISleepGuard? sleepGuard = null) =>
         new(Store, new PlanTools(Store, Valid, (command, _, _) => Task.FromResult(verify(command))), agent, NullLogger.Instance, timeout,
@@ -65,7 +76,7 @@ public sealed class PlanRunnerTests : PlanTestBase
     }
 
     [Fact]
-    public async Task A_failing_check_is_retried_with_the_real_output_on_the_heavy_tier()
+    public async Task A_failing_check_retries_at_the_requested_tier_with_the_real_output()
     {
         PlanRecord plan = ApprovedPlan(Step("build it", tier: "standard"));
         int verifications = 0;
@@ -73,7 +84,7 @@ public sealed class PlanRunnerTests : PlanTestBase
 
         await Runner(agent, command => ++verifications < 3 ? Fail(command) : Pass(command)).RunPlanAsync(plan.Id, default);
 
-        Assert.Equal(["standard", "heavy", "heavy"], agent.Calls.Select(call => call.Tier));
+        Assert.Equal(["standard", "standard", "standard"], agent.Calls.Select(call => call.Tier));
         Assert.DoesNotContain("did not pass", agent.Calls[0].Prompt);
         Assert.Contains("did not pass", agent.Calls[1].Prompt);
         Assert.Contains("CS1002", agent.Calls[1].Prompt);
@@ -82,16 +93,99 @@ public sealed class PlanRunnerTests : PlanTestBase
     }
 
     [Fact]
-    public async Task With_two_cheap_attempts_only_the_last_goes_to_the_heavy_tier()
+    public async Task Each_attempt_is_recorded_on_the_step_when_it_starts_not_when_it_is_checked()
     {
-        PlanRecord plan = ApprovedPlan(Step("build it", tier: "light"));
+        PlanRecord plan = ApprovedPlan(Step("build it"));
+        var seenWhileWorking = new List<int>();
+        FakeStepAgent agent = new((_, _, _) =>
+        {
+            seenWhileWorking.Add(Store.Get(plan.Id)!.Steps[0].Attempts);
+            return Task.FromResult("Done.");
+        });
+        int verifications = 0;
+
+        await Runner(agent, command => ++verifications < 3 ? Fail(command) : Pass(command)).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal([1, 2, 3], seenWhileWorking);
+        Assert.Equal(3, Store.Get(plan.Id)!.Steps[0].Attempts);
+    }
+
+    [Fact]
+    public async Task A_user_selected_machine_is_used_without_changing_the_step_tier()
+    {
+        PlanRecord plan = NewPlan(Step("build it", tier: "light"));
+        PlanRecord? routed = Store.SelectMachine(plan.Id, 1, "worker-b", out string? error);
+        Assert.Null(error);
+        Assert.Equal("worker-b", routed!.Steps[0].Machine);
+        plan = Store.Approve(plan.Id)!;
         FakeStepAgent agent = Agent();
-        var runner = new PlanRunner(Store, new PlanTools(Store, Valid, (command, _, _) => Task.FromResult(Fail(command))), agent,
-            NullLogger.Instance, transientDelay: _ => TimeSpan.Zero, cheapAttempts: 2);
 
-        await runner.RunPlanAsync(plan.Id, default);
+        await Runner(agent, Pass).RunPlanAsync(plan.Id, default);
 
-        Assert.Equal(["light", "light", "heavy"], agent.Calls.Select(call => call.Tier));
+        Assert.Equal("light", agent.Calls.Single().Tier);
+        Assert.Equal("worker-b", agent.Calls.Single().Machine);
+        // The chosen machine is the step's workspace route; the model route is a separate field.
+        Assert.Contains(Store.Get(plan.Id)!.Events!, e => e.Kind == RunEventKind.MachineSelected && e.WorkspaceNode == "worker-b");
+    }
+
+    [Fact]
+    public void A_ready_pending_step_can_be_routed_while_the_plan_is_running()
+    {
+        PlanRecord plan = ApprovedPlan(Step("first", tier: "standard"), Step("next", tier: "light"));
+        Store.Update(plan.Id, current => current with
+        {
+            Status = PlanStatus.Running,
+            Steps = current.Steps.Select((step, index) => index == 0
+                ? step with { Status = StepStatus.Done, CompletedUtc = DateTimeOffset.UtcNow }
+                : step with { Status = StepStatus.Pending }).ToList()
+        });
+
+        PlanRecord? routed = Store.SelectMachine(plan.Id, 2, "worker-a", out string? error);
+
+        Assert.Null(error);
+        Assert.Equal("worker-a", routed!.Steps[1].Machine);
+        Assert.Equal("light", routed.Steps[1].Tier);
+    }
+
+    [Fact]
+    public async Task A_blocked_failed_step_can_be_routed_before_retry_but_a_running_or_waiting_step_cannot()
+    {
+        PlanRecord plan = ApprovedPlan(Step("fails"), Step("waits"));
+        await Runner(Agent(), Fail).RunPlanAsync(plan.Id, default);
+
+        PlanRecord? routed = Store.SelectMachine(plan.Id, 1, "worker-a", out string? failedError);
+        Assert.Null(failedError);
+        Assert.Equal("worker-a", routed!.Steps[0].Machine);
+        Assert.NotNull(Store.SelectMachine(plan.Id, 2, "worker-a", out string? waitingError));
+        Assert.NotNull(waitingError);
+
+        Store.Update(plan.Id, current => current with
+        {
+            Status = PlanStatus.Running,
+            Steps = current.Steps.Select((step, index) => index == 0
+                ? step with { Status = StepStatus.Running }
+                : step with { Status = StepStatus.Pending }).ToList()
+        });
+        Assert.NotNull(Store.SelectMachine(plan.Id, 1, "hub", out string? runningError));
+        Assert.NotNull(runningError);
+    }
+
+    [Fact]
+    public void A_pending_parallel_step_cannot_be_moved_after_its_group_has_started()
+    {
+        PlanRecord plan = ApprovedPlan(Step("first parallel task", tier: "standard"), Step("second parallel task", tier: "light"));
+        Store.Update(plan.Id, current => current with
+        {
+            Status = PlanStatus.Running,
+            Steps = current.Steps.Select((step, index) => step with
+            {
+                ParallelGroup = "pair",
+                Status = index == 0 ? StepStatus.Running : StepStatus.Pending
+            }).ToList()
+        });
+
+        Assert.NotNull(Store.SelectMachine(plan.Id, 2, "worker-b", out string? error));
+        Assert.NotNull(error);
     }
 
     [Fact]

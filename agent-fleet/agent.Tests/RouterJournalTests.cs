@@ -12,12 +12,14 @@ public sealed class RouterJournalTests : ContextTestBase
     private sealed class RecordingClient : IChatClient
     {
         public List<IReadOnlyList<ChatMessage>> Calls { get; } = [];
+        public List<ChatOptions?> Options { get; } = [];
         public bool FailAfterFirstChunk { get; set; }
         public bool FailBeforeFirstChunk { get; set; }
 
         public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
         {
             Calls.Add(messages.ToList());
+            Options.Add(options);
             return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "hello")));
         }
 
@@ -27,6 +29,7 @@ public sealed class RouterJournalTests : ContextTestBase
             [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
             Calls.Add(messages.ToList());
+            Options.Add(options);
             if (FailBeforeFirstChunk)
             {
                 throw new HttpRequestException("worker is offline");
@@ -167,6 +170,114 @@ public sealed class RouterJournalTests : ContextTestBase
         Assert.Equal(task, route.TaskId);
         Assert.Equal("plan step (heavy)", ContextText.String(route.Payload, "reason"));
         Assert.Equal("heavy", ContextText.String(route.Payload, "tier"));
+    }
+
+    [Fact]
+    public async Task An_unpinned_plan_step_uses_the_hub_in_aggressive_mode_and_keeps_its_tier()
+    {
+        string id = NewContextId();
+        using IDisposable scope = Scope(id, "plan-abc-step-2");
+        IConfiguration configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["FLEET_CONFIG_PATH"] = Path.Combine(Root, "aggressive-plan.config.json"),
+                ["FLEET_PLANS_DIR"] = Path.Combine(Root, "plans"),
+                ["HUB_OLLAMA_MODEL"] = "test-model"
+            })
+            .Build();
+        var configStore = new FleetConfigStore(configuration);
+        var workerConfig = new FleetNodeConfig("worker", "http://127.0.0.1:11434/v1", "test-model", "worker", FleetTiers.Standard);
+        configStore.Save(configStore.Current with { Nodes = [configStore.Current.Nodes[0], workerConfig] });
+        var modeService = new FleetModeService(configStore);
+        modeService.SetMode(FleetMode.Aggressive);
+        FleetOptions options = FleetOptions.Load(configuration, configStore);
+        FleetNodeDefinition hub = options.Nodes.Single(node => node.Fallback);
+        FleetNodeDefinition worker = options.Nodes.Single(node => node.Name == "worker");
+        var hubRaw = new RecordingClient();
+        var workerRaw = new RecordingClient();
+        var router = new FleetRoutingChatClient(
+            new RecordingClient(),
+            [new FleetRouteTarget(hub, hubRaw), new FleetRouteTarget(worker, workerRaw)],
+            new FleetHealthMonitor(options, new Factory()),
+            modeService,
+            new FleetPlanModeService(configStore),
+            new FleetPlanStore(configuration),
+            new HashSet<string>(),
+            new FleetActivityLog(),
+            NullLogger.Instance,
+            Journal);
+        var requestOptions = new ChatOptions
+        {
+            AdditionalProperties = new AdditionalPropertiesDictionary { [FleetRoutingChatClient.RunnerTierKey] = FleetTiers.Light }
+        };
+
+        await foreach (ChatResponseUpdate _ in router.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "do the work")], requestOptions)) { }
+
+        Assert.Single(hubRaw.Calls);
+        Assert.Empty(workerRaw.Calls);
+        FleetContextEvent route = Assert.Single(Store.AllEvents(id), e => e.Kind == FleetContextEventKind.Route);
+        Assert.Equal("hub", route.Node);
+        Assert.Equal("light", ContextText.String(route.Payload, "tier"));
+        Assert.Equal("plan step (light), aggressive hub mode", ContextText.String(route.Payload, "reason"));
+    }
+
+    [Fact]
+    public async Task A_selected_plan_machine_overrides_tier_routing_without_changing_tier_or_leaking_router_options()
+    {
+        string id = NewContextId();
+        string task = "plan-abc-step-2";
+        using IDisposable scope = Scope(id, task);
+        IConfiguration configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["FLEET_CONFIG_PATH"] = Path.Combine(Root, "selected-machine.config.json"),
+                ["FLEET_PLANS_DIR"] = Path.Combine(Root, "plans"),
+                ["HUB_OLLAMA_MODEL"] = "test-model"
+            })
+            .Build();
+        var configStore = new FleetConfigStore(configuration);
+        var workerConfig = new FleetNodeConfig("worker", "http://127.0.0.1:11434/v1", "test-model", "worker", FleetTiers.Standard);
+        configStore.Save(configStore.Current with { Nodes = [configStore.Current.Nodes[0], workerConfig] });
+        var modeService = new FleetModeService(configStore);
+        modeService.SetMode(FleetMode.Aggressive);
+        FleetOptions options = FleetOptions.Load(configuration, configStore);
+        FleetNodeDefinition hub = options.Nodes.Single(node => node.Fallback);
+        FleetNodeDefinition worker = options.Nodes.Single(node => node.Name == "worker");
+        var hubRaw = new RecordingClient();
+        var workerRaw = new RecordingClient();
+        var router = new FleetRoutingChatClient(
+            new RecordingClient(),
+            [new FleetRouteTarget(hub, hubRaw), new FleetRouteTarget(worker, workerRaw)],
+            new FleetHealthMonitor(options, new Factory()),
+            modeService,
+            new FleetPlanModeService(configStore),
+            new FleetPlanStore(configuration),
+            new HashSet<string>(),
+            new FleetActivityLog(),
+            NullLogger.Instance,
+            Journal);
+        var requestOptions = new ChatOptions
+        {
+            AdditionalProperties = new AdditionalPropertiesDictionary
+            {
+                [FleetRoutingChatClient.RunnerTierKey] = FleetTiers.Light,
+                [FleetRoutingChatClient.RunnerMachineKey] = "worker",
+                ["num_ctx"] = 4096
+            }
+        };
+
+        await foreach (ChatResponseUpdate _ in router.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "do the work")], requestOptions)) { }
+
+        Assert.Empty(hubRaw.Calls);
+        Assert.Single(workerRaw.Calls);
+        ChatOptions sent = Assert.IsType<ChatOptions>(workerRaw.Options.Single());
+        Assert.DoesNotContain(FleetRoutingChatClient.RunnerTierKey, sent.AdditionalProperties!.Keys);
+        Assert.DoesNotContain(FleetRoutingChatClient.RunnerMachineKey, sent.AdditionalProperties.Keys);
+        Assert.Equal(4096, sent.AdditionalProperties["num_ctx"]);
+        FleetContextEvent route = Assert.Single(Store.AllEvents(id), e => e.Kind == FleetContextEventKind.Route);
+        Assert.Equal("worker", route.Node);
+        Assert.Equal("light", ContextText.String(route.Payload, "tier"));
+        Assert.Contains("selected machine (worker)", ContextText.String(route.Payload, "reason"));
     }
 
     [Fact]
