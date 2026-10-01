@@ -31,15 +31,20 @@ flowchart LR
   pages. Add more without code: turn a command such as `dotnet test {project}` into a tool, pick an
   [MCP](https://modelcontextprotocol.io) server from a catalog, or bring over the ones you use in VS Code, Claude or
   Cursor. Every tool can be tried from the settings.
-- **Plan mode.** Turn it on and the strongest model first explores your code with read-only tools and proposes a plan:
-  steps, files, a check for each step, and a diagram. You approve it. Then the plan runs in the background, one step at a
-  time, and after each step the fleet itself runs that step's check and retries with the real error. You can go to bed
-  and read what happened in the morning. See [docs/planning.md](docs/planning.md).
-- **Two front ends.** A web UI, and a VS Code extension with `@fleet` plus a selectable Fleet Router chat model. Both use the same local backend.
+- **Plan mode and live progress.** The strongest model explores with read-only tools and proposes steps, files, checks,
+  and an optional diagram. After you approve, the backend runs and checks the plan in the background. Watch planning and
+  step activity live; the report records attempts, check output, errors, and changed paths in Git projects. See
+  [docs/planning.md](docs/planning.md).
+- **Shared context and visible failures.** Conversations, machine routes, tool calls, errors, partial answers, decisions,
+  and plan handoffs are recorded together. The Context panel shows what the next machine will receive and what earlier
+  machines actually received. VS Code reports stream and backend errors in Copilot Chat. See
+  [docs/context.md](docs/context.md).
+- **Two front ends.** A web UI, and a VS Code extension with `@fleet` plus a selectable Fleet Router chat model. They
+  use the same local backend and durable conversation record. `@fleet` answers without spending Copilot model tokens.
 - **Setup in the browser.** A checklist that suggests a model for your hardware and downloads it with a progress bar,
   downloads models onto other machines, sets up the code sandbox (including SSH keys), and says what to fix and how.
-  Scripts cover the same from a terminal: one sets up the hub, one each extra machine, one checks that everything is
-  healthy.
+  Per-machine Caveman response brevity and Ponytail coding minimalism are available in Config > Machines. Scripts cover
+  setup and health checks from a terminal too.
 
 ## Requirements
 

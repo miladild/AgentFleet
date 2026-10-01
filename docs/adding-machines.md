@@ -40,24 +40,27 @@ On the worker, in an elevated PowerShell (Run as administrator), from a clone of
 folder copied over:
 
 ```powershell
-.\scripts\Setup-Worker.ps1 -AllowFrom 192.168.1.10
+  .\scripts\Setup-Worker.ps1 -AllowFrom 192.0.2.10
 ```
 
-Replace `192.168.1.10` with the hub's private IPv4 address. This value is required: the script rejects subnet ranges,
+Replace the reserved documentation address `192.0.2.10` before running; it is not accepted as a real worker address. This value is required: the script rejects subnet ranges,
 hostnames, wildcards, and `LocalSubnet`. The script installs Ollama if needed, makes it listen on the network, adds a
 firewall rule for that exact peer, and narrows Ollama's own inbound rules to the same peer. It also requires Windows
 Firewall to be enabled with block-by-default inbound policy and refuses broader port rules instead of changing unrelated
-firewall entries. Add `-KeepAwake` so the machine does not sleep. Use `-DryRun` to see what it would do first.
+firewall entries. Add `-KeepAwake` so the machine does not sleep. Use `-DryRun` to see what it would do first. For a
+coding worker, add `-InstallToolchains` to install the common .NET, Node.js and Python runtimes machine-wide. Check
+project-pinned versions separately; additional SDK versions may be needed. This option installs fixed packages only and
+does not run project code.
 
 Afterwards, quit Ollama from the tray icon and start it again (or restart the computer) so it picks up the new setting.
 
 ### Linux worker
 
 ```bash
-sudo ./scripts/setup-worker.sh --allow-from 192.168.1.10
+sudo ./scripts/setup-worker.sh --allow-from 192.0.2.10
 ```
 
-Replace the example with the hub's private IPv4 address. CIDR networks, hostnames, wildcards, and whole-subnet rules are
+Replace the reserved documentation address with the hub's private IPv4 address before running. CIDR networks, hostnames, wildcards, and whole-subnet rules are
 rejected. The script installs Ollama with the official installer if needed, adds a systemd setting so Ollama listens on
 the network, and opens the port in `ufw` or `firewalld` for that exact address. For a real run, one of those firewalls
 must already be active. The script requires UFW's default incoming policy to be deny or reject and refuses existing
@@ -65,6 +68,8 @@ broader rules for the Ollama port; for firewalld it checks active zones, service
 It does not install or enable a firewall. If Ollama is missing and the script has no interactive terminal, pass `--yes`
 to approve its installer. `--wifi-powersave-off` turns off Wi-Fi power saving; `--dry-run` shows the planned changes
 without checking or changing firewall state.
+Install the required project runtimes from the distribution's trusted package sources and verify their pinned versions
+from the dedicated workspace account before running plans; this worker setup does not change package repositories.
 
 ### By hand
 
@@ -77,7 +82,7 @@ scripts do.
 On the hub:
 
 ```powershell
-.\scripts\Add-FleetNode.ps1 -Name worker1 -Address 192.168.1.21 -Model qwen2.5-coder:7b -Tier standard -Pull
+  .\scripts\Add-FleetNode.ps1 -Name worker1 -Address 192.0.2.11 -Model qwen2.5-coder:7b -Tier standard -Pull
 ```
 
 - `-Address` can be the plain address; `:11434` and `/v1` are added for you.

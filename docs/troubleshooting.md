@@ -24,8 +24,8 @@ Almost always one of three things:
 1. **The hub's address changed.** Routers hand out addresses that change. If a worker's firewall allows only the hub's old
    address, the worker silently drops everything from the new one, while other things (SSH, ping) may still work. Give the
    hub and every worker a fixed address with a DHCP reservation in your router. If the hub must move, rerun the worker
-   setup with its new private IPv4 address (for example `Setup-Worker.ps1 -AllowFrom 192.168.1.11` on Windows or
-   `sudo ./scripts/setup-worker.sh --allow-from 192.168.1.11` on Linux). Do not open Ollama to the whole subnet. The
+   setup with its new private IPv4 address (for example `Setup-Worker.ps1 -AllowFrom 192.0.2.10` on Windows or
+   `sudo ./scripts/setup-worker.sh --allow-from 192.0.2.10` on Linux). Do not open Ollama to the whole subnet. The
    backend logs a warning when the address it uses to reach a worker changes.
 2. **The worker slept.** Turn off sleep (`Setup-Worker.ps1 -KeepAwake`) and prefer a wired connection.
 3. **Wi-Fi power saving.** Linux laptops and mini PCs put Wi-Fi to sleep. `setup-worker.sh --wifi-powersave-off`.
@@ -77,7 +77,7 @@ other programs and talks to the network, which is exactly what security suites w
 or held it more than once while this was developed: the symptom was a backend that started but did not answer some
 requests, and setup steps that stalled. If the backend hangs or vanishes right after it is built or published, look in your
 antivirus's history or quarantine first, restore it, and add an exclusion for the repository folder and for the install
-folder (`C:\AgentFleet`). Do the same for a worker's Ollama folder if a worker behaves oddly.
+folder (`<install-root>`). Do the same for a worker's Ollama folder if a worker behaves oddly.
 
 A release download is new to your antivirus too, and its web UI is about 11,000 small files. On the very first start the
 scanner may look at each one before it runs, so the web UI can take a minute or more to answer; later starts take a few

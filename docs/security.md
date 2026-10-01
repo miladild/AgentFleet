@@ -52,9 +52,44 @@ network.
 
 Whatever account runs the backend is the account the model's tools use. Under your own user that is your files and your
 tools, which is the point. Under LocalSystem (a Windows service's default) it is the whole machine. That is why
-`Install-Autostart.ps1` defaults to scheduled tasks that run as you, and warns when you choose services. If you do use a
-service, set it to run as your own user in `services.msc` (Log On tab), typing your password in that dialog and nowhere
-else.
+`Install-Autostart.ps1` defaults to scheduled tasks that start at your logon with a limited user token, and warns when you
+choose services. Run its build/install step from a normal, non-elevated PowerShell. It restricts the install folder to the
+Fleet user, SYSTEM and local Administrators so other local accounts cannot read or change the config, plans or logs. If
+you do use a service, set it to run as your own user in `services.msc` (Log On tab), typing your password in that dialog
+and nowhere else.
+
+Runtime installation is a separate operator action: `scripts/Install-FleetToolchains.ps1` needs elevation only to install
+three fixed, machine-wide packages. It does not execute project code. The Fleet backend and ordinary chat commands run
+on the hub as a limited non-administrator account. Plan steps require a configured worker workspace; project file
+tools, shell commands and verification checks run on the selected worker as its dedicated standard account. Installing
+a runtime does not grant that account administrator rights. Install the project's required runtimes on each worker that
+will run its checks. On Windows, run `scripts/Install-FleetToolchains.ps1 -AuditOnly` to inspect machine-wide availability,
+or provision a coding worker with `scripts/Setup-Worker.ps1 -AllowFrom <hub-private-ip> -InstallToolchains`. These fixed
+packages do not cover arbitrary project pins; install additional pinned SDK versions through the machine's normal
+administrator setup. Restart `sshd` after worker PATH changes and restart Fleet after hub PATH changes so new processes
+inherit them. On Linux, use the distribution's trusted package sources and verify the toolchains from the dedicated
+workspace account before approving a plan.
+
+## Worker plan workspaces
+
+Worker execution uses SSH and SFTP with a pinned SHA256 host key. Configure a dedicated account that is not an
+administrator/root and has no passwordless sudo; Fleet checks these conditions at connection time. Keep the private SSH
+key on the hub and add only its public half to the worker. The setup scripts create the account/workspace but do not
+change SSH service or firewall settings.
+
+Fleet stages a project copy on the selected worker, excluding dependency/build caches, `.git`, environment files,
+private notes, and common key/certificate/credential files. It creates local-only Git metadata without the source
+repository's history or remotes. Worker changes are synced into the hub checkout before verification and after each
+attempt; content hashes detect a concurrent hub edit and block the sync instead of overwriting it. A workspace is an isolated directory, not a
+container or chroot: commands can access anything the dedicated account can access. Keep that account's home free of
+credentials and unrelated data. Hub-only Docker sandbox and HTTP request tools are unavailable during worker plan steps;
+use `run_command` on the selected worker for its checks and local requests.
+
+Unattended plan requests have a separate tool allowlist: local project file tools, shell checks, the dedicated read-only Git
+inspection tool, and read-only plan context. Git and GitHub CLI commands through the shell, MCP/custom tools, web/HTTP tools,
+Git history mutations, and known publishing, deployment, remote-shell and destructive commands are refused at invocation time.
+This is a guardrail, not a shell sandbox: a project script can still do anything the limited worker account can do, so keep
+that account low privilege and free of secrets.
 
 ## What the model can do to you
 
@@ -73,17 +108,17 @@ Practical limits:
   (a page, a file) could steer it into pinning something you did not intend. They are labelled "noted by the assistant" versus
   "from the user", and the Context panel lists them with an **unpin** button. Look at that list before you leave a long plan
   running overnight.
-- Be careful with MCP servers you did not write. They run with the same lack of approval, and some expose dangerous
+- Be careful with MCP servers you did not write in ordinary chat. They run with the same lack of approval, and some expose dangerous
   tools (the reference `server-everything` has one that returns all environment variables).
 - The sandbox container can reach the network, including other machines on yours.
-- Your own command tools run with the backend's account, like `run_command`, but narrower: the program is fixed and what
-  the model fills in is passed as separate arguments without a shell, so it cannot chain another command. A tool is still
-  as powerful as its program: `git {args}` lets the model run any git command.
+- In ordinary chat, `run_command` and `run_git_command` run with the backend's account. In unattended plans, shell commands
+  run as the limited worker account; Git inspection uses the read-only plan tool, and the execution policy blocks known
+  external and destructive commands. A project script can still have side effects, so review plan steps and their restart-safe setting.
 - **From your other apps** reads the MCP settings of VS Code, Claude Desktop, Claude Code, Cursor and Windsurf for the
   backend's account. Only those files, and only their MCP servers; secret values are never sent to the browser, but an
   imported entry with a secret written into it is copied into `fleet.config.json` as it is.
-- `web_search` and `web_fetch` send queries to DuckDuckGo and fetch pages you or the model choose. That is the one place
-  data leaves your network. Switch them off in the Config panel for a fully offline fleet.
+- `web_search` and `web_fetch` send queries to DuckDuckGo and fetch pages you or the model choose in ordinary chat; they
+  are unavailable to unattended plan steps. Switch them off in the Config panel for a fully offline fleet.
 
 ## Secrets
 
