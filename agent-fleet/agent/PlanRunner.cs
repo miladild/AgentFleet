@@ -12,11 +12,13 @@ namespace AgentFleet;
 /// <summary>Runs one focused piece of work with a model of the requested tier.</summary>
 internal interface IStepAgent
 {
-    Task<string> RunStepAsync(string prompt, string tier, CancellationToken cancellationToken);
+    Task<StepAgentReply> RunStepAsync(string prompt, string tier, CancellationToken cancellationToken);
 
-    Task<string> RunStepAsync(string prompt, string tier, string? machine, CancellationToken cancellationToken) =>
+    Task<StepAgentReply> RunStepAsync(string prompt, string tier, string? machine, CancellationToken cancellationToken) =>
         RunStepAsync(prompt, tier, cancellationToken);
 }
+
+internal sealed record StepAgentReply(string Text, int ToolCalls, bool EditToolCalled);
 
 /// <summary>
 /// Drives the real agent, one fresh session per call so a step never inherits another step's
@@ -28,10 +30,10 @@ internal sealed class FleetStepAgent(AIAgent agent) : IStepAgent
     internal const string Nudge =
         "Your last turn only inspected files or gave no usable result. Finish this step now: if it requires a change, use your tools to make it; if no change is needed, explain why. The fleet will run the approved check either way.";
 
-    public Task<string> RunStepAsync(string prompt, string tier, CancellationToken cancellationToken) =>
+    public Task<StepAgentReply> RunStepAsync(string prompt, string tier, CancellationToken cancellationToken) =>
         RunStepAsync(prompt, tier, null, cancellationToken);
 
-    public async Task<string> RunStepAsync(string prompt, string tier, string? machine, CancellationToken cancellationToken)
+    public async Task<StepAgentReply> RunStepAsync(string prompt, string tier, string? machine, CancellationToken cancellationToken)
     {
         AgentSession session = await agent.CreateSessionAsync(cancellationToken);
         var properties = new AdditionalPropertiesDictionary { [FleetRoutingChatClient.RunnerTierKey] = tier };
@@ -52,15 +54,24 @@ internal sealed class FleetStepAgent(AIAgent agent) : IStepAgent
         FunctionCallContent[] calls = response.Messages.SelectMany(message => message.Contents)
             .OfType<FunctionCallContent>()
             .ToArray();
+        int toolCalls = calls.Length;
+        bool editToolCalled = calls.Any(IsEditTool);
         bool readOnlyOnly = calls.Length > 0 && calls.All(call => call.Name is
             "read_file" or "list_directory" or "find_files" or "search_files" or "project_overview" or "get_plan" or "search_context");
         if ((string.IsNullOrWhiteSpace(response.Text) && calls.Length == 0) || readOnlyOnly)
         {
             response = await agent.RunAsync(Nudge, session, options, cancellationToken);
+            FunctionCallContent[] nudgedCalls = response.Messages.SelectMany(message => message.Contents)
+                .OfType<FunctionCallContent>()
+                .ToArray();
+            toolCalls += nudgedCalls.Length;
+            editToolCalled |= nudgedCalls.Any(IsEditTool);
         }
 
-        return response.Text;
+        return new StepAgentReply(response.Text, toolCalls, editToolCalled);
     }
+
+    private static bool IsEditTool(FunctionCallContent call) => call.Name is "write_file" or "edit_file" or "move_file" or "delete_file";
 }
 
 /// <summary>
@@ -82,13 +93,6 @@ internal sealed partial class PlanRunner
 {
     public const int MaxAttemptsPerStep = 3;
 
-    /// <summary>
-    /// How often a step waits for the machines to come back before a model call that could not reach any machine
-    /// counts as one of its attempts. With the default delays that is about an hour: long enough for a machine to
-    /// reboot for updates or Ollama to restart overnight, short enough that a plan does not hang for ever.
-    /// </summary>
-    public const int MaxTransientWaits = 8;
-
     private const int MaxStepContextFiles = 8;
     private const int MaxStepContextBytesPerFile = 32 * 1024;
     private const int MaxStepContextCharacters = 48_000;
@@ -101,7 +105,7 @@ internal sealed partial class PlanRunner
     private readonly ILogger _logger;
     private readonly TimeSpan _attemptTimeout;
     private readonly FleetOptions? _fleetOptions;
-    private readonly WorkerWorkspaceManager? _workerWorkspaces;
+    private readonly IWorkerWorkspaceManager? _workerWorkspaces;
     private readonly FleetModeService? _modeService;
     private readonly FleetHealthMonitor? _healthMonitor;
     private readonly PlanContextRecorder? _recorder;
@@ -114,6 +118,7 @@ internal sealed partial class PlanRunner
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _active = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, bool> _stopRequested = new(StringComparer.Ordinal);
     private readonly Func<int, TimeSpan> _transientDelay;
+    private readonly Func<TimeSpan, CancellationToken, Task> _delayAsync;
     private readonly ISleepGuard _sleepGuard;
 
     public PlanRunner(
@@ -128,10 +133,12 @@ internal sealed partial class PlanRunner
         FleetContextJournal? journal = null,
         Func<int, TimeSpan>? transientDelay = null,
         ISleepGuard? sleepGuard = null,
-        WorkerWorkspaceManager? workerWorkspaces = null,
-        FleetModeService? modeService = null)
+        IWorkerWorkspaceManager? workerWorkspaces = null,
+        FleetModeService? modeService = null,
+        Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
     {
         _transientDelay = transientDelay ?? DefaultTransientDelay;
+        _delayAsync = delayAsync ?? Task.Delay;
         _sleepGuard = sleepGuard ?? NoSleepGuard.Instance;
         _recorder = recorder;
         _journal = journal;
@@ -253,18 +260,24 @@ internal sealed partial class PlanRunner
                 ? current with { RunDeadlineUtc = DateTimeOffset.UtcNow + FleetPlanStore.DefaultRunDuration }
                 : current)!;
 
-            // An interrupted worker attempt without a durable sync is preserved for review. StageAsync must never
-            // overwrite a remote workspace that may contain the only copy of an edit.
+            // An interrupted worker attempt is reconciled against the hashes captured at staging. Never infer
+            // that an edit is safe from event ordering alone, and never overwrite a conflicting worker copy.
             PlanStep? unsafeInterrupted = plan.Steps.FirstOrDefault(step => step.Status == StepStatus.Running &&
                 HasUnsyncedInterruptedWorkspace(plan, step));
+            string? recoveryBlock = null;
+            if (unsafeInterrupted is not null)
+            {
+                recoveryBlock = await ReconcileInterruptedWorkspaceAsync(plan, unsafeInterrupted, runCancellation.Token);
+                plan = _store.Get(planId)!;
+            }
             PlanStep? unsafeReplay = plan.Steps.FirstOrDefault(step => step.Status == StepStatus.Running && !step.RetrySafe &&
                 HasInterruptedAttempt(plan, step));
-            if (unsafeInterrupted is not null || unsafeReplay is not null)
+
+            if (recoveryBlock is not null || unsafeReplay is not null)
             {
-                PlanStep blockedStep = unsafeInterrupted ?? unsafeReplay!;
-                string reason = unsafeInterrupted is not null
-                    ? $"Step {blockedStep.Id} was interrupted before its worker edits were synced. The worker workspace was preserved; review or recover it before retrying."
-                    : $"Step {blockedStep.Id} is not marked safe to replay after a backend restart. Its workspace was preserved; review the changes, then approve the plan to continue.";
+                PlanStep blockedStep = recoveryBlock is not null ? unsafeInterrupted! : unsafeReplay!;
+                string reason = recoveryBlock ??
+                    $"Step {blockedStep.Id} is not marked safe to replay after a backend restart. Its workspace was preserved; review the changes, then approve the plan to continue.";
                 _store.Update(planId, current => FleetPlanStoreSteps.With(current, blockedStep.Id, step => step with
                 {
                     Status = StepStatus.Failed,
@@ -279,7 +292,7 @@ internal sealed partial class PlanRunner
             _lastFailures[planId] = LastFailures(plan);
             _store.Update(planId, current => current with
             {
-                Status = PlanStatus.Running,
+                Status = current.Steps.All(step => step.Status == StepStatus.Done) ? PlanStatus.Done : PlanStatus.Running,
                 Steps = current.Steps
                     .Select(step => step.Status is StepStatus.Running or StepStatus.Failed ? step with { Status = StepStatus.Pending } : step)
                     .ToList()
@@ -659,10 +672,13 @@ internal sealed partial class PlanRunner
         CancellationToken cancellationToken,
         int firstAttempt = 1,
         string? previousFailure = null,
-        bool deferPlanBlock = false)
+        bool deferPlanBlock = false,
+        string? initialModelOverride = null,
+        string? initialWorkspaceOverride = null)
     {
         string? lastFailure = previousFailure;
-        string? workspaceOverride = null;
+        string? workspaceOverride = initialWorkspaceOverride;
+        string? modelOverride = initialModelOverride;
         PlanRunEvent[] priorEvents = (_store.Get(plan.Id)?.Events ?? []).ToArray();
         int retryBoundary = Array.FindLastIndex(priorEvents, runEvent => runEvent.Kind == RunEventKind.RetryApproved);
         int waits = priorEvents.Skip(retryBoundary + 1).Count(runEvent =>
@@ -679,10 +695,13 @@ internal sealed partial class PlanRunner
             string tier = step.Tier;
             ModelAttemptResult model = await RunModelAttemptAsync(
                 plan, step, attempt, lastFailure, tier, parallelGroup: false, cancellationToken: cancellationToken,
-                workspaceOverride: workspaceOverride);
+                workspaceOverride: workspaceOverride, modelMachineOverride: modelOverride);
             if (!model.ShouldVerify)
             {
                 model.Workspace?.Dispose();
+                int failedAttemptFiles = await ChangedFilesSinceAsync(plan, model.WorkBefore, cancellationToken);
+                FailureClass roundClass = await RecordRoundClassifiedAsync(plan, step, attempt, model, model.Failure ?? string.Empty,
+                    passed: false, filesChanged: failedAttemptFiles);
                 if (model.WorkspaceFailure is { } workspaceFailure)
                 {
                     if (model.ReroutableWorkspaceFailure)
@@ -708,19 +727,19 @@ internal sealed partial class PlanRunner
                             continue;
                         }
 
-                        if (waits < MaxTransientWaits)
+                        _store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, step.Id, currentStep => currentStep with
                         {
-                            _store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, step.Id, currentStep => currentStep with
-                            {
-                                Attempts = Math.Min(currentStep.Attempts, attempt - 1)
-                            }));
-                            TimeSpan delay = _transientDelay(waits++);
-                            _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.Waiting, tier,
-                                detail: $"Worker staging failed before model tools or edits ({Summarize(workspaceFailure)}). {detail} Waiting {Duration(delay)} before retrying; this does not count as a model attempt ({waits} of {MaxTransientWaits} waits).");
-                            await Task.Delay(delay, cancellationToken);
-                            attempt--;
-                            continue;
-                        }
+                            Attempts = Math.Min(currentStep.Attempts, attempt - 1)
+                        }));
+                        int waitNumber = ++waits;
+                        TimeSpan delay = _transientDelay(waitNumber - 1);
+                        delay = DelayWithinRunDeadline(plan, delay);
+                        _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.Waiting, tier, node: model.Machine,
+                            detail: $"Worker staging failed before model tools or edits ({Summarize(workspaceFailure)}). {detail} Waiting {Duration(delay)} (wait {waitNumber}) before retrying; this does not count as a model attempt.",
+                            modelNode: null, workspaceNode: model.Machine);
+                        await DelayBeforeRetryAsync(delay, cancellationToken);
+                        attempt--;
+                        continue;
                     }
 
                     BlockForEnvironment(plan, step, attempt, tier, model.Machine, workspaceFailure,
@@ -728,22 +747,53 @@ internal sealed partial class PlanRunner
                     return false;
                 }
 
-                // No machine could answer at all (fallback included): the step did nothing wrong, the network or a
-                // machine did. Wait for it instead of spending an attempt, so a reboot overnight does not block the plan.
-                if (model.Transient && waits < MaxTransientWaits)
+                if (roundClass == FailureClass.Environment)
                 {
+                    BlockForEnvironment(plan, step, attempt, tier, model.ModelNode, model.Failure ?? "The model route failed with an environment error.",
+                        "the selected model machine has a permission, security, or runtime problem", deferPlanBlock);
+                    return false;
+                }
+
+                if (roundClass is FailureClass.Infra or FailureClass.Unknown)
+                {
+                    lastFailure = model.Failure;
+                    int unknownFailures = CountClassifiedRounds(plan.Id, step.Id, FailureClass.Unknown);
+                    if (roundClass == FailureClass.Unknown && unknownFailures >= 5)
+                    {
+                        BlockForUnknown(plan, step, attempt, model.FailureException, model.Failure, deferPlanBlock);
+                        return false;
+                    }
+
+                    if (roundClass == FailureClass.Infra)
+                    {
+                        string? route = await RouteFailedModelAsync(plan, step, tier, model.ModelNode, model.Machine,
+                            attempt, cancellationToken);
+                        if (route is not null)
+                        {
+                            modelOverride = route;
+                            attempt--;
+                            continue;
+                        }
+                    }
+
                     _store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, step.Id, currentStep => currentStep with
                     {
                         Attempts = Math.Min(currentStep.Attempts, attempt - 1)
                     }));
-                    TimeSpan delay = _transientDelay(waits++);
-                    _logger.LogWarning(
-                        "Plan {PlanId} step {StepId}: no machine answered; waiting {Delay} before trying again ({Wait} of {MaxWaits}).",
-                        plan.Id, step.Id, delay, waits, MaxTransientWaits);
-                    _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.Waiting, tier,
-                        detail: $"No machine could answer ({Summarize(model.Failure ?? string.Empty)}). Waiting {Duration(delay)} before trying again; " +
-                                $"this does not count as an attempt ({waits} of {MaxTransientWaits} waits).");
-                    await Task.Delay(delay, cancellationToken);
+                    if (roundClass == FailureClass.Unknown)
+                    {
+                        TimeSpan delay = DelayWithinRunDeadline(plan, TimeSpan.FromSeconds(20 * unknownFailures));
+                        string failedNode = model.ModelNode ?? "the selected model machine";
+                        _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.Waiting, tier, node: model.ModelNode,
+                            detail: $"Unknown failure on {failedNode}: {Summarize(model.Failure ?? "unknown failure")}. Waiting at least {Duration(delay)} (unknown failure {unknownFailures} of 5) before retrying; this does not count as an attempt.",
+                            modelNode: model.ModelNode, workspaceNode: model.Machine);
+                        await DelayBeforeRetryAsync(delay, cancellationToken);
+                        attempt--;
+                        continue;
+                    }
+
+                    (modelOverride, waits) = await WaitForInfrastructureRecoveryAsync(plan, step, tier,
+                        model.ModelNode, model.Machine, attempt, model.Failure, waits, cancellationToken);
                     attempt--;
                     continue;
                 }
@@ -786,6 +836,8 @@ internal sealed partial class PlanRunner
                 model.Workspace?.Dispose();
             }
             long? verification = RecordCheck(plan, step, attempt, result, model.ModelNode);
+            await RecordRoundClassifiedAsync(plan, step, attempt, model,
+                result.Output ?? result.Message, result.Done, await ChangedFilesSinceAsync(plan, model.WorkBefore, cancellationToken));
             if (result.Done)
             {
                 _tools.CommitStepDone(plan.Id, step.Id, Summarize(model.Summary));
@@ -852,6 +904,335 @@ internal sealed partial class PlanRunner
         return false;
     }
 
+    private async Task<string?> ReconcileInterruptedWorkspaceAsync(PlanRecord plan, PlanStep step, CancellationToken cancellationToken)
+    {
+        PlanRunEvent? staged = (plan.Events ?? [])
+            .Where(runEvent => runEvent.StepId == step.Id && runEvent.Kind == RunEventKind.WorkspaceStaged && runEvent.Attempt is not null)
+            .OrderByDescending(runEvent => runEvent.AtUtc)
+            .FirstOrDefault();
+        if (staged?.Attempt is not { } attempt || _workerWorkspaces is null)
+            return $"Step {step.Id} was interrupted in a worker workspace without a recoverable staged baseline. The workspace was preserved for review.";
+
+        WorkerWorkspaceBaseline? baseline = _store.GetWorkerBaseline(plan.Id, step.Id, attempt);
+        if (baseline is null)
+            return $"Step {step.Id} was interrupted before its staged baseline could be read. The worker workspace was preserved for review.";
+
+        WorkerWorkspaceResume resumed;
+        try
+        {
+            resumed = await _workerWorkspaces.ResumeInterruptedAsync(plan, step, baseline, cancellationToken);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            _logger.LogWarning(exception, "Could not reconcile interrupted worker {Machine} for plan {PlanId} step {StepId}.", baseline.Machine, plan.Id, step.Id);
+            return $"Step {step.Id} worker recovery could not compare its staged files ({exception.GetType().Name}: {exception.Message}). The workspace was preserved for review.";
+        }
+
+        WorkerWorkspaceRecoveryAnalysis analysis = resumed.Analysis;
+        if (!analysis.Safe)
+        {
+            string conflicts = string.Join(", ", analysis.Conflicts.Take(20));
+            return $"Step {step.Id} was interrupted with worker changes that conflict with the hub or are outside the step's declared files: {conflicts}. Nothing was overwritten; review the worker workspace.";
+        }
+
+        string detail = analysis.ChangedFiles.Count == 0
+            ? "The interrupted worker files match their saved staged baseline. The workspace was safely re-staged from the hub."
+            : $"Recovered the interrupted worker edits and re-staged the hub snapshot: {string.Join(", ", analysis.ChangedFiles.Take(20))}.";
+        _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.WorkspaceReconciled, step.Tier,
+            node: baseline.Machine, detail: detail, modelNode: staged.ModelNode, workspaceNode: baseline.Machine);
+
+        if (analysis.ChangedFiles.Count == 0)
+        {
+            resumed.Session?.Dispose();
+            _store.DeleteWorkerBaseline(plan.Id, step.Id, attempt);
+            if (!step.RetrySafe)
+                return $"Step {step.Id} has no worker edits to recover, but it is not marked safe to replay after an uncertain outcome. Review it before retrying.";
+            _store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, step.Id, currentStep => currentStep with
+            {
+                Status = StepStatus.Pending,
+                Attempts = Math.Max(0, attempt - 1)
+            }));
+            return null;
+        }
+
+        IWorkerWorkspaceSession session = resumed.Session!;
+        try
+        {
+            if (_recorder?.ResolveContext(_store.Get(plan.Id) ?? plan) is { } contextId)
+                _contexts[plan.Id] = contextId;
+            StepCompletion check;
+            bool final = step.Id == plan.Steps.Max(candidate => candidate.Id);
+            using (session.Enter())
+            {
+                if (final)
+                    _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.FinalValidationStarted, step.Tier,
+                        detail: $"Runner is rechecking `{step.Verify}` on reconciled worker edits.",
+                        modelNode: staged.ModelNode, workspaceNode: baseline.Machine);
+                check = await _tools.TryCompleteStepAsync(plan.Id, step.Id,
+                    "Recovered worker edits after a backend restart.", cancellationToken, FilesToCreate(plan, step), deferCommit: true);
+                await session.SyncToHubAsync(cancellationToken);
+            }
+            _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.WorkspaceSynced, step.Tier, baseline.Machine,
+                "Synced the reconciled worker workspace after restart verification.",
+                modelNode: staged.ModelNode, workspaceNode: baseline.Machine);
+            _store.DeleteWorkerBaseline(plan.Id, step.Id, attempt);
+            await session.RefreshFromHubAsync(cancellationToken);
+
+            var recoveredAttempt = new ModelAttemptResult(step.Id, "Recovered worker edits after a backend restart.", null,
+                ShouldVerify: true, Machine: baseline.Machine, ModelNode: staged.ModelNode,
+                EditToolCalled: true);
+            long? verification = RecordCheck(plan, step, attempt, check, staged.ModelNode);
+            await RecordRoundClassifiedAsync(plan, step, attempt, recoveredAttempt,
+                check.Output ?? check.Message, check.Done, analysis.ChangedFiles.Count);
+            if (check.Done)
+            {
+                _tools.CommitStepDone(plan.Id, step.Id, "Recovered worker edits.");
+                _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.CheckPassed, step.Tier,
+                    detail: final ? $"Final validation passed: `{step.Verify}`." : $"`{step.Verify}` passed after worker recovery.",
+                    modelNode: staged.ModelNode, workspaceNode: baseline.Machine);
+                if (final)
+                    _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.FinalValidationPassed, step.Tier,
+                        detail: $"`{step.Verify}` passed on the reconciled worker snapshot.",
+                        modelNode: staged.ModelNode, workspaceNode: baseline.Machine);
+                _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.StepDone, step.Tier,
+                    detail: JoinNotes(StrayDetail(plan, step), check.Restored));
+                RecordStepDone(plan, step, verification, staged.ModelNode ?? baseline.Machine);
+                return null;
+            }
+
+            string failure = WithStrayNote(plan, step, check.Output ?? check.Message);
+            if (EnvironmentBlockReason(failure) is { } environmentReason)
+            {
+                return $"Environment issue: {environmentReason} Automatic retries stopped because the selected worker workspace cannot execute or verify this step. Configure or repair that worker, then retry the step.\n\nCheck output:\n{failure}";
+            }
+
+            _store.AddEvent(plan.Id, step.Id, attempt,
+                final ? RunEventKind.FinalValidationFailed : RunEventKind.CheckFailed,
+                step.Tier, node: staged.ModelNode ?? baseline.Machine, detail: failure,
+                modelNode: staged.ModelNode, workspaceNode: baseline.Machine);
+            if (!step.RetrySafe)
+                return $"Step {step.Id} is not marked safe to replay after restart verification failed. The recovered worker edits were kept for review: {failure}";
+            _store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, step.Id, currentStep => currentStep with
+            {
+                Status = StepStatus.Pending,
+                Attempts = attempt,
+                Note = failure
+            }));
+            return null;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            _logger.LogWarning(exception, "Could not verify reconciled worker edits for plan {PlanId} step {StepId}.", plan.Id, step.Id);
+            return $"Step {step.Id} worker edits were recovered but restart verification failed ({exception.GetType().Name}: {exception.Message}). The workspace was preserved for review.";
+        }
+        finally
+        {
+            session.Dispose();
+        }
+    }
+
+    private Task<FailureClass> RecordRoundClassifiedAsync(
+        PlanRecord plan,
+        PlanStep step,
+        int attempt,
+        ModelAttemptResult model,
+        string failureOutput,
+        bool passed,
+        int filesChanged)
+    {
+        PlanRecord current = _store.Get(plan.Id) ?? plan;
+        FailureRound[] history = (current.Events ?? [])
+            .Where(runEvent => runEvent.StepId == step.Id && runEvent.Kind == RunEventKind.RoundClassified &&
+                runEvent.FailureSignatureSize > 0 && !string.Equals(runEvent.FailureClass, "Passed", StringComparison.Ordinal))
+            .Select(runEvent => new FailureRound(runEvent.FailureSignature, runEvent.FailureSignatureSize ?? 0,
+                runEvent.FilesChanged ?? 0, runEvent.EditToolCalled ?? false))
+            .ToArray();
+        FailureFingerprint signature = passed ? new FailureFingerprint(string.Empty, 0, []) : PlanFailure.FailureSignature(failureOutput);
+        FailureClass classification = passed
+            ? FailureClass.Unknown
+            : model.WorkspaceFailure is not null && model.ReroutableWorkspaceFailure
+                ? FailureClass.Infra
+                : PlanFailure.Classify(model.FailureException, failureOutput, history, filesChanged, model.EditToolCalled);
+        string failureClass = passed ? "Passed" : classification.ToString();
+        string detail = $"Round classified: {failureClass}; signature size: {signature.Size}; files changed: {filesChanged}; " +
+            $"tool calls: {model.ToolCalls}; edit tool called: {(model.EditToolCalled ? "yes" : "no")}.";
+        _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.RoundClassified, step.Tier,
+            node: model.ModelNode ?? model.Machine, detail: detail,
+            modelNode: model.ModelNode, workspaceNode: model.Machine,
+            failureClass: failureClass, failureSignature: signature.Value, failureSignatureSize: signature.Size,
+            filesChanged: filesChanged, toolCalls: model.ToolCalls, editToolCalled: model.EditToolCalled);
+        return Task.FromResult(classification);
+    }
+
+    private async Task<int> ChangedFilesSinceAsync(PlanRecord plan, PlanTools.WorkSnapshot? before, CancellationToken cancellationToken)
+    {
+        if (before is null) return 0;
+        PlanTools.WorkSnapshot? after = await _tools.SnapshotWorkAsync(_store.Get(plan.Id) ?? plan, cancellationToken);
+        if (after is null) return 0;
+
+        StringComparer comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        string[] paths = before.Files.Keys.Concat(after.Files.Keys).Distinct(comparer).ToArray();
+        return paths.Count(path =>
+            !before.Files.TryGetValue(path, out byte[]? previous) ||
+            !after.Files.TryGetValue(path, out byte[]? current) ||
+            !previous.AsSpan().SequenceEqual(current));
+    }
+
+    private int CountClassifiedRounds(string planId, int stepId, FailureClass failureClass)
+    {
+        PlanRunEvent[] events = (_store.Get(planId)?.Events ?? []).ToArray();
+        int retryBoundary = Array.FindLastIndex(events, runEvent => runEvent.Kind == RunEventKind.RetryApproved);
+        return events.Skip(retryBoundary + 1).Count(runEvent => runEvent.StepId == stepId &&
+            runEvent.Kind == RunEventKind.RoundClassified &&
+            string.Equals(runEvent.FailureClass, failureClass.ToString(), StringComparison.Ordinal));
+    }
+
+    private int CountWaitingEvents(string planId, int stepId)
+    {
+        PlanRunEvent[] events = (_store.Get(planId)?.Events ?? []).ToArray();
+        int retryBoundary = Array.FindLastIndex(events, runEvent => runEvent.Kind == RunEventKind.RetryApproved);
+        return events.Skip(retryBoundary + 1).Count(runEvent => runEvent.StepId == stepId && runEvent.Kind == RunEventKind.Waiting);
+    }
+
+    private TimeSpan DelayWithinRunDeadline(PlanRecord plan, TimeSpan requested)
+    {
+        if (plan.RunDeadlineUtc is not { } deadline) return requested;
+        TimeSpan remaining = deadline - DateTimeOffset.UtcNow;
+        if (remaining <= TimeSpan.Zero) return TimeSpan.Zero;
+        return requested > remaining ? remaining : requested;
+    }
+
+    private Task DelayBeforeRetryAsync(TimeSpan delay, CancellationToken cancellationToken) =>
+        _delayAsync(delay, cancellationToken);
+
+    private async Task<(string? ModelOverride, int Waits)> WaitForInfrastructureRecoveryAsync(
+        PlanRecord plan,
+        PlanStep step,
+        string tier,
+        string? failedModel,
+        string? workspace,
+        int attempt,
+        string? failure,
+        int waits,
+        CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            if (plan.RunDeadlineUtc is { } deadline && DateTimeOffset.UtcNow >= deadline)
+                return (null, waits);
+
+            int waitNumber = ++waits;
+            TimeSpan delay = DelayWithinRunDeadline(plan, _transientDelay(waitNumber - 1));
+            string failedNode = failedModel ?? "the selected model machine";
+            _logger.LogWarning("Plan {PlanId} step {StepId}: infrastructure failure on {Machine}; waiting {Delay} without spending an attempt.",
+                plan.Id, step.Id, failedNode, delay);
+            _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.Waiting, tier, node: failedModel,
+                detail: $"Infra failure on {failedNode}: {Summarize(failure ?? "unknown failure")}. Waiting {Duration(delay)} (wait {waitNumber}) before probing and retrying; this does not count as an attempt.",
+                modelNode: failedModel, workspaceNode: workspace);
+            await DelayBeforeRetryAsync(delay, cancellationToken);
+
+            if (plan.RunDeadlineUtc is { } runDeadline && DateTimeOffset.UtcNow >= runDeadline)
+                return (null, waits);
+            if (_healthMonitor is null || failedModel is null)
+                return (null, waits);
+
+            NodeHealthSnapshot probe;
+            try
+            {
+                probe = await _healthMonitor.GetNodeAsync(failedModel, cancellationToken,
+                    forceProbe: true, forceInferenceProbe: true);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                _logger.LogWarning(exception, "Could not probe model machine {Machine} after plan outage wait {Wait}.", failedModel, waitNumber);
+                probe = new NodeHealthSnapshot(failedModel, string.Empty, false, false, false, DateTimeOffset.UtcNow, exception.Message);
+            }
+
+            if (probe.Ready)
+            {
+                _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.InferenceProbePassed, tier,
+                    node: failedModel, detail: $"A small inference probe passed on {failedModel}; retrying the model attempt now.",
+                    modelNode: failedModel, workspaceNode: workspace);
+                return (failedModel, waits);
+            }
+
+            if (plan.RunDeadlineUtc is { } afterProbeDeadline && DateTimeOffset.UtcNow >= afterProbeDeadline)
+                return (null, waits);
+            string? route = await RouteFailedModelAsync(plan, step, tier, failedModel, workspace, attempt, cancellationToken);
+            if (route is not null) return (route, waits);
+        }
+    }
+
+    private async Task<string?> RouteFailedModelAsync(
+        PlanRecord plan,
+        PlanStep step,
+        string tier,
+        string? failedModel,
+        string? workspace,
+        int attempt,
+        CancellationToken cancellationToken)
+    {
+        (string? alternate, string detail) = await SelectRetryMachineAsync(
+            plan, step, tier, cancellationToken, modelRoute: true);
+        if (alternate is not null)
+        {
+            RecordModelRecoveryRoute(plan, step, tier, attempt, alternate, workspace,
+                $"Model recovery moved from {failedModel ?? "the selected model machine"} to {alternate}. {detail}");
+            return alternate;
+        }
+
+        if (!PlanRecoveryScope.AllowsHubRescue(plan.RecoveryScope) || _fleetOptions is null || _healthMonitor is null)
+        {
+            return null;
+        }
+
+        FleetNodeDefinition? hub = _fleetOptions.Nodes.SingleOrDefault(node => node.Fallback);
+        if (hub is null || string.Equals(hub.Name, failedModel, StringComparison.OrdinalIgnoreCase)) return null;
+        try
+        {
+            NodeHealthSnapshot health = await _healthMonitor.GetNodeAsync(hub.Name, cancellationToken,
+                forceProbe: true, forceInferenceProbe: true);
+            if (!health.Ready) return null;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Could not check hub model {Machine} for plan {PlanId} step {StepId}.", hub.Name, plan.Id, step.Id);
+            return null;
+        }
+
+        string hubDetail = $"Model recovery moved from {failedModel ?? "the selected model machine"} to {hub.Name}. No ready same-tier model alternate was available; recovery scope allows the hub model and inference is ready. The worker workspace remains on {workspace ?? "the selected worker"}.";
+        RecordModelRecoveryRoute(plan, step, tier, attempt, hub.Name, workspace, hubDetail);
+        return hub.Name;
+    }
+
+    private void RecordModelRecoveryRoute(PlanRecord plan, PlanStep step, string tier, int attempt,
+        string model, string? workspace, string detail) =>
+        _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.RecoveryRouted, tier,
+            node: model, detail: detail, modelNode: model, workspaceNode: workspace);
+
+    private void BlockForUnknown(PlanRecord plan, PlanStep step, int attempt, Exception? exception, string? failure, bool deferPlanBlock)
+    {
+        string exceptionName = exception?.GetType().Name ?? "unclassified failure";
+        string message = string.IsNullOrWhiteSpace(exception?.Message) ? failure ?? "No failure message was recorded." : exception.Message;
+        string reason = $"Automatic retries stopped after five unknown failures ({exceptionName}: {Summarize(message)}). Review the run log before approving another attempt.";
+        _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.ModelFailed, step.Tier,
+            detail: reason);
+        _store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, step.Id, currentStep => currentStep with
+        {
+            Status = StepStatus.Failed,
+            Note = reason
+        }) with { Status = deferPlanBlock ? PlanStatus.Running : PlanStatus.Blocked });
+        if (!deferPlanBlock) AddBlockedEvent(plan.Id, step, reason);
+    }
+
     private bool HasPriorAttempt(string planId, int stepId) =>
         _store.Get(planId)?.Events?.Any(runEvent =>
             runEvent.StepId == stepId && (runEvent.Kind is RunEventKind.AttemptStarted or RunEventKind.AttemptEnded)) == true;
@@ -867,7 +1248,8 @@ internal sealed partial class PlanRunner
         PlanRecord plan,
         PlanStep step,
         string tier,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool modelRoute = false)
     {
         if (_fleetOptions is null || _healthMonitor is null)
         {
@@ -877,18 +1259,21 @@ internal sealed partial class PlanRunner
         PlanRunEvent[] history = (_store.Get(plan.Id)?.Events ?? [])
             .Where(runEvent => runEvent.StepId == step.Id &&
                 (runEvent.Kind is RunEventKind.AttemptStarted or RunEventKind.AttemptEnded or RunEventKind.ModelFailed or RunEventKind.WorkspaceFailed or RunEventKind.WorkspaceStaged or RunEventKind.WorkspaceSynced) &&
-                !string.IsNullOrWhiteSpace(runEvent.WorkspaceNode ?? runEvent.Node))
+                !string.IsNullOrWhiteSpace(modelRoute ? runEvent.ModelNode ?? runEvent.Node : runEvent.WorkspaceNode ?? runEvent.Node))
             .ToArray();
         if (history.Length == 0)
         {
             return (null, $"The previous attempt did not reach a machine that can be identified; normal routing will retry at the requested {tier} tier.");
         }
 
-        var tried = history.Select(runEvent => runEvent.WorkspaceNode ?? runEvent.Node!).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        string? previous = history.LastOrDefault()?.WorkspaceNode ?? history.LastOrDefault()?.Node;
+        var tried = history.Select(runEvent => modelRoute ? runEvent.ModelNode ?? runEvent.Node! : runEvent.WorkspaceNode ?? runEvent.Node!)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        string? previous = modelRoute
+            ? history.LastOrDefault()?.ModelNode ?? history.LastOrDefault()?.Node
+            : history.LastOrDefault()?.WorkspaceNode ?? history.LastOrDefault()?.Node;
         FleetNodeDefinition[] textNodes = _fleetOptions.Nodes.Where(node => !node.Vision &&
             !string.Equals(node.Name, "hub", StringComparison.OrdinalIgnoreCase) &&
-            (_workerWorkspaces is null || node.Workspace is not null) &&
+            (_workerWorkspaces is null || modelRoute || node.Workspace is not null) &&
             (_workerWorkspaces is null || string.Equals(node.Tier, tier, StringComparison.OrdinalIgnoreCase))).ToArray();
         FleetNodeDefinition[] untried = OrderRetryCandidates(textNodes.Where(node => !tried.Contains(node.Name)), tier);
         FleetNodeDefinition[] candidates = untried.Concat(OrderRetryCandidates(
@@ -901,7 +1286,8 @@ internal sealed partial class PlanRunner
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                if ((await _healthMonitor.GetNodeAsync(candidate.Name, cancellationToken, forceProbe: true)).Ready)
+                if ((await _healthMonitor.GetNodeAsync(candidate.Name, cancellationToken, forceProbe: true,
+                    forceInferenceProbe: modelRoute)).Ready)
                 {
                     string source = previous is null ? "the previous attempt" : $"{previous}'s previous attempt";
                     return (candidate.Name,
@@ -1010,7 +1396,8 @@ internal sealed partial class PlanRunner
         if (latestWorkerAttempt is null || latestWorkerAttempt.Attempt is not { } attempt) return false;
 
         return !(plan.Events ?? []).Any(runEvent => runEvent.StepId == step.Id && runEvent.Attempt == attempt &&
-            runEvent.Kind == RunEventKind.WorkspaceSynced && runEvent.AtUtc >= latestWorkerAttempt.AtUtc);
+            (runEvent.Kind is RunEventKind.WorkspaceSynced or RunEventKind.WorkspaceReconciled) &&
+            runEvent.AtUtc >= latestWorkerAttempt.AtUtc);
     }
 
     private static bool HasInterruptedAttempt(PlanRecord plan, PlanStep step)
@@ -1101,20 +1488,104 @@ internal sealed partial class PlanRunner
         ModelAttemptResult[] firstAttempts = await Task.WhenAll(steps.Select(step =>
             RunModelAttemptAsync(plan, step, 1, LastFailure(plan.Id, step.Id), step.Tier, parallelGroup: true, cancellationToken: cancellationToken)));
 
-        var retry = new List<(int StepId, string Failure)>();
+        var retry = new List<(int StepId, string Failure, int FirstAttempt, string? ModelOverride, string? WorkspaceOverride)>();
         var failedSteps = new List<PlanStep>();
         foreach (ModelAttemptResult attempt in firstAttempts.OrderBy(result => result.StepId))
         {
             PlanStep step = steps.Single(candidate => candidate.Id == attempt.StepId);
             if (!attempt.ShouldVerify)
             {
-                retry.Add((step.Id, attempt.Failure ?? "The model call did not complete."));
+                FailureClass failureClass = await RecordRoundClassifiedAsync(plan, step, 1, attempt, attempt.Failure ?? string.Empty,
+                    passed: false, filesChanged: await ChangedFilesSinceAsync(plan, attempt.WorkBefore, cancellationToken));
+                if (attempt.WorkspaceFailure is { } workspaceFailure)
+                {
+                    if (!attempt.ReroutableWorkspaceFailure)
+                    {
+                        BlockForEnvironment(plan, step, 1, step.Tier, attempt.Machine, workspaceFailure,
+                            "the selected worker workspace is not configured or could not be staged", deferPlanBlock: true);
+                        failedSteps.Add(step);
+                        continue;
+                    }
+
+                    _store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, step.Id,
+                        currentStep => currentStep with { Attempts = Math.Min(currentStep.Attempts, 0) }));
+                    (string? alternate, string routeDetail) = await SelectRetryMachineAsync(plan, step, step.Tier, cancellationToken);
+                    if (alternate is not null)
+                    {
+                        if (step.Machine is not null)
+                        {
+                            step = step with { Machine = alternate };
+                            _store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, step.Id,
+                                currentStep => currentStep with { Machine = alternate }));
+                        }
+                        _store.AddEvent(plan.Id, step.Id, 1, RunEventKind.RecoveryRouted, step.Tier,
+                            detail: $"Worker staging failed before model tools or edits. {routeDetail}", workspaceNode: alternate);
+                        retry.Add((step.Id, workspaceFailure, 1, null, alternate));
+                    }
+                    else
+                    {
+                        int waitNumber = CountWaitingEvents(plan.Id, step.Id) + 1;
+                        TimeSpan delay = DelayWithinRunDeadline(plan, _transientDelay(waitNumber - 1));
+                        _store.AddEvent(plan.Id, step.Id, 1, RunEventKind.Waiting, step.Tier, node: attempt.Machine,
+                            detail: $"Worker staging failed before model tools or edits ({Summarize(workspaceFailure)}). Waiting {Duration(delay)} (wait {waitNumber}) before retrying; this does not count as an attempt.",
+                            workspaceNode: attempt.Machine);
+                        await DelayBeforeRetryAsync(delay, cancellationToken);
+                        retry.Add((step.Id, workspaceFailure, 1, null, null));
+                    }
+                    continue;
+                }
+
+                if (failureClass == FailureClass.Environment)
+                {
+                    BlockForEnvironment(plan, step, 1, step.Tier, attempt.ModelNode, attempt.Failure ?? "The model route failed with an environment error.",
+                        "the selected model machine has a permission, security, or runtime problem", deferPlanBlock: true);
+                    failedSteps.Add(step);
+                    continue;
+                }
+
+                bool noAttemptSpent = failureClass is FailureClass.Infra or FailureClass.Unknown;
+                string? modelOverride = null;
+                if (noAttemptSpent)
+                {
+                    _store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, step.Id,
+                        currentStep => currentStep with { Attempts = Math.Min(currentStep.Attempts, 0) }));
+                    if (failureClass == FailureClass.Unknown)
+                    {
+                        int unknownFailures = CountClassifiedRounds(plan.Id, step.Id, FailureClass.Unknown);
+                        if (unknownFailures >= 5)
+                        {
+                            BlockForUnknown(plan, step, 1, attempt.FailureException, attempt.Failure, deferPlanBlock: true);
+                            failedSteps.Add(step);
+                            continue;
+                        }
+
+                        TimeSpan delay = DelayWithinRunDeadline(plan, TimeSpan.FromSeconds(20 * unknownFailures));
+                        _store.AddEvent(plan.Id, step.Id, 1, RunEventKind.Waiting, step.Tier, node: attempt.ModelNode,
+                            detail: $"Unknown failure on {attempt.ModelNode ?? "the selected model machine"}: {Summarize(attempt.Failure ?? "unknown failure")}. Waiting at least {Duration(delay)} (unknown failure {unknownFailures} of 5) before retrying; this does not count as an attempt.",
+                            modelNode: attempt.ModelNode, workspaceNode: attempt.Machine);
+                        await DelayBeforeRetryAsync(delay, cancellationToken);
+                    }
+                    else
+                    {
+                        modelOverride = await RouteFailedModelAsync(plan, step, step.Tier, attempt.ModelNode,
+                            attempt.Machine, 1, cancellationToken);
+                        if (modelOverride is null)
+                        {
+                            (modelOverride, _) = await WaitForInfrastructureRecoveryAsync(plan, step, step.Tier,
+                                attempt.ModelNode, attempt.Machine, 1, attempt.Failure,
+                                CountWaitingEvents(plan.Id, step.Id), cancellationToken);
+                        }
+                    }
+                }
+                retry.Add((step.Id, attempt.Failure ?? "The model call did not complete.", noAttemptSpent ? 1 : 2, modelOverride, null));
                 continue;
             }
 
             StepCompletion check = await _tools.TryCompleteStepAsync(
                 plan.Id, step.Id, Summarize(attempt.Summary), cancellationToken, FilesToCreate(plan, step));
             long? verification = RecordCheck(plan, step, 1, check, ViaNode(attempt.Summary));
+            await RecordRoundClassifiedAsync(plan, step, 1, attempt, check.Output ?? check.Message, check.Done,
+                await ChangedFilesSinceAsync(plan, attempt.WorkBefore, cancellationToken));
             if (check.Done)
             {
                 _store.AddEvent(plan.Id, step.Id, 1, RunEventKind.CheckPassed, step.Tier,
@@ -1133,17 +1604,19 @@ internal sealed partial class PlanRunner
                 else
                 {
                     _store.AddEvent(plan.Id, step.Id, 1, RunEventKind.CheckFailed, step.Tier, detail: failure);
-                    retry.Add((step.Id, failure));
+                    retry.Add((step.Id, failure, 2, null, null));
                 }
             }
         }
 
-        foreach ((int stepId, string failure) in retry.OrderBy(item => item.StepId))
+        foreach ((int stepId, string failure, int firstAttempt, string? modelOverride, string? workspaceOverride) in retry.OrderBy(item => item.StepId))
         {
             cancellationToken.ThrowIfCancellationRequested();
             PlanRecord current = _store.Get(plan.Id)!;
             PlanStep step = current.Steps.Single(candidate => candidate.Id == stepId);
-            if (!await RunStepAsync(current, step, cancellationToken, firstAttempt: 2, previousFailure: failure, deferPlanBlock: true))
+            if (!await RunStepAsync(current, step, cancellationToken, firstAttempt,
+                previousFailure: failure, deferPlanBlock: true, initialModelOverride: modelOverride,
+                initialWorkspaceOverride: workspaceOverride))
             {
                 failedSteps.Add(step);
             }
@@ -1172,7 +1645,8 @@ internal sealed partial class PlanRunner
         string tier,
         bool parallelGroup,
         CancellationToken cancellationToken,
-        string? workspaceOverride = null)
+        string? workspaceOverride = null,
+        string? modelMachineOverride = null)
     {
         _logger.LogInformation(
             "Plan {PlanId} step {StepId} ({Title}): attempt {Attempt} on the {Tier} tier{Parallel}.",
@@ -1222,11 +1696,11 @@ internal sealed partial class PlanRunner
             ? string.Empty
             : attempt > 1 ? "Retrying with the previous failure; the requested task tier is unchanged." : "Picking up after the stop, with the last failure.");
         string? fallbackHub = _fleetOptions?.Nodes.SingleOrDefault(node => node.Fallback)?.Name;
-        bool hubRescue = attempt > 1 && step.Machine is not null && fallbackHub is not null &&
+        bool hubRescue = modelMachineOverride is null && attempt > 1 && step.Machine is not null && fallbackHub is not null &&
             PlanRecoveryScope.AllowsHubRescue(plan.RecoveryScope);
-        string? modelMachine = hubRescue
+        string? modelMachine = modelMachineOverride ?? (hubRescue
             ? fallbackHub
-            : ModelMachineFor(_modeService?.Mode, step.Machine, machine, fallbackHub);
+            : ModelMachineFor(_modeService?.Mode, step.Machine, machine, fallbackHub));
         if (hubRescue)
         {
             retryRoute = $"The previous worker attempt failed. The hub model is taking this retry; file tools and checks run in the selected worker workspace on {machine}, and the requested {tier} tier is unchanged.";
@@ -1242,7 +1716,7 @@ internal sealed partial class PlanRunner
         using var attemptCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         attemptCancellation.CancelAfter(_attemptTimeout);
         PlanTools.WorkSnapshot? work = null;
-        WorkerWorkspaceSession? worker = null;
+        IWorkerWorkspaceSession? worker = null;
         bool stagingWorkerWorkspace = false;
         ModelAttemptResult result = new(step.Id, string.Empty, null, ShouldVerify: false, Machine: machine, ModelNode: modelMachine);
         try
@@ -1261,6 +1735,14 @@ internal sealed partial class PlanRunner
                 stagingWorkerWorkspace = true;
                 worker = await _workerWorkspaces.StageAsync(plan, step, machine, attemptCancellation.Token);
                 stagingWorkerWorkspace = false;
+                try
+                {
+                    _store.SaveWorkerBaseline(plan.Id, step.Id, attempt, machine, worker.BaselineHashes());
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    throw new InvalidOperationException("Worker workspace unavailable: could not save the staged file baseline for restart recovery.", exception);
+                }
                 _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.WorkspaceStaged, tier, machine,
                     "Staged the project on this worker. File tools and this step's verification command run in that worker workspace.",
                     modelNode: modelMachine, workspaceNode: machine);
@@ -1277,10 +1759,10 @@ internal sealed partial class PlanRunner
             using IDisposable? scope = _journal is not null && contextId is not null
                 ? _journal.Push(new FleetRequestIdentity(contextId, $"{plan.Id}:{step.Id}:{attempt}", "plan-runner", FleetPlanContext.StepTaskId(plan.Id, step.Id)))
                 : null;
-            string summary;
+            StepAgentReply reply;
             using (IDisposable? workerScope = worker?.Enter())
             {
-                summary = await _agent.RunStepAsync(
+                reply = await _agent.RunStepAsync(
                     BuildPrompt(plan, step, attempt, lastFailure, fileContext, parallelGroup,
                         durableContext: contextId is not null, retryRoute: retryRoute,
                         workerWorkspace: worker is not null, workerMachine: machine, workerPlatform: worker?.Platform),
@@ -1288,12 +1770,14 @@ internal sealed partial class PlanRunner
                     modelMachine,
                     attemptCancellation.Token);
             }
+            string summary = reply.Text;
 
             _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.AttemptEnded, tier, modelMachine ?? ViaNode(summary) ?? _journal?.ActualNode,
                 $"Model finished after {(int)stopwatch.Elapsed.TotalSeconds} s: {Summarize(summary)}",
                 modelNode: modelMachine ?? ViaNode(summary), workspaceNode: machine);
             result = new ModelAttemptResult(step.Id, summary, null, ShouldVerify: true, Workspace: worker, Machine: machine,
-                ModelNode: modelMachine ?? ViaNode(summary) ?? _journal?.ActualNode);
+                ModelNode: modelMachine ?? ViaNode(summary) ?? _journal?.ActualNode, ToolCalls: reply.ToolCalls,
+                EditToolCalled: reply.EditToolCalled, WorkBefore: work);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -1327,7 +1811,8 @@ internal sealed partial class PlanRunner
             string? workspaceFailure = workspaceUnavailable ? failure : null;
             result = new ModelAttemptResult(step.Id, string.Empty, failure, ShouldVerify: false, Transient: IsTransient(exception),
                 WorkspaceFailure: workspaceFailure, Machine: machine, ModelNode: modelMachine ?? _journal?.ActualNode,
-                ReroutableWorkspaceFailure: stagingWorkerWorkspace && IsWorkerTransportFailure(exception));
+                ReroutableWorkspaceFailure: stagingWorkerWorkspace && IsWorkerTransportFailure(exception),
+                FailureException: exception, WorkBefore: work);
         }
         finally
         {
@@ -1341,6 +1826,7 @@ internal sealed partial class PlanRunner
                     _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.WorkspaceSynced, tier, machine,
                         "Synced worker file changes to the hub checkout before verification.",
                         modelNode: result.ModelNode ?? modelMachine, workspaceNode: machine);
+                    _store.DeleteWorkerBaseline(plan.Id, step.Id, attempt);
                 }
 
                 if (work is not null)
@@ -1381,28 +1867,13 @@ internal sealed partial class PlanRunner
     /// broke, or Ollama said it was overloaded or down. Worth waiting for; a bad answer is not.
     /// </summary>
     internal static bool IsTransient(Exception exception)
-    {
-        for (Exception? current = exception; current is not null; current = current.InnerException)
-        {
-            switch (current)
-            {
-                case OllamaSharp.Models.Exceptions.ModelDoesNotSupportToolsException:
-                    return false;
-                case OllamaSharp.Models.Exceptions.OllamaException:
-                case HttpRequestException or System.Net.Sockets.SocketException or IOException or TimeoutException:
-                case System.ClientModel.ClientResultException { Status: 0 or 408 or 429 or >= 500 }:
-                    return true;
-                case AggregateException aggregate when aggregate.InnerExceptions.Any(IsTransient):
-                    return true;
-            }
-        }
+        => PlanFailure.IsInfrastructure(exception);
 
-        return false;
-    }
-
-    // 30 s, 1, 2, 4 and 8 minutes, then every 15 minutes.
+    // 30 s, 1, 2, 4 and 8 minutes, then every 15 minutes, with jitter to spread retries.
     private static TimeSpan DefaultTransientDelay(int wait) =>
-        TimeSpan.FromSeconds(Math.Min(30 * Math.Pow(2, wait), 15 * 60));
+        TimeSpan.FromTicks(Math.Min(
+            TimeSpan.FromMinutes(15).Ticks,
+            (long)(TimeSpan.FromSeconds(Math.Min(30 * Math.Pow(2, wait), 15 * 60)).Ticks * (0.8 + Random.Shared.NextDouble() * 0.4))));
 
     private static string Duration(TimeSpan delay) =>
         delay.TotalMinutes >= 1 ? $"{delay.TotalMinutes:0} minute{(delay.TotalMinutes >= 1.5 ? "s" : string.Empty)}" : $"{delay.TotalSeconds:0} seconds";
@@ -1524,11 +1995,15 @@ internal sealed partial class PlanRunner
         string? Failure,
         bool ShouldVerify,
         bool Transient = false,
-        WorkerWorkspaceSession? Workspace = null,
+        IWorkerWorkspaceSession? Workspace = null,
         string? WorkspaceFailure = null,
         string? Machine = null,
         string? ModelNode = null,
-        bool ReroutableWorkspaceFailure = false);
+        bool ReroutableWorkspaceFailure = false,
+        int ToolCalls = 0,
+        bool EditToolCalled = false,
+        PlanTools.WorkSnapshot? WorkBefore = null,
+        Exception? FailureException = null);
 
     internal static string BuildPrompt(
         PlanRecord plan,

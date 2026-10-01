@@ -16,7 +16,18 @@ export type LiveEvent = {
   target?: string;
 };
 
-export type LiveNode = { name: string; model: string; tier?: string | null; ready: boolean; vision?: boolean; workspace?: boolean };
+export type LiveNode = {
+  name: string;
+  model: string;
+  tier?: string | null;
+  ready: boolean;
+  reachable?: boolean;
+  listsModels?: boolean;
+  answers?: boolean;
+  reason?: string | null;
+  vision?: boolean;
+  workspace?: boolean;
+};
 
 export type LivePlan = Plan & { approvedUtc?: string | null; createdUtc?: string | null };
 

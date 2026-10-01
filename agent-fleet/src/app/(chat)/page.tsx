@@ -312,7 +312,7 @@ function PlanModeToggle() {
 type FleetStatus = {
   mode: FleetMode;
   planMode: boolean;
-  nodes: { name: string; model: string; ready: boolean; reachable: boolean }[];
+  nodes: { name: string; model: string; ready: boolean; reachable: boolean; listsModels?: boolean; answers?: boolean }[];
   recentActivity: { timestampUtc: string; node: string; reason: string }[];
 };
 
@@ -364,6 +364,7 @@ function StatusPanel() {
               <div
                 key={node.name}
                 className="flex items-center justify-between bg-neutral-900 border border-neutral-800 rounded-md px-3 py-2 text-sm"
+                title={node.ready ? "Ready to answer" : node.listsModels ? "Model listed, but not answering" : node.reachable ? "Reachable, but model not listed" : "Not reachable"}
               >
                 <span className="flex items-center gap-2">
                   <StatusDot ready={node.ready} />

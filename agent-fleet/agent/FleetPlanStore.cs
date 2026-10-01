@@ -25,6 +25,7 @@ internal sealed partial class FleetPlanStore
     private static readonly string[] Tiers = [FleetTiers.Heavy, FleetTiers.Standard, FleetTiers.Light];
 
     private readonly string _directory;
+    private string WorkerBaselinesDirectory => Path.Combine(_directory, "worker-baselines");
     private readonly object _lock = new();
 
     public FleetPlanStore(IConfiguration configuration)
@@ -158,6 +159,46 @@ internal sealed partial class FleetPlanStore
         catch (UnauthorizedAccessException)
         {
             return null;
+        }
+    }
+
+    internal void SaveWorkerBaseline(string planId, int stepId, int attempt, string machine, IReadOnlyDictionary<string, string> hashes)
+    {
+        string path = WorkerBaselinePath(planId, stepId, attempt);
+        string temporary = path + ".tmp";
+        lock (_lock)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(temporary, JsonSerializer.Serialize(new WorkerWorkspaceBaseline(machine,
+                new Dictionary<string, string>(hashes, StringComparer.OrdinalIgnoreCase)), SerializerOptions), new UTF8Encoding(false));
+            File.Move(temporary, path, overwrite: true);
+        }
+    }
+
+    internal WorkerWorkspaceBaseline? GetWorkerBaseline(string planId, int stepId, int attempt)
+    {
+        string path = WorkerBaselinePath(planId, stepId, attempt);
+        lock (_lock)
+        {
+            if (!File.Exists(path)) return null;
+            try
+            {
+                return JsonSerializer.Deserialize<WorkerWorkspaceBaseline>(File.ReadAllText(path), SerializerOptions);
+            }
+            catch (Exception exception) when (exception is JsonException or IOException or UnauthorizedAccessException)
+            {
+                return null;
+            }
+        }
+    }
+
+    internal void DeleteWorkerBaseline(string planId, int stepId, int attempt)
+    {
+        string path = WorkerBaselinePath(planId, stepId, attempt);
+        lock (_lock)
+        {
+            if (File.Exists(path)) File.Delete(path);
+            if (File.Exists(path + ".tmp")) File.Delete(path + ".tmp");
         }
     }
 
@@ -333,7 +374,13 @@ internal sealed partial class FleetPlanStore
         string? node = null,
         string detail = "",
         string? modelNode = null,
-        string? workspaceNode = null)
+        string? workspaceNode = null,
+        string? failureClass = null,
+        string? failureSignature = null,
+        int? failureSignatureSize = null,
+        int? filesChanged = null,
+        int? toolCalls = null,
+        bool? editToolCalled = null)
     {
         string text = detail ?? string.Empty;
         int limit = kind == RunEventKind.FilesChanged ? MaxFilesChangedCharacters : MaxEventDetailCharacters;
@@ -342,7 +389,8 @@ internal sealed partial class FleetPlanStore
             text = text[..limit].TrimEnd() + "...";
         }
 
-        var entry = new PlanRunEvent(DateTimeOffset.UtcNow, stepId, attempt, kind, tier, node, text, modelNode, workspaceNode);
+        var entry = new PlanRunEvent(DateTimeOffset.UtcNow, stepId, attempt, kind, tier, node, text, modelNode, workspaceNode,
+            failureClass, failureSignature, failureSignatureSize, filesChanged, toolCalls, editToolCalled);
         return Update(id, plan =>
         {
             List<PlanRunEvent> events = [.. plan.Events ?? [], entry];
@@ -400,10 +448,9 @@ internal sealed partial class FleetPlanStore
         {
             if (retryingBlockedPlan)
             {
-                // The explicit re-approval starts a fresh bounded wait budget as well as a new deadline.
-                // The durable prior waits remain in the report.
+                // The explicit re-approval starts a fresh deadline. Durable prior waits remain in the report.
                 AddEvent(id, null, null, RunEventKind.RetryApproved,
-                    detail: "The user approved another run; a fresh deadline and bounded infrastructure-wait budget started.");
+                    detail: "The user approved another run; a fresh run deadline started.");
             }
             Approved?.Invoke(approved.Id);
         }
@@ -902,6 +949,12 @@ internal sealed partial class FleetPlanStore
             // If link status cannot be checked, fail closed for this optional write.
             return true;
         }
+    }
+
+    private string WorkerBaselinePath(string planId, int stepId, int attempt)
+    {
+        if (!IsValidId(planId) || stepId < 1 || attempt < 1) throw new ArgumentException("Invalid worker baseline identity.");
+        return Path.Combine(WorkerBaselinesDirectory, planId, $"{stepId}-{attempt}.baseline");
     }
 
     private string PathFor(string id) => Path.Combine(_directory, id + ".json");

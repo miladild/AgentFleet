@@ -54,11 +54,16 @@ public sealed class RouterJournalTests : ContextTestBase
 
     private sealed class TagsHandler : HttpMessageHandler
     {
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
-            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            string body = request.Method == HttpMethod.Post
+                ? "{\"choices\":[{\"message\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}"
+                : "{\"models\":[{\"name\":\"test-model:latest\"}]}";
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
             {
-                Content = new StringContent("{\"models\":[{\"name\":\"test-model:latest\"}]}", Encoding.UTF8, "application/json")
+                Content = new StringContent(body, Encoding.UTF8, "application/json")
             });
+        }
     }
 
     private sealed class Factory : IHttpClientFactory

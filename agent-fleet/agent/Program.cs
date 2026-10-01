@@ -763,6 +763,8 @@ app.MapGet("/health", async (CancellationToken cancellationToken) =>
                 model = node.Model,
                 ready = node.Ready,
                 reachable = node.Reachable,
+                listsModels = node.ModelAvailable,
+                answers = node.Answers,
                 checkedAtUtc = node.CheckedAtUtc,
                 reason = node.Failure
             })
@@ -805,6 +807,9 @@ app.MapGet("/api/fleet-status", async (CancellationToken cancellationToken) =>
             tier = fleetOptions.GetNode(node.Name).Tier,
             ready = node.Ready,
             reachable = node.Reachable,
+            listsModels = node.ModelAvailable,
+            answers = node.Answers,
+            reason = node.Failure,
             vision = fleetOptions.GetNode(node.Name).Vision,
             workspace = fleetOptions.GetNode(node.Name).Workspace is not null && !fleetOptions.GetNode(node.Name).Fallback
         }),

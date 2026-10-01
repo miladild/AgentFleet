@@ -43,7 +43,9 @@ internal sealed class ResilientChatClient : DelegatingChatClient
 
         try
         {
-            return await selectedClient.GetResponseAsync(messageList, options, cancellationToken);
+            ChatResponse response = await selectedClient.GetResponseAsync(messageList, options, cancellationToken);
+            if (NodeFor(selectedClient) is { } answeredNode) _healthMonitor.MarkAnswered(answeredNode);
+            return response;
         }
         catch (Exception exception) when (CanFailOver(exception, selectedClient, cancellationToken))
         {
@@ -53,7 +55,9 @@ internal sealed class ResilientChatClient : DelegatingChatClient
                 "Fleet node {FleetNode} failed before producing a response; using the hub fallback.",
                 _node.Name);
 
-            return await _fallbackClient!.GetResponseAsync(fallbackMessages, options, cancellationToken);
+            ChatResponse response = await _fallbackClient!.GetResponseAsync(fallbackMessages, options, cancellationToken);
+            if (_fallbackNode is not null) _healthMonitor.MarkAnswered(_fallbackNode.Name);
+            return response;
         }
     }
 
@@ -73,6 +77,7 @@ internal sealed class ResilientChatClient : DelegatingChatClient
             .GetStreamingResponseAsync(messageList, options, cancellationToken)
             .GetAsyncEnumerator(cancellationToken);
         bool hasFirst;
+        string? respondingNode = NodeFor(selectedClient);
         try
         {
             hasFirst = await stream.MoveNextAsync();
@@ -84,6 +89,7 @@ internal sealed class ResilientChatClient : DelegatingChatClient
             IReadOnlyList<ChatMessage> fallbackMessages = AddFailoverNote(messageList, exception.Message, "failover");
             _logger.LogWarning("Fleet node {FleetNode} failed before its first word; using the hub fallback.", _node.Name);
             stream = _fallbackClient!.GetStreamingResponseAsync(fallbackMessages, options, cancellationToken).GetAsyncEnumerator(cancellationToken);
+            respondingNode = _fallbackNode?.Name;
             hasFirst = await stream.MoveNextAsync();
         }
 
@@ -91,8 +97,11 @@ internal sealed class ResilientChatClient : DelegatingChatClient
         {
             if (!hasFirst)
             {
+                if (respondingNode is not null) _healthMonitor.MarkInferenceFailed(respondingNode, "empty_response");
                 yield break;
             }
+
+            if (respondingNode is not null) _healthMonitor.MarkAnswered(respondingNode);
 
             yield return stream.Current;
             while (await stream.MoveNextAsync())
@@ -174,6 +183,10 @@ internal sealed class ResilientChatClient : DelegatingChatClient
         // machine can answer. A model that does not support tools would fail anywhere the same way, so it is not retried.
         (exception is HttpRequestException || exception is OperationCanceledException ||
          (exception is OllamaSharp.Models.Exceptions.OllamaException && exception is not OllamaSharp.Models.Exceptions.ModelDoesNotSupportToolsException));
+
+    private string? NodeFor(IChatClient client) =>
+        ReferenceEquals(client, InnerClient) ? _node.Name :
+        _fallbackClient is not null && ReferenceEquals(client, _fallbackClient) ? _fallbackNode?.Name : null;
 
     private static IReadOnlyList<ChatMessage> Materialize(IEnumerable<ChatMessage> messages) =>
         messages as IReadOnlyList<ChatMessage> ?? messages.ToArray();
