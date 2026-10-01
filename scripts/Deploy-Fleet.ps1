@@ -58,6 +58,17 @@ function Stop-One([string]$Name) {
     }
 }
 
+# Stopping a task ends its shell, not always the program it started. Measured on a developer machine: the old web UI
+# (next start) kept port 3000, the new one failed with EADDRINUSE and exited, and the page being served was the old
+# process, running over a build that had just been replaced. The web UI is matched by its folder and its production
+# command, so a `npm run dev` in the same checkout is left alone.
+function Stop-LeftoverWebUi {
+    if ($mode -eq 'service') { return }
+    Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine.Contains($web) -and ($_.CommandLine -match 'server\.js|next(\.js)?"?\s+start|serve\.mjs"?\s+start') } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+}
+
 # Whatever happens below, the tasks end up enabled, so a failed deploy does not leave the fleet switched off.
 function Enable-FleetTasks {
     if ($mode -ne 'task') { return }
@@ -106,7 +117,7 @@ try {
 
     if ($mode -eq 'service') {
         # Installs made before this setting existed get it here: a backend that stops unexpectedly is started again, so a
-        # plan running overnight carries on (it resumes from disk).
+        # plan whose interrupted step is safe to replay carries on (it resumes from disk).
         sc.exe failure $BackendName reset= 86400 actions= restart/5000/restart/30000/restart/60000 | Out-Null
         if (-not $SkipFrontend -and (Get-Service -Name $FrontendName -ErrorAction SilentlyContinue)) {
             # The web UI runs from the source folder, which can be on a disk that comes up after the services start (a USB
@@ -123,6 +134,7 @@ try {
     if (-not $SkipFrontend) {
         Write-Step "Restarting $FrontendName"
         Stop-One $FrontendName
+        Stop-LeftoverWebUi
         Start-Sleep -Seconds 1
         Start-One $FrontendName
     }
