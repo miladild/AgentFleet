@@ -187,12 +187,15 @@ public sealed class OvernightTests
         static NodeHealthSnapshot[] Health(bool ready, string? failure) =>
             [new("worker", "m", ready, ready, DateTimeOffset.UtcNow, failure)];
 
+        // The wait is measured on the wall clock, and a loaded CI machine can stall for seconds between two probes: with a
+        // five second budget this failed once on CI (the test took 12 s). The loop returns the moment a machine is ready,
+        // so a long budget costs nothing.
         var probes = new List<bool>();
         bool recovered = await PlanRunner.WaitOutShortRestAsync(forceProbe =>
         {
             probes.Add(forceProbe);
             return Task.FromResult(probes.Count < 3 ? Health(false, "request_failed") : Health(true, null));
-        }, TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(1), default);
+        }, TimeSpan.FromMinutes(5), TimeSpan.FromMilliseconds(1), default);
         Assert.True(recovered);
         Assert.Equal([false, true, true], probes);
 
