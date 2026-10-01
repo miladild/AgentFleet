@@ -8,7 +8,7 @@ environment variables.
 | How you run it | Path |
 |---|---|
 | `npm run dev` | `agent-fleet\fleet.config.json` |
-| Installed with `Install-Autostart.ps1` | `<install folder>\backend\fleet.config.json`, by default `C:\AgentFleet\backend\fleet.config.json` |
+| Installed with `Install-Autostart.ps1` | `<install-root>\backend\fleet.config.json` (set `AGENT_FLEET_INSTALL_ROOT` or pass `-InstallRoot`) |
 | Either, if you set `FLEET_CONFIG_PATH` | wherever you point it |
 
 If the file does not exist, the backend creates one on first start with a single node: this machine, running
@@ -46,7 +46,7 @@ fallback, found 2."
 ```json
 {
   "name": "worker1",
-  "url": "http://192.168.1.21:11434/v1",
+  "url": "http://192.0.2.21:11434/v1",
   "model": "qwen2.5-coder:7b",
   "purpose": "Ordinary coding work",
   "tier": "standard",
@@ -146,7 +146,6 @@ set them in your user environment variables. For a Windows service set them on t
 | `FLEET_HEALTH_CACHE_SECONDS` | 10 | How often nodes are probed (1 to 300) |
 | `SHELL_EXECUTION_TIMEOUT_SECONDS` | 120 | How long one `run_command` may run |
 | `FLEET_PLAN_STEP_TOOL_ROUNDS` | 25 | How many rounds of tool calls one attempt at a plan step may make before it ends and the step's check decides (5 to 200) |
-| `FLEET_PLAN_CHEAP_ATTEMPTS` | 1 | How many of a plan step's three attempts run on a machine of the step's own tier before the rest go to the strongest machine |
 | `FLEET_CONTEXT_LENGTH` | 32768 | The most tokens of context a machine is asked for when it does not set `contextLength` |
 | `SANDBOX_*` | | The same settings as the `sandbox` section, used when the file does not give them |
 | `HUB_OLLAMA_URL`, `HUB_OLLAMA_MODEL`, `TRIAGE_OLLAMA_MODEL` | | Seed values for the first-ever start only |
@@ -163,7 +162,7 @@ For the PowerShell scripts in `scripts\`:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AGENT_FLEET_INSTALL_ROOT` | the folder the registered backend service or task runs from, else `C:\AgentFleet` | Where `Install-Autostart.ps1` installs, and where `Deploy-Fleet.ps1`, `Test-Fleet.ps1`, `Add-FleetNode.ps1` and `Get-FleetModels.ps1` look. `-InstallRoot` on any of them wins. |
+| `AGENT_FLEET_INSTALL_ROOT` | the configured install folder, else the standard application-data folder | Where `Install-Autostart.ps1` installs, and where `Deploy-Fleet.ps1`, `Test-Fleet.ps1`, `Add-FleetNode.ps1` and `Get-FleetModels.ps1` look. `-InstallRoot` on any of them wins. |
 
 ## Ports
 

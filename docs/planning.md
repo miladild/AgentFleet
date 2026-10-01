@@ -18,44 +18,65 @@ steps, and checks each step with a real command instead of trusting itself.
    diagram, and numbered steps. Each step names the files it touches, has a **check** (a command that must succeed, such
    as `dotnet build` or `npm test`), and a tier (which kind of machine should do it). The plan is saved as a file.
    Before saving, the fleet reviews it for mistakes that would only show at night, and sends it back to the planner to
-   fix when it finds one: a missing project folder, a check that is a sentence rather than a command (or uses a program
-   the hub does not have), a check that relies on a file only a later step creates, or a plan with no checks or no check
-   on its last step. A revised plan replaces the earlier proposal in the same chat, so there is only ever one waiting
-   for approval, and the turn ends once a plan is saved.
-5. **You decide.** Press **Approve and run**, press **Reject**, or reply in the chat with what to change and it proposes a
+   fix when it finds one: a missing project folder, a check that is a sentence rather than a command, a check that
+   relies on a file only a later step creates, an unbounded check, or a final check that is not a whole-project build,
+   typecheck or test suite. That last command is the runner-owned final validation, shown on the plan card before approval.
+   Worker toolchains
+   are checked only when that worker runs the step; Fleet does not install runtimes from project files. A revised plan
+   replaces the earlier proposal in the same chat, so there is only ever one waiting for approval, and the turn ends
+   once a plan is saved. Before approving, configure a worker workspace for every pinned machine or at least one worker
+   at each step's tier in **Config > Machines**. Without a ready configured worker, the plan blocks visibly and does not
+   route code work to the hub.
+5. **You decide.** Review each step's restart setting and the **Recovery** choice, then press **Approve and run**, press **Reject**, or reply in the chat with what to change and it proposes a
    revised plan. Typing `approve` also works. (`approve the idea but change step 3` counts as feedback, not approval.)
+   New plans proposed in Aggressive mode allow hub-model rescue after a failed, worker-pinned attempt; choose **Worker only**
+   to keep every model retry on that worker. Existing plans keep their saved recovery scope. Each step also says whether it
+   may resume automatically after a backend restart; steps not marked restart-safe stop for review if interrupted.
    In the web UI, you can optionally check **Save a Markdown copy** before approving; it writes the plan into the project
    folder shown on the card. The default is off.
-6. **The run.** Approval starts the plan **in the background**, in order. Steps run one at a time by default. If the plan
-   labels consecutive independent steps with the same **parallel group**, the card shows that label and the runner may
-   run that group concurrently.
-   - A group runs concurrently only when every step names files, paths stay inside the project and do not overlap, the
-     steps use distinct configured tiers, and each tier has a ready node. Otherwise the run log says why it fell back
-     to sequential execution. A machine resting for a minute after one failed request is waited for (up to 75 seconds)
-     rather than costing the whole group its parallel run.
-   - Each step goes to a machine of the tier the plan chose, in a fresh session that sees only the goal, the assumptions,
+6. **The run.** Approval starts the plan **in the background**, in order. Each step requires a configured worker
+   workspace and runs sequentially, so its changes sync back before the next step stages the project. Parallel groups
+   remain visible in the plan but do not run together in worker mode.
+   - Each step has two visible routes: the model that answers and the worker workspace where file tools and checks run. A
+     hub model rescue changes only the model route; the workspace machine and requested task tier stay fixed. For unpinned
+     steps in Aggressive mode, the hub may be the model from the first attempt while all project tools still use a worker.
+   - Each step goes to a configured worker workspace, in a fresh model session that sees only the goal, the assumptions,
      the step itself, a summary of earlier steps, and bounded context from the files named by that step. The runner reads
      up to eight project-local text files (32 KiB each, 48,000 characters total) before each attempt. Missing, binary,
      linked, unreadable, and out-of-project files are skipped. The contents are labeled as untrusted data, never as
      instructions.
-   - For a parallel group, the runner waits until all first attempts finish, then runs checks one at a time. Retries
-     also run sequentially. **The fleet runs every step's check itself**; only a pass marks the step done.
+    - File tools, shell commands and checks run on the selected worker. Git inspection goes through the dedicated read-only tool; Git and GitHub CLI commands through the shell are blocked.
+     The runner syncs changed files back to the hub checkout before and after checks; content hashes detect conflicting
+     worker or hub edits and block instead of overwriting. Existing worker files that differ from the hub are preserved and
+     staging stops. External web, HTTP, MCP/custom, GitHub CLI, publishing, deployment, and known remote-shell commands are blocked
+     at the tool boundary. **Only a passing check and successful sync mark a step done.**
    - An attempt ends after 25 rounds of tool calls (`FLEET_PLAN_STEP_TOOL_ROUNDS`) or 20 minutes, whichever comes
      first, so a model going round in circles cannot hold a machine; the step's check then decides.
-   - In a git project, a tracked file that is deleted while a step runs, and that no step of the plan names, is put
-     back from git just before and just after the step's check, and the run log says which (a test a model wrote once
-     tidied up by deleting the project's own config file on every run). The work of earlier steps is protected the same
-     way: nothing is committed between steps, so a model that resets or deletes files with git (one ran
-     `git checkout HEAD -- <file>` to start over) would throw it away. The fleet notes the changed and new files before
+    - In a Git project, the runner restores a tracked file that a step deletes when no plan step names it, and reports
+      the path (a test once deleted the project's own config file on every run). The runner does not commit between steps;
+      read-only Git inspection is available through its dedicated tool, while shell Git commands are blocked. The fleet notes the changed and new files before
      each attempt and, when the attempt has deleted one or put it back to the committed version, writes it back and
      logs **work-restored**, unless a step that has not finished yet names that file. Outside git this protection does
      not exist, so put a project under git before leaving a plan to run.
-   - A failed check goes back to the model with the real output, up to three attempts. A long output is cut to its end,
-     after a list of the lines that name failures and totals, so the next attempt sees every failing test and not only
-     the last one. The first attempt runs on a machine
-     of the step's own tier, which is what spreads a plan over your machines; after a failure the next attempts go to the
-     strongest machine, because a small model rarely does better the second time (`FLEET_PLAN_CHEAP_ATTEMPTS=2` gives the
-     step's own machine a second try first).
+  - A failed check goes back with its real output, for up to three model attempts. The runner executes the last step's approved
+    whole-project validation on the worker after edits are synced, records the source snapshot ID and bounded command output,
+    and gives failures to a bounded repair attempt. The requested task tier stays fixed. If worker staging has a connection
+    failure before model tools or edits run, Fleet can move to another ready worker at the same tier; it waits for the original
+    worker when no alternative is ready. Workspace conflicts, security/configuration failures and sync failures stop for review.
+     A permitted hub-model rescue does not move files or checks to the hub. In **Live**, select a waiting or failed step to
+    pin a configured text machine for its next attempt; that user choice takes precedence over automatic rerouting.
+    A running step or one waiting for an earlier dependency cannot be moved. Clear the selection to restore automatic
+    tier routing.
+  - Checks run on the selected worker. Provision coding workers with their required runtimes before approval (Windows
+    setup supports `Setup-Worker.ps1 -AllowFrom <hub-private-ip> -InstallToolchains`; other platforms use the operator's
+    trusted package manager).
+    If a check reports a missing runtime or incompatible .NET SDK, Fleet may retry on another ready worker at the same
+    tier while attempts remain; if no candidate can run the check, it stops and identifies
+    the worker so its toolchain can be installed. Plan proposal checks the syntax and declared paths but
+    does not assume a worker has the hub's toolchain.
+  - A plan has an eight-hour default run deadline and a cross-process lease prevents two backend instances from running
+    it at once. Infrastructure waits and attempt counts survive backend restarts. A restart-safe step may resume after a
+    restart if its workspace was synced; an interrupted unsynced workspace is always preserved and blocked for review.
    - If a step still fails, the plan stops as **Blocked**, says which step and why, and leaves your files as they are.
 7. **Afterwards.** The **Plans** button lists every plan and how far it got; in VS Code, **`@fleet /status`** shows the
    current plan's report in the chat, with **Stop it**, or **Approve and resume** for a blocked plan. Close the browser and
@@ -77,9 +98,11 @@ backend's machine at port 3000).
   long it has been thinking. Once it proposes the plan, the page shows the plan. When it answers in the chat without
   a plan (it had a question, or the request was not for one), the page says so and shows the answer.
 - **Pipeline.** The steps from left to right, a parallel group stacked in one column (top to bottom in a narrow pane).
-  A running step glows and shows the machine working on it and its latest tool call; data flows along the edges into
-  it. A retried step shows its attempts (`↻ 2/3`) and an arrow on its tier when the retry moved it to the heavy
-  tier. Hover a step for its latest lines, click it for its instructions, its check and the output of its last check.
+  A running step glows and labels the model machine separately from its worker workspace, alongside its latest tool call; data flows along the edges into
+  it. A retried step shows its attempts (`↻ 2/3`) and keeps its requested tier visible. The machine chip and run log
+  show the selected and actual responder, including an automatic retry move or hub fallback. Hover a step for its
+  latest lines, click it for its instructions, its check, its next-attempt machine selector and the output of its last
+  check.
 - **What needs you.** A plan waiting for approval has **approve and run** and **reject** at the top. A blocked plan
   says at which step, after which attempts on which tiers, and why in plain words (the check's failing line, a check
   that never finishes, a file that was never created), with **retry** (three fresh attempts at that step),
@@ -261,9 +284,10 @@ says so, the request is asked again with a bigger window, and that machine's lat
 
 They are noisy. Expect one to three attempts per step, occasionally a plan that needs a second proposal, and now and then
 a step that blocks. That is what the retry loop and the checks are for. A block is a good outcome compared with a
-confident wrong answer. The strongest machine plans; ordinary steps start on the cheaper machines, and a step that fails
-there moves to the strongest. Planning on a large model can take a few minutes, especially if the model does not fit in
-graphics memory. A worker model that describes what it would do ("I'll read the file...") instead of calling its tools
+confident wrong answer. The strongest machine plans; ordinary steps start on the machine assigned to their tier, and
+retries keep that task tier. From Live, choose another ready machine for an awaiting, ready, or failed step; running and
+dependency-waiting steps cannot be moved. Planning on a large model can take a few minutes, especially if the model does
+not fit in graphics memory. A worker model that describes what it would do ("I'll read the file...") instead of calling its tools
 is a sign it is too small for tool use: give that machine a model that handles tools well, such as `ornith:9b`.
 
 ## Limits

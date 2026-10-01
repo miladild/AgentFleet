@@ -11,7 +11,9 @@ separate step ([adding-machines.md](adding-machines.md)) and can wait.
 - An internet connection for the first setup (packages and the model). After that the fleet works offline, except for
   web search.
 
-The setup script installs .NET 9, Node.js and Ollama with winget if they are missing.
+On Windows, `Install-FleetToolchains.ps1` installs the fixed .NET, Node.js and Python runtimes machine-wide when needed;
+run it elevated on the hub or a coding worker. For a new Windows worker, `Setup-Worker.ps1 -InstallToolchains` runs it
+as part of setup. Run `Setup-Hub.ps1` normally. The hub setup can install Ollama but does not elevate builds.
 
 ## The quickest way: a download
 
@@ -33,14 +35,16 @@ are not in the download, so they are kept. Then continue with [step 3](#3-ask-so
 ## Linux or macOS
 
 This guide's steps below use Windows PowerShell. On Linux or macOS, install the .NET 9 SDK, Node.js 20 or newer (including
-npm), and Ollama from their official download pages, then run the shared hub setup script from the repository root:
+npm), Python 3.13 or newer with the `python3` command, and Ollama from their official download pages, then run the shared
+hub setup script from the repository root:
 
 ```sh
 bash scripts/setup-hub.sh
 ```
 
-The script installs the web UI packages, builds the backend, creates local config files only if absent, and offers to pull
-the selected coding model. It does not install system packages or change firewall and listening-address settings. Start
+The script checks those runtimes, installs the web UI packages, builds the backend, creates local config files only if
+absent, and offers to pull the selected coding model. It does not install system packages or change firewall and
+listening-address settings. Start
 the hub with `cd agent-fleet && npm run dev`, then open <http://localhost:3000>. Keep it running as your normal user and
 read [security.md](security.md) before making it reachable from another computer.
 
@@ -48,21 +52,30 @@ To have it start by itself when you log in, see [Run it all the time](#run-it-al
 
 ## 1. Set up the hub
 
-Open PowerShell in the folder you cloned and run:
+Open PowerShell in the folder you cloned. First, make the runtimes visible machine-wide to the backend. In a separate PowerShell opened with **Run as administrator**, run:
+
+```powershell
+.\scripts\Install-FleetToolchains.ps1
+```
+
+This installs only fixed winget packages: .NET SDK 9+, Node.js 20+ with npm, and Python 3.13+. It does not run project
+scripts or builds. Close the elevated window, open a normal PowerShell, and run:
 
 ```powershell
 .\scripts\Setup-Hub.ps1
 ```
 
-It asks before each install or download. It:
+Never run the hub setup, builds, or agent commands as administrator. `-AuditOnly` checks machine-wide runtime visibility
+without elevation. Setup-Hub asks before the Ollama install or model download. It:
 
-1. checks for .NET 9, Node.js 20+ and Ollama (and installs what is missing),
+1. checks machine-wide .NET, Node/npm and Python runtimes, plus Ollama,
 2. installs the web UI's packages and builds the backend,
 3. creates `agent-fleet\.env.local` and `agent-fleet\fleet.config.json` (this machine is the only node),
 4. downloads a coding model chosen for your graphics memory (`qwen2.5-coder:7b` for an 8 to 24 GB card),
 5. offers to install the `@fleet` VS Code extension.
 
-If it says a tool was installed but is not on PATH yet, open a new PowerShell window and run it again. You can pick a
+If a runtime is missing, run the elevated installer above, then open a fresh normal PowerShell and repeat this step. If Fleet is already running as a service or scheduled task, restart it to load the updated machine PATH.
+You can pick a
 different model with `-Model`, for example `.\scripts\Setup-Hub.ps1 -Model qwen2.5-coder:14b`.
 
 ## 2. Start it
@@ -157,7 +170,7 @@ still contact their configured external services. Details are in
 .\scripts\Install-Autostart.ps1
 ```
 
-This builds the web UI, publishes the backend to `C:\AgentFleet` (another folder: `-InstallRoot D:\AgentFleet`, or set the `AGENT_FLEET_INSTALL_ROOT` environment variable so every script finds it), and registers two scheduled tasks that start when you
+This builds the web UI, publishes the backend to the configured install root (set `AGENT_FLEET_INSTALL_ROOT` or pass `-InstallRoot C:\fleet-test\install`), and registers two scheduled tasks that start when you
 log in and run as you. It needs no administrator rights. Later, `.\scripts\Deploy-Fleet.ps1` updates the running copy
 after you change the code, and `.\scripts\Install-Autostart.ps1 -Uninstall` removes it.
 
@@ -185,11 +198,11 @@ the same plan but has not been run on a Mac yet.
 
 | What | Where (development run) | Where (installed, default folder) |
 |---|---|---|
-| Machines, models, tools, settings | `agent-fleet\fleet.config.json` | `C:\AgentFleet\backend\fleet.config.json` |
-| Conversations | `agent-fleet\data\sessions\` | `C:\AgentFleet\backend\sessions\` |
-| Plans | `agent-fleet\data\plans\` | `C:\AgentFleet\backend\plans\` |
-| Durable record (what the fleet remembers) | `agent-fleet\data\contexts\` | `C:\AgentFleet\backend\contexts\` |
-| Logs | `agent\bin\...\logs\` | `C:\AgentFleet\backend\logs\` |
+| Machines, models, tools, settings | `agent-fleet\fleet.config.json` | `<install-root>\backend\fleet.config.json` |
+| Conversations | `agent-fleet\data\sessions\` | `<install-root>\backend\sessions\` |
+| Plans | `agent-fleet\data\plans\` | `<install-root>\backend\plans\` |
+| Durable record (what the fleet remembers) | `agent-fleet\data\contexts\` | `<install-root>\backend\contexts\` |
+| Logs | `agent\bin\...\logs\` | `<install-root>\backend\logs\` |
 
 Installed on Linux, the same folders are under `~/.local/share/agent-fleet/backend/`; on macOS under
 `~/Library/Application Support/AgentFleet/backend/`.

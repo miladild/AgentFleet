@@ -16,7 +16,7 @@ flowchart TB
     Router["FleetRoutingChatClient<br/>plan gate, triage, node choice"]
     Runner["PlanRunner (background)"]
     Tools["Tools: files, shell, git, web, sandbox, MCP"]
-    Store["Stores: config, sessions, plans"]
+    Store["Stores: config, plans, durable context"]
     Health["Health monitor (10 s)"]
   end
   Ollama["Ollama nodes (OpenAI-compatible /v1)"]
@@ -26,6 +26,8 @@ flowchart TB
   Agent --> Tools
   Runner --> Agent
   Runner --> Store
+  Agent --> Store
+  Tools --> Store
   Router --> Health
   Health --> Ollama
 ```
@@ -58,7 +60,8 @@ flowchart TB
      node on failure) around a `ToolCallRescueChatClient` (repairs a known Ollama bug where the `qwen3-coder` parser leaks a
      tool call as text) around an OpenAI-compatible client.
 4. Streamed updates pass back through `GuardCalls`, which rewrites any disallowed tool call while planning.
-5. The router appends `via <node>` to the answer.
+5. Routes, outputs, tool calls, errors and partial streamed output are journaled against the conversation context. The
+   route is also identified in the response and Context timeline.
 
 The backend is **stateless per request**: the client sends the whole conversation each time. Sessions are saved by clients
 through `/api/sessions`, not needed by the backend to answer.
@@ -92,8 +95,15 @@ without server-side conversation state.
   attempts run together only when their project-local file paths are disjoint and their distinct tiers have ready nodes.
   Checks run after all group edits finish; retries run sequentially. Each attempt includes bounded text context from the
   step's named project-local files; the prompt labels their contents as untrusted data. State lives in the plan file, so
-  a restart resumes. Requests from the runner carry
-  `fleet.runner.tier` in `ChatOptions.AdditionalProperties` and bypass the gate.
+  a restart resumes only when the current step is marked safe to replay; otherwise the runner blocks for review. Unsynced
+  worker workspaces always block and are preserved. Requests from the runner carry `fleet.runner.tier` in
+  `ChatOptions.AdditionalProperties` and pass through a separate execution-time tool policy. Conservative mode routes by
+  the requested tier; Aggressive mode sends unpinned model calls to the hub while all file tools and checks use a configured
+  worker workspace. An explicitly pinned worker normally handles its own model call; a saved plan recovery scope may route
+  a failed retry's model call to the hub without moving that workspace or changing the tier. Before model tools run, a worker
+  staging transport failure may move to a ready same-tier workspace; a workspace conflict or sync failure blocks. The route
+  journal records both machines. Every step has a bounded check, the last step must provide whole-project validation, a
+  cross-process lease prevents duplicate runners, and an eight-hour deadline bounds a run.
 - **Project export is explicit.** The web plan card can save an approved Markdown snapshot under
   `<project>/.agent-fleet/plans/<id>.md`. The checkbox is off by default; chat and VS Code approvals do not export.
 - **Why not let the model report progress?** It was tried: a small model wrote the files, never called the completion tool,
@@ -137,6 +147,17 @@ small projection of it.
   `ContextRetentionService` runs it every six hours. Connections use `secure_delete`, and every delete checkpoints and
   truncates the WAL, so deleted text does not stay in the files; a manual cleanup also runs `VACUUM`.
 
+- **Per-machine response styles.** `caveman` and `ponytail` values are read from each node's config and added to that
+  node's model instructions. They are prompt modes (brevity and minimal coding changes), not skill installs. The request
+  style is carried through fallback so a change of machine does not silently change the requested style.
+
+- **Live plan feed.** The web UI's `/api/live` routes project recent plan-run and context events into a small polling
+  feed. The page shows planning reads, step and retry state, requested tier and answering machine, tool activity, and
+  verification output. A saved machine choice applies to the next eligible attempt without changing the requested tier;
+  running, dependency-waiting, and in-flight parallel steps cannot be moved. The machine/step rail and event journal
+  collapse independently; their summaries keep busy/failed step counts and live event alerts visible. It currently
+  identifies the machine and tier, not the exact Ollama model alias for each visual agent card.
+
 See [context.md](context.md) for the user-facing description.
 
 ## Security-relevant code
@@ -153,10 +174,12 @@ cd agent-fleet\agent.Tests
 dotnet test
 ```
 
-The tests cover the file tools, config loading and validation, routing prompt and route parsing, tool-call rescue, MCP helpers,
-the plan store, gate, tools, runner and prompts, the request guard, and the sandbox options. Real-model behavior (routing
-quality, plan quality) is not unit-testable; it was checked by hand against local models and is described in the plan
-documentation. The web UI has no automated tests; changes to it were checked in a browser.
+The backend tests cover the file tools, config loading and validation, routing prompt and route parsing, tool-call rescue,
+MCP helpers, the plan store, gate, tools, runner and prompts, the request guard, and the sandbox options. The Next.js UI has
+Playwright coverage in `agent-fleet/e2e/`; it runs against a loopback test server with mocked Fleet APIs and does not need
+Ollama. Run `npm run test:e2e` from `agent-fleet/`. The VS Code extension has Node tests under `vscode-fleet/test/`, run
+with `npm test` there. Real-model behavior (routing quality, plan quality) is not unit-testable; it is evaluated with
+local model runs and recorded in the plan documentation.
 
 ## Building blocks worth knowing
 
