@@ -73,7 +73,10 @@ Turn it on when you would want to review the approach before anything changes.
    continues the same conversation when the plan's **Recovery** choice allows
    it, then a fresh conversation starts from a brief of what was tried. File
    edits, Git commands and checks stay on the selected worker, and the requested
-   tier stays the same. The run log shows the selected machine and each climb;
+   tier stays the same.
+   A round that makes the check worse is undone before the next one, and a step
+   has 45 minutes of working time. A step that ends without passing leaves its
+   files at the best state it reached. The run log shows the selected machine and each climb;
    a user-selected machine takes priority. During a plan, files and verification
    commands run in that machine's staged project, then changes sync back to the
    hub checkout for review. A missing-runtime or SDK error stops retries and
