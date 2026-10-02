@@ -116,6 +116,8 @@
 .live-ws i.done { color: var(--bg); background: var(--green); border-color: var(--green); }
 .live-ws i.running { color: var(--bg); background: var(--cyan); border-color: var(--cyan); animation: live-breathe 1.6s ease-in-out infinite; }
 .live-ws i.failed { color: var(--bg); background: var(--red); border-color: var(--red); }
+.live-ws i.parked { color: var(--bg); background: var(--yellow); border-color: var(--yellow); }
+.parked-count { color: var(--yellow); }
 
 .live-status {
   font-weight: 700;
@@ -405,6 +407,13 @@
 .live-node.failed { border-color: rgba(247, 118, 142, 0.8); }
 .live-node.failed .glyph { color: var(--red); }
 .live-node.failed.fresh { animation: live-glitch 0.35s steps(2) 3; }
+/* Parked: stuck and set aside while the rest of the plan goes on. Amber and dashed, not the red of a failure. */
+.live-node.parked { border-color: rgba(224, 175, 104, 0.8); border-style: dashed; }
+.live-node.parked .glyph, .live-node.parked .tries, .live-node.parked .foot .act { color: var(--yellow); }
+.live-node.parked.fresh { animation: live-glitch 0.35s steps(2) 3; }
+/* Pending, and waiting for a step that is parked: dimmer than one that is merely next in line. */
+.live-node.pending.held { opacity: 0.42; border-style: dotted; }
+.live-node.pending.held .foot .act { color: var(--yellow); }
 
 /* A running step: a breathing neon glow, a scan line across the card and a turning ring. */
 .live-node.running { border-color: var(--cyan); }
@@ -555,6 +564,9 @@
 .live-banner.accent { --tone: var(--magenta); }
 .live-banner.info { --tone: var(--cyan); }
 .live-banner.dim { --tone: var(--muted); }
+.live-banner .parked-row { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; }
+.live-banner .parked-row .why { font-size: 12px; min-width: 0; }
+.live-banner .link { background: none; border: 0; padding: 0; color: var(--tone); cursor: pointer; font: inherit; text-decoration: underline; }
 .live-banner .head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; }
 .live-banner .head > b { color: var(--tone); letter-spacing: 0.14em; font-size: 11px; }
 .live-banner .icon { color: var(--tone); }

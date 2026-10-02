@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { PlanStep } from "../PlanCard";
+import { waitingOn, type PlanStep } from "../PlanCard";
 import { RUNG_NAME, useLiveFeed, type LiveNode, type LivePlan, type LogLine, type StepActivity } from "./useLiveFeed";
 import { blockOf, stepFailures, withRunAttempts, type Why } from "./why";
 
@@ -25,7 +25,7 @@ export function useMachineColors(nodes: LiveNode[]) {
   }, [nodes]);
 }
 
-const GLYPH: Record<string, string> = { pending: "○", running: "◐", done: "✔", failed: "✖" };
+const GLYPH: Record<string, string> = { pending: "○", running: "◐", done: "✔", failed: "✖", parked: "⏸" };
 
 // A tier as a strength meter and its name, with what it means on hover.
 const TIERS: Record<string, { bars: number; hint: string }> = {
@@ -84,18 +84,70 @@ const GAP_MAIN = 66;
 const GAP_CROSS = 18;
 const PAD = 18;
 
-/** Steps in stages: a parallel group is one stage, every other step is a stage of its own. */
+/**
+ * Steps in stages. With dependencies, a stage is the steps that are the same number of hops from the start of the plan,
+ * so independent steps stand side by side; without them (a plan from an older backend), a parallel group is one stage and
+ * every other step a stage of its own.
+ */
 function stagesOf(steps: PlanStep[]): Stage[] {
+  if (!steps.some((step) => step.dependsOn != null)) {
+    const stages: Stage[] = [];
+    for (const step of steps) {
+      const last = stages[stages.length - 1];
+      if (last && step.parallelGroup && last[0].parallelGroup === step.parallelGroup) last.push(step);
+      else stages.push([step]);
+    }
+    return stages;
+  }
+
+  const byId = new Map(steps.map((step) => [step.id, step]));
+  const depth = new Map<number, number>();
+  const levelOf = (step: PlanStep, trail: Set<number>): number => {
+    const known = depth.get(step.id);
+    if (known !== undefined) return known;
+    if (trail.has(step.id)) return 0;
+    trail.add(step.id);
+    const level = Math.max(-1, ...(step.dependsOn ?? []).map((id) => (byId.has(id) ? levelOf(byId.get(id)!, trail) : -1))) + 1;
+    trail.delete(step.id);
+    depth.set(step.id, level);
+    return level;
+  };
   const stages: Stage[] = [];
   for (const step of steps) {
-    const last = stages[stages.length - 1];
-    if (last && step.parallelGroup && last[0].parallelGroup === step.parallelGroup) last.push(step);
-    else stages.push([step]);
+    const level = levelOf(step, new Set());
+    (stages[level] ??= []).push(step);
   }
-  return stages;
+  return stages.filter(Boolean);
 }
 
-function layout(stages: Stage[], vertical: boolean) {
+/**
+ * The dependencies worth drawing: each step's own, less those another of its dependencies already implies, so the last
+ * step (which waits for all) has a line from the steps just before it and not from every step. Null for a plan without
+ * dependencies, which is drawn as before.
+ */
+function drawnDependencies(steps: PlanStep[]): Array<[number, number]> | null {
+  if (!steps.some((step) => step.dependsOn != null)) return null;
+  const dependencies = new Map(steps.map((step) => [step.id, step.dependsOn ?? []]));
+  const ancestors = (id: number, seen = new Set<number>()): Set<number> => {
+    for (const dependency of dependencies.get(id) ?? []) {
+      if (!seen.has(dependency)) {
+        seen.add(dependency);
+        ancestors(dependency, seen);
+      }
+    }
+    return seen;
+  };
+  const pairs: Array<[number, number]> = [];
+  for (const step of steps) {
+    const own = dependencies.get(step.id) ?? [];
+    for (const dependency of own) {
+      if (!own.some((other) => other !== dependency && ancestors(other).has(dependency))) pairs.push([dependency, step.id]);
+    }
+  }
+  return pairs;
+}
+
+function layout(stages: Stage[], vertical: boolean, pairs: Array<[number, number]> | null) {
   const along = vertical ? NODE_H : NODE_W;
   const across = vertical ? NODE_W : NODE_H;
   const widest = Math.max(1, ...stages.map((stage) => stage.length));
@@ -112,9 +164,7 @@ function layout(stages: Stage[], vertical: boolean) {
   const mainSize = PAD * 2 + stages.length * along + Math.max(0, stages.length - 1) * GAP_MAIN;
   const crossSize = PAD * 2 + span;
   const edges: Edge[] = [];
-  for (let i = 0; i + 1 < stages.length; i++) {
-    for (const from of placed.filter((p) => p.stage === i)) {
-      for (const to of placed.filter((p) => p.stage === i + 1)) {
+  const link = (from: Placed, to: Placed) => {
         const d = vertical
           ? (() => {
               const x1 = from.x + NODE_W / 2, y1 = from.y + NODE_H, x2 = to.x + NODE_W / 2, y2 = to.y;
@@ -127,7 +177,18 @@ function layout(stages: Stage[], vertical: boolean) {
               return `M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}`;
             })();
         edges.push({ from, to, d });
+  };
+  if (pairs === null) {
+    for (let i = 0; i + 1 < stages.length; i++) {
+      for (const from of placed.filter((p) => p.stage === i)) {
+        for (const to of placed.filter((p) => p.stage === i + 1)) link(from, to);
       }
+    }
+  } else {
+    for (const [fromId, toId] of pairs) {
+      const from = placed.find((p) => p.step.id === fromId);
+      const to = placed.find((p) => p.step.id === toId);
+      if (from && to) link(from, to);
     }
   }
   return {
@@ -174,7 +235,7 @@ function useTransitions(steps: PlanStep[]) {
       const before = previous.current.get(step.id);
       if (before && before !== step.status) {
         if (step.status === "done") done.push(step.id);
-        if (step.status === "failed") failed.push(step.id);
+        if (step.status === "failed" || step.status === "parked") failed.push(step.id);
       }
       previous.current.set(step.id, step.status);
     }
@@ -209,10 +270,10 @@ export function Clock({ from, until }: { from: number | null; until: number | nu
   );
 }
 
-/** approve, reject, stop or skip a step, with the confirmation each needs; true while one is on its way. */
+/** approve, reject, stop, retry or skip a step, with the confirmation each needs; true while one is on its way. */
 function usePlanAction(planId: string) {
   const [acting, setActing] = useState(false);
-  async function act(action: "stop" | "approve" | "reject" | "skip", step?: PlanStep) {
+  async function act(action: "stop" | "approve" | "reject" | "skip" | "retry", step?: PlanStep) {
     const question =
       action === "stop"
         ? "Stop this plan? Finished steps stay done; you can resume it later."
@@ -224,7 +285,7 @@ function usePlanAction(planId: string) {
     if (question && !window.confirm(question)) return;
     setActing(true);
     try {
-      const query = action === "skip" && step ? `?step=${step.id}&resume=true` : "";
+      const query = action === "skip" && step ? `?step=${step.id}&resume=true` : action === "retry" && step ? `?step=${step.id}` : "";
       const res = await fetch(`/api/plans/${planId}/${action}${query}`, { method: "POST" });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -239,6 +300,7 @@ function usePlanAction(planId: string) {
 
 function stageStatus(stage: Stage) {
   if (stage.some((step) => step.status === "failed")) return "failed";
+  if (stage.some((step) => step.status === "parked")) return "parked";
   if (stage.some((step) => step.status === "running")) return "running";
   if (stage.every((step) => step.status === "done")) return "done";
   return "pending";
@@ -282,6 +344,11 @@ function TopBar({
         {plan.status.replace("-", " ")}
       </span>
       <span className="mod">◆ {done}/{plan.steps.length}</span>
+      {plan.steps.some((step) => step.status === "parked") && (
+        <span className="mod parked-count" title="Steps that are parked: stuck, set aside while the rest of the plan goes on">
+          ⏸ {plan.steps.filter((step) => step.status === "parked").length}
+        </span>
+      )}
       <Clock from={started} until={finished} />
       <span className="mod hide-narrow" aria-label="Machines">
         {nodes.map((node) => (
@@ -308,6 +375,7 @@ function TopBar({
 const StepNode = memo(function StepNode({
   placed,
   siblings,
+  waiting,
   activity,
   color,
   colorOf,
@@ -320,6 +388,8 @@ const StepNode = memo(function StepNode({
 }: {
   placed: Placed;
   siblings: number[];
+  /** The parked or stopped steps this pending step waits for. */
+  waiting: number[];
   activity: StepActivity | undefined;
   color: string;
   colorOf: (name: string | null | undefined) => string;
@@ -332,6 +402,7 @@ const StepNode = memo(function StepNode({
 }) {
   const { step } = placed;
   const node = activity?.node ?? null;
+  const parked = step.status === "parked";
   const skipped = step.status === "done" && step.note?.startsWith("Skipped by the user");
   const footer =
     step.status === "running"
@@ -342,17 +413,19 @@ const StepNode = memo(function StepNode({
           ? step.attempts > 1
             ? `passed on attempt ${step.attempts}`
             : "passed its check"
-          : step.status === "failed"
-            ? failure?.short ?? step.note ?? "check failed"
-            : step.verify
-              ? `check: ${step.verify}`
-              : "waiting";
+          : step.status === "failed" || parked
+            ? failure?.short ?? step.note ?? (parked ? "parked" : "check failed")
+            : waiting.length > 0
+              ? `waiting on ${waiting.map((id) => `#${id}`).join(" ")}`
+              : step.verify
+                ? `check: ${step.verify}`
+                : "waiting";
   const glyph = skipped ? "⤼" : GLYPH[step.status] ?? "○";
   return (
     <div
       role="button"
       tabIndex={0}
-      className={`live-node ${step.status}${skipped ? " skipped" : ""}${selected ? " selected" : ""}${glitch ? " fresh" : ""}`}
+      className={`live-node ${step.status}${waiting.length > 0 ? " held" : ""}${skipped ? " skipped" : ""}${selected ? " selected" : ""}${glitch ? " fresh" : ""}`}
       style={{ left: placed.x, top: placed.y, width: NODE_W, height: NODE_H }}
       onClick={() => onSelect(step.id)}
       onKeyDown={(event) => event.key === "Enter" && onSelect(step.id)}
@@ -374,16 +447,16 @@ const StepNode = memo(function StepNode({
       </div>
       <div className="name">{step.title}</div>
       <div className="foot">
-        {node && (step.status === "running" || step.status === "done" || step.status === "failed") && !skipped && (
+        {node && (step.status === "running" || step.status === "done" || step.status === "failed" || parked) && !skipped && (
           <span className="live-chip" title="Model route" style={{ ["--m" as string]: color }}>{node}</span>
         )}
-        {activity?.workspaceNode && activity.workspaceNode !== node && (step.status === "running" || step.status === "done" || step.status === "failed") && !skipped && (
+        {activity?.workspaceNode && activity.workspaceNode !== node && (step.status === "running" || step.status === "done" || step.status === "failed" || parked) && !skipped && (
           <span className="live-chip workspace" title="Worker workspace" style={{ ["--m" as string]: colorOf(activity.workspaceNode) }}>{activity.workspaceNode}</span>
         )}
-        <span className="act" title={failure && step.status === "failed" ? `${failure.short}\n\n${failure.hint}` : footer}>
+        <span className="act" title={failure && (step.status === "failed" || parked) ? `${failure.short}\n\n${failure.hint}` : footer}>
           {footer}
         </span>
-        {(step.attempts > 1 || (activity?.rung ?? 1) > 1 || (activity?.round ?? 1) > 1 || (step.status === "failed" && step.attempts > 0)) && (
+        {(step.attempts > 1 || (activity?.rung ?? 1) > 1 || (activity?.round ?? 1) > 1 || ((step.status === "failed" || parked) && step.attempts > 0)) && (
           <span
             className="tries"
             title={`${step.attempts} of 3 attempts (conversations) used${activity?.rung ? `\nRepair ladder: rung ${activity.rung} (${RUNG_NAME[activity.rung] ?? "?"})${activity.round ? `, round ${activity.round}` : ""}` : ""}`}
@@ -430,12 +503,23 @@ function Pipeline({
 
   // A narrow pane (VS Code's browser beside the code) stacks the steps and scrolls rather than shrinking them to fit.
   const vertical = size.width < 760 || size.height > size.width * 1.15;
-  const graph = useMemo(() => layout(stages, vertical), [stages, vertical]);
-  // The steps each step runs alongside, worked out once per plan so the step cards are not redrawn for nothing.
+  const pairs = useMemo(() => drawnDependencies(steps), [steps]);
+  const graph = useMemo(() => layout(stages, vertical, pairs), [stages, vertical, pairs]);
+  // The steps each step runs alongside (a parallel group; steps that merely do not depend on each other are not "with"
+  // each other), worked out once per plan so the step cards are not redrawn for nothing.
   const siblingsOf = useMemo(
-    () => new Map(stages.flatMap((stage) => stage.map((step) => [step.id, stage.filter((other) => other.id !== step.id).map((other) => other.id)] as const))),
+    () =>
+      new Map(
+        stages.flatMap((stage) =>
+          stage.map(
+            (step) =>
+              [step.id, stage.filter((other) => other.id !== step.id && step.parallelGroup && other.parallelGroup === step.parallelGroup).map((other) => other.id)] as const,
+          ),
+        ),
+      ),
     [stages],
   );
+  const holdingBack = useMemo(() => new Map(steps.map((step) => [step.id, waitingOn(steps, step)])), [steps]);
   const fitWidth = (size.width - 8) / graph.width;
   const scale = vertical
     ? Math.max(0.5, Math.min(1, fitWidth))
@@ -472,6 +556,7 @@ function Pipeline({
               key={placed.step.id}
               placed={placed}
               siblings={siblingsOf.get(placed.step.id) ?? NO_SIBLINGS}
+              waiting={holdingBack.get(placed.step.id) ?? NO_SIBLINGS}
               activity={activity.get(placed.step.id)}
               color={colorOf(activity.get(placed.step.id)?.node)}
               colorOf={colorOf}
@@ -888,7 +973,7 @@ function PlanBanner({ plan, onInspect }: { plan: LivePlan; onInspect: (id: numbe
     );
   }
 
-  if (!block) return null;
+  if (!block) return <ParkedBanner plan={plan} skipId={null} onInspect={onInspect} />;
   const { step, stopped, why, machines, ladder } = block;
   const endless = why.short.includes("never finishes");
   const environment = why.short.startsWith("environment issue:");
@@ -925,7 +1010,7 @@ function PlanBanner({ plan, onInspect }: { plan: LivePlan; onInspect: (id: numbe
         ) : (
           <>
             {!endless && (
-              <button type="button" className="primary" disabled={acting} onClick={() => act("approve")} title={environment ? "Fix the hub toolchain first, then try this step again" : "A fresh repair ladder for this step, then the rest of the plan"}>
+              <button type="button" className="primary" disabled={acting} onClick={() => (step ? act("retry", step) : act("approve"))} title={environment ? "Fix the hub toolchain first, then try this step again" : "A fresh repair ladder for this step, then what was waiting for it"}>
                 ↻ retry step {step?.id}
               </button>
             )}
@@ -942,6 +1027,51 @@ function PlanBanner({ plan, onInspect }: { plan: LivePlan; onInspect: (id: numbe
           </button>
         )}
       </div>
+      <ParkedBanner plan={plan} skipId={step?.id ?? null} onInspect={onInspect} />
+    </div>
+  );
+}
+
+/**
+ * The steps that were parked: stuck, set aside so the rest of the plan can go on, each with why and the two things the
+ * user can do about it. Shown while the plan runs, and under the blocked banner for the steps it does not already show.
+ */
+function ParkedBanner({ plan, skipId, onInspect }: { plan: LivePlan; skipId: number | null; onInspect: (id: number) => void }) {
+  const [acting, act] = usePlanAction(plan.id);
+  const failures = useMemo(() => stepFailures(plan), [plan]);
+  if (plan.id === "demo") return null;
+  const parked = plan.steps.filter((step) => step.status === "parked" && step.id !== skipId);
+  if (parked.length === 0) return null;
+  const waiting = plan.steps.filter((step) => step.status === "pending" && waitingOn(plan.steps, step).length > 0);
+  const running = plan.status === "running" || plan.status === "approved";
+  return (
+    <div className="live-banner warn parked-list" role="status">
+      <div className="head">
+        <span className="icon">⏸</span>
+        <b>PARKED</b>
+        <span className="muted">
+          {parked.length} step{parked.length === 1 ? "" : "s"} set aside{running ? "; the rest of the plan goes on" : ""}
+          {waiting.length > 0 ? ` · waiting on ${parked.length === 1 ? "it" : "them"}: ${waiting.map((step) => `#${step.id}`).join(" ")}` : ""}
+        </span>
+      </div>
+      {parked.map((step) => (
+        <div key={step.id} className="parked-row">
+          <div className="why">
+            <button type="button" className="link" onClick={() => onInspect(step.id)}>
+              #{step.id} {step.title}
+            </button>{" "}
+            <span className="muted">{failures.get(step.id)?.short ?? step.note ?? "parked"}</span>
+          </div>
+          <div className="actions">
+            <button type="button" className="primary" disabled={acting} onClick={() => act("retry", step)} title="A fresh repair ladder for this step; the others are left alone">
+              ↻ retry step {step.id}
+            </button>
+            <button type="button" disabled={acting} onClick={() => act("skip", step)} title="Count this step as done without its check, and go on">
+              ⤼ skip step {step.id} and go on
+            </button>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -1038,6 +1168,7 @@ export function LiveRun({ planId, following = false }: { planId: string; followi
   const live = plan.status === "running" || plan.status === "approved";
   const done = steps.filter((step) => step.status === "done").length;
   const failedSteps = steps.filter((step) => step.status === "failed").length;
+  const parkedSteps = steps.filter((step) => step.status === "parked").length;
   const inspect = (id: number) => {
     setSelected(id);
     setFilter(id);
@@ -1096,7 +1227,9 @@ export function LiveRun({ planId, following = false }: { planId: string; followi
             <b>machines</b>
             <span className="spacer" />
             <span>{busyNodes.size} busy</span>
-            <span className={`live-rail-failures${failedSteps ? " has-failures" : ""}`}>{failedSteps} failed</span>
+            <span className={`live-rail-failures${failedSteps || parkedSteps ? " has-failures" : ""}`}>
+              {failedSteps} failed{parkedSteps ? ` · ${parkedSteps} parked` : ""}
+            </span>
             <span className="live-disclosure" aria-hidden="true">›</span>
           </summary>
           <div className="live-side">

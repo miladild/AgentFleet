@@ -15,6 +15,8 @@ export type PlanStep = {
   tier: string;
   machine?: string | null;
   parallelGroup?: string | null;
+  /** The numbers of the steps this one waits for. Every step has them once the plan is read from the backend. */
+  dependsOn?: number[] | null;
   retrySafe?: boolean;
   status: string;
   note: string | null;
@@ -71,6 +73,23 @@ export type Plan = {
   runDeadlineUtc?: string | null;
 };
 
+/** The ids of the steps a pending step waits for that are parked or stopped. */
+export function waitingOn(steps: PlanStep[], step: PlanStep): number[] {
+  if (step.status !== "pending") return [];
+  return (step.dependsOn ?? []).filter((id) => {
+    const dependency = steps.find((candidate) => candidate.id === id);
+    return dependency?.status === "parked" || dependency?.status === "failed";
+  });
+}
+
+/** Whether a step waits for something other than the step before it (the usual chain, and the last step for all). */
+function needsOtherThanChain(plan: Plan, step: PlanStep): boolean {
+  const own = step.dependsOn ?? [];
+  const last = plan.steps[plan.steps.length - 1]?.id;
+  if (own.length === 0 || step.id === last) return false;
+  return !(own.length === 1 && own[0] === step.id - 1);
+}
+
 const STATUS_LABEL: Record<string, { text: string; className: string }> = {
   "awaiting-approval": { text: "Waiting for your approval", className: "bg-amber-500/15 text-amber-300 border-amber-500/40" },
   approved: { text: "Approved", className: "bg-sky-500/15 text-sky-300 border-sky-500/40" },
@@ -85,6 +104,7 @@ const STEP_ICON: Record<string, { glyph: string; className: string }> = {
   running: { glyph: "◐", className: "text-sky-400" },
   done: { glyph: "✓", className: "text-emerald-400" },
   failed: { glyph: "✗", className: "text-red-400" },
+  parked: { glyph: "⏸", className: "text-amber-400" },
 };
 
 const LIVE_STATUSES = new Set(["awaiting-approval", "approved", "running", "blocked"]);
@@ -166,6 +186,9 @@ const EVENT_STYLE: Record<string, string> = {
   "rung-changed": "text-violet-300",
   "round-rolled-back": "text-amber-400",
   "step-time-limit": "text-red-400",
+  "step-parked": "text-amber-400",
+  "step-retried": "text-sky-300",
+  "plan-needs-attention": "text-amber-400",
   "check-healed": "text-emerald-300",
   "check-audit": "text-amber-300",
   "environment-repaired": "text-emerald-300",
@@ -364,6 +387,19 @@ export function PlanCard({ planId }: { planId: string }) {
                       {step.parallelGroup && (
                         <span className="ml-1 text-[10px] text-violet-300">parallel: {step.parallelGroup}</span>
                       )}
+                      {needsOtherThanChain(plan, step) && (
+                        <span
+                          className="ml-1 text-[10px] text-sky-300"
+                          title="This step waits only for these steps. If one of them gets stuck, the steps that do not need it still run."
+                        >
+                          needs {step.dependsOn!.map((id) => `#${id}`).join(" ")}
+                        </span>
+                      )}
+                      {waitingOn(plan.steps, step).length > 0 && (
+                        <span className="ml-1 text-[10px] text-amber-400" title="A step it needs is parked or stopped; it starts when that one is done or skipped.">
+                          waiting on {waitingOn(plan.steps, step).map((id) => `#${id}`).join(" ")}
+                        </span>
+                      )}
                     </div>
                     {step.detail && <div className="text-[11px] text-neutral-400">{step.detail}</div>}
                     {step.files.length > 0 && (
@@ -380,7 +416,7 @@ export function PlanCard({ planId }: { planId: string }) {
                       </div>
                     )}
                     {step.note && (
-                      <div className={`text-[11px] ${step.status === "failed" ? "text-red-400" : "text-neutral-400"}`}>
+                      <div className={`text-[11px] ${step.status === "failed" ? "text-red-400" : step.status === "parked" ? "text-amber-400" : "text-neutral-400"}`}>
                         {step.note}
                       </div>
                     )}
