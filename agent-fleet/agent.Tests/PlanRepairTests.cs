@@ -175,7 +175,7 @@ public sealed partial class PlanRunnerTests
         PlanRecord after = Store.Get(plan.Id)!;
         Assert.DoesNotContain(agent.Calls, call => call.Machine == "hub");
         Assert.Equal(PlanStatus.Blocked, after.Status);
-        Assert.Equal(StepStatus.Failed, after.Steps[0].Status);
+        Assert.Equal(StepStatus.Parked, after.Steps[0].Status);
         // The worker's round changed nothing, so the step moved on at once, to a new conversation on a worker that
         // knows what was tried; that one changed nothing either and the ladder ended.
         Assert.Equal(2, agent.Sessions.Count);
@@ -625,7 +625,7 @@ public sealed partial class PlanRunnerTests
         Assert.Contains("best round", limit.Detail);
         Assert.Equal([1200, 1200, 1200], after.Events!.Where(runEvent => runEvent.Kind == RunEventKind.RoundClassified).Select(runEvent => runEvent.DurationSeconds));
         Assert.Contains(after.Events!, runEvent => runEvent.Kind == RunEventKind.PlanBlocked);
-        Assert.Equal(StepStatus.Failed, after.Steps[0].Status);
+        Assert.Equal(StepStatus.Parked, after.Steps[0].Status);
     }
 
     [Fact]

@@ -217,6 +217,10 @@ internal static partial class PlanGate
            Group checks run after all group edits finish. When the work splits into independent parts (two separate
            helpers, a feature and an unrelated fix), make them a parallel group on different tiers so the plan is
            spread over the machines instead of queuing on one.
+           By default each step needs the step before it, and the last step needs all of them. When a step really does not
+           need its neighbour (a second feature, an unrelated fix), give it dependsOn with the numbers of the earlier steps it
+           does need: if one step then gets stuck, the runner goes on with every step that does not depend on it and tells
+           the user. List the steps in an order where each comes after the steps it depends on.
            Add a Mermaid diagram only when the change affects how several parts fit together (a flowchart,
            sequenceDiagram or classDiagram, with every node label in double quotes); skip it for small tasks.
            Keep a plan you design compact: at most eight steps, one or two sentences of detail each (a plan the user

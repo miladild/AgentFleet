@@ -71,6 +71,7 @@ internal static partial class PlanReview
             problems.Add($"The last step ({steps[^1].Title}) needs a whole-project build or test-suite command as its check. The runner executes this command after the step's edits and uses its output for bounded repair retries; a syntax check of one file is not enough.");
         }
 
+        problems.AddRange(PlanGraph.Problems(steps));
         for (int index = 0; index < steps.Count; index++)
         {
             problems.AddRange(CheckProblems(root, steps, index, programExists));

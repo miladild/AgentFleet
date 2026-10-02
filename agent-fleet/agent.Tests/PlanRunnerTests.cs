@@ -135,10 +135,10 @@ public sealed partial class PlanRunnerTests : PlanTestBase
 
     private PlanRunner Runner(FakeStepAgent agent, Func<string, string> verify, TimeSpan? timeout = null, ISleepGuard? sleepGuard = null,
         Func<int, TimeSpan>? transientDelay = null, Func<TimeSpan, CancellationToken, Task>? delayAsync = null,
-        IWorkerWorkspaceManager? workerWorkspaces = null, Func<DateTimeOffset>? utcNow = null) =>
+        IWorkerWorkspaceManager? workerWorkspaces = null, Func<DateTimeOffset>? utcNow = null, IPlanNotifier? notifier = null) =>
         new(Store, new PlanTools(Store, Valid, (command, _, _) => Task.FromResult(verify(command))), agent, NullLogger.Instance, timeout,
             transientDelay: transientDelay ?? (_ => TimeSpan.Zero), sleepGuard: sleepGuard,
-            workerWorkspaces: workerWorkspaces, delayAsync: delayAsync ?? ((_, _) => Task.CompletedTask), utcNow: utcNow);
+            workerWorkspaces: workerWorkspaces, delayAsync: delayAsync ?? ((_, _) => Task.CompletedTask), utcNow: utcNow, notifier: notifier);
 
     private static string Pass(string _) => "Exit code: 0\n--- stdout ---\nok";
 
@@ -406,7 +406,7 @@ public sealed partial class PlanRunnerTests : PlanTestBase
         Assert.Equal(2, agent.Sessions.Count);
         PlanRecord after = Store.Get(plan.Id)!;
         Assert.Equal(PlanStatus.Blocked, after.Status);
-        Assert.Equal(StepStatus.Failed, after.Steps[0].Status);
+        Assert.Equal(StepStatus.Parked, after.Steps[0].Status);
         Assert.Contains("attempts", after.Steps[0].Note);
         Assert.Equal(StepStatus.Pending, after.Steps[1].Status);
     }

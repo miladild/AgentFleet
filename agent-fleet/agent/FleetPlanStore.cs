@@ -123,6 +123,7 @@ internal sealed partial class FleetPlanStore
             null,
             RecoveryScope: NormalizeRecoveryScope(recoveryScope));
 
+        plan = PlanGraph.Normalize(plan);
         Save(plan);
         return plan;
     }
@@ -137,8 +138,10 @@ internal sealed partial class FleetPlanStore
         lock (_lock)
         {
             string path = PathFor(id);
+
+            // A plan saved before steps could depend on each other has none written down: it reads as the chain it was.
             return File.Exists(path)
-                ? JsonSerializer.Deserialize<PlanRecord>(File.ReadAllText(path), SerializerOptions)
+                ? JsonSerializer.Deserialize<PlanRecord>(File.ReadAllText(path), SerializerOptions) is { } stored ? PlanGraph.Normalize(stored) : null
                 : null;
         }
     }
@@ -217,7 +220,8 @@ internal sealed partial class FleetPlanStore
                     plan.Steps.Count(step => step.Status == StepStatus.Done),
                     plan.Steps.Count,
                     plan.UpdatedUtc,
-                    plan.ContextId))
+                    plan.ContextId,
+                    plan.Steps.Count(step => step.Status == StepStatus.Parked)))
                 .ToList();
         }
     }
@@ -286,7 +290,8 @@ internal sealed partial class FleetPlanStore
 
             bool editable =
                 (current.Status == PlanStatus.AwaitingApproval && step.Status == StepStatus.Pending) ||
-                (current.Status == PlanStatus.Blocked && step.Status == StepStatus.Failed && !HasRunningParallelPeer(current, step)) ||
+                (current.Status == PlanStatus.Blocked && StepStatus.IsStopped(step.Status) && !HasRunningParallelPeer(current, step)) ||
+                (current.Status == PlanStatus.Running && step.Status == StepStatus.Parked) ||
                 ((current.Status is PlanStatus.Approved or PlanStatus.Running or PlanStatus.Blocked) &&
                     step.Status == StepStatus.Pending && IsReady(current, step) && !HasRunningParallelPeer(current, step));
             if (!editable)
@@ -330,30 +335,7 @@ internal sealed partial class FleetPlanStore
         }
     }
 
-    private static bool IsReady(PlanRecord plan, PlanStep step)
-    {
-        int target = 0;
-        while (target < plan.Steps.Count && plan.Steps[target].Id != step.Id)
-        {
-            target++;
-        }
-
-        for (int index = 0; index < target; index++)
-        {
-            PlanStep previous = plan.Steps[index];
-            if (step.ParallelGroup is not null && previous.ParallelGroup == step.ParallelGroup)
-            {
-                continue;
-            }
-
-            if (previous.Status != StepStatus.Done)
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
+    private static bool IsReady(PlanRecord plan, PlanStep step) => PlanGraph.IsReady(plan, step);
 
     private static bool HasRunningParallelPeer(PlanRecord plan, PlanStep step) =>
         step.ParallelGroup is not null && plan.Steps.Any(candidate =>
@@ -416,7 +398,11 @@ internal sealed partial class FleetPlanStore
     public event Action<string>? Approved;
 
     // Only a plan that is waiting (or blocked and needs another go-ahead) can be approved.
-    public PlanRecord? Approve(string id, bool exportToProject = false, string? recoveryScope = null, string? healChecks = null)
+    /// <param name="retryStopped">
+    /// Whether approving a blocked plan also gives every parked step a fresh start (the default: "approve and resume" means
+    /// try again). False for a call that only goes on past one step the user skipped.
+    /// </param>
+    public PlanRecord? Approve(string id, bool exportToProject = false, string? recoveryScope = null, string? healChecks = null, bool retryStopped = true)
     {
         bool changed = false;
         bool retryingBlockedPlan = false;
@@ -431,9 +417,12 @@ internal sealed partial class FleetPlanStore
             DateTimeOffset approvedAt = DateTimeOffset.UtcNow;
             retryingBlockedPlan = plan.Status == PlanStatus.Blocked;
             IReadOnlyList<PlanStep> steps = retryingBlockedPlan
-                ? plan.Steps.Select(step => step.Status is StepStatus.Running or StepStatus.Failed
-                    ? step with { Attempts = 0 }
-                    : step).ToList()
+                ? plan.Steps.Select(step => step.Status switch
+                {
+                    StepStatus.Parked when retryStopped => step with { Status = StepStatus.Pending, Attempts = 0 },
+                    StepStatus.Running or StepStatus.Failed => step with { Attempts = 0 },
+                    _ => step
+                }).ToList()
                 : plan.Steps;
             PlanRecord approved = plan with
             {
@@ -479,7 +468,8 @@ internal sealed partial class FleetPlanStore
         PlanRecord? result = Update(id, plan =>
         {
             PlanStep? step = plan.Steps.FirstOrDefault(candidate => candidate.Id == stepId);
-            if (plan.Status != PlanStatus.Blocked || step is null || step.Status == StepStatus.Done)
+            bool stoppedInRunningPlan = plan.Status == PlanStatus.Running && step is { Status: StepStatus.Parked };
+            if ((plan.Status != PlanStatus.Blocked && !stoppedInRunningPlan) || step is null || step.Status == StepStatus.Done)
             {
                 return plan;
             }
@@ -497,6 +487,38 @@ internal sealed partial class FleetPlanStore
         if (skipped)
         {
             result = AddEvent(id, stepId, null, RunEventKind.StepSkipped, detail: "Skipped by the user: its check was not run.") ?? result;
+        }
+
+        return result is null || result.Steps.All(step => step.Id != stepId) ? null : result;
+    }
+
+    /// <summary>
+    /// The user's call on one stopped step: it gets a fresh start (its attempts and its repair ladder begin again) while the
+    /// rest of the plan is left alone. In a plan that is still running the runner picks it up by itself; for a blocked plan
+    /// the caller approves the plan again. Null when there is no such plan or step; the plan unchanged when the step is not stopped.
+    /// </summary>
+    public PlanRecord? RetryStep(string id, int stepId)
+    {
+        bool retried = false;
+        PlanRecord? result = Update(id, plan =>
+        {
+            PlanStep? step = plan.Steps.FirstOrDefault(candidate => candidate.Id == stepId);
+            // In a plan that is still running only a parked step is stopped for good: a failed one may be between two rounds.
+            bool retryable = plan.Status == PlanStatus.Blocked
+                ? step is not null && StepStatus.IsStopped(step.Status)
+                : plan.Status == PlanStatus.Running && step is { Status: StepStatus.Parked };
+            if (step is null || !retryable)
+            {
+                return plan;
+            }
+
+            retried = true;
+            return FleetPlanStoreSteps.With(plan, stepId, s => s with { Status = StepStatus.Pending, Attempts = 0 });
+        });
+
+        if (retried)
+        {
+            result = AddEvent(id, stepId, null, RunEventKind.StepRetried, detail: "The user asked for this step to be tried again with a fresh repair ladder.") ?? result;
         }
 
         return result is null || result.Steps.All(step => step.Id != stepId) ? null : result;
@@ -559,7 +581,7 @@ internal sealed partial class FleetPlanStore
             string box = step.Status switch
             {
                 StepStatus.Done => "[x]",
-                StepStatus.Failed => "[!]",
+                StepStatus.Failed or StepStatus.Parked => "[!]",
                 StepStatus.Running => "[~]",
                 _ => "[ ]"
             };
@@ -578,6 +600,13 @@ internal sealed partial class FleetPlanStore
             if (step.ParallelGroup is not null)
             {
                 text.AppendLine($"  - Parallel group: `{step.ParallelGroup}` (runs alongside consecutive steps with the same label when safe)");
+            }
+
+            // Only what differs from the chain is worth a line.
+            List<PlanStep> unspecified = plan.Steps.Select(candidate => candidate with { DependsOn = null }).ToList();
+            if (step.DependsOn is { Count: > 0 } declared && !declared.SequenceEqual(PlanGraph.DependenciesOf(unspecified, step with { DependsOn = null })))
+            {
+                text.AppendLine($"  - Depends on: {string.Join(", ", declared.Select(id => $"step {id}"))}");
             }
 
             if (step.Verify is not null)
@@ -633,23 +662,50 @@ internal sealed partial class FleetPlanStore
         }
 
         int done = plan.Steps.Count(step => step.Status == StepStatus.Done);
-        text.AppendLine($"{done} of {plan.Steps.Count} steps done, {plan.Steps.Sum(step => step.Attempts)} attempt(s) in all.");
+        PlanStep[] stopped = plan.Steps.Where(step => StepStatus.IsStopped(step.Status)).ToArray();
+        PlanStep[] waiting = plan.Steps.Where(step => step.Status == StepStatus.Pending && PlanGraph.Unmet(plan, step).Any(dependency => StepStatus.IsStopped(dependency.Status))).ToArray();
+        text.AppendLine($"{done} of {plan.Steps.Count} steps done" +
+                        (stopped.Length > 0 ? $", {stopped.Length} parked or stopped" : string.Empty) +
+                        (waiting.Length > 0 ? $", {waiting.Length} waiting for them" : string.Empty) +
+                        $", {plan.Steps.Sum(step => step.Attempts)} attempt(s) in all.");
 
-        PlanStep? blocked = plan.Steps.FirstOrDefault(step => step.Status == StepStatus.Failed);
+        PlanStep? blocked = stopped.FirstOrDefault();
         if (plan.Status == PlanStatus.Blocked && blocked is not null)
         {
-            PlanRunEvent? lastCheck = events.LastOrDefault(e => e.StepId == blocked.Id &&
-                (e.Kind is RunEventKind.CheckFailed or RunEventKind.FinalValidationFailed or RunEventKind.RunDeadlineExceeded));
             text.AppendLine();
             text.AppendLine($"## Where it stopped");
-            text.AppendLine($"Step {blocked.Id}, {blocked.Title}: {blocked.Note}");
+            foreach (PlanStep stoppedStep in stopped)
+            {
+                PlanRunEvent? parkedEvent = events.LastOrDefault(e => e.StepId == stoppedStep.Id && e.Kind == RunEventKind.StepParked);
+                text.AppendLine($"Step {stoppedStep.Id}, {stoppedStep.Title}: {stoppedStep.Note}" +
+                                (parkedEvent?.FailureSignature is { Length: > 0 } cause ? $" (cause: {cause})" : string.Empty));
+            }
+
+            PlanRunEvent? lastCheck = events.LastOrDefault(e => e.StepId == blocked.Id &&
+                (e.Kind is RunEventKind.CheckFailed or RunEventKind.FinalValidationFailed or RunEventKind.RunDeadlineExceeded));
             if (lastCheck is not null)
             {
                 text.AppendLine();
-                text.AppendLine("Last failing check output:");
+                text.AppendLine($"Last failing check output (step {blocked.Id}):");
                 text.AppendLine("```");
                 text.AppendLine(lastCheck.Detail);
                 text.AppendLine("```");
+            }
+
+            text.AppendLine();
+            text.AppendLine("## What to do next");
+            foreach (PlanStep stoppedStep in stopped)
+            {
+                text.AppendLine(stoppedStep.Status == StepStatus.Parked
+                    ? $"- Step {stoppedStep.Id} ({stoppedStep.Title}) is parked: fix the cause and retry it (a fresh repair ladder), or skip it to count it as done without its check."
+                    : $"- Step {stoppedStep.Id} ({stoppedStep.Title}) stopped the run and needs a look at the project first; then approve the plan again, or skip it.");
+            }
+
+            if (waiting.Length > 0)
+            {
+                text.AppendLine(waiting.Length == 1
+                    ? $"- Step {waiting[0].Id} was not run: it starts by itself once what it waits for is done or skipped."
+                    : $"- Steps {string.Join(", ", waiting.Select(step => step.Id))} were not run: they start by themselves once what they wait for is done or skipped.");
             }
         }
 
@@ -690,7 +746,7 @@ internal sealed partial class FleetPlanStore
         text.AppendLine("## Steps");
         foreach (PlanStep step in plan.Steps)
         {
-            string box = step.Status switch { StepStatus.Done => "[x]", StepStatus.Failed => "[!]", StepStatus.Running => "[~]", _ => "[ ]" };
+            string box = step.Status switch { StepStatus.Done => "[x]", StepStatus.Failed => "[!]", StepStatus.Parked => "[p]", StepStatus.Running => "[~]", _ => "[ ]" };
             string took = step.StartedUtc is not null && step.CompletedUtc is not null
                 ? $", {Duration(step.CompletedUtc.Value - step.StartedUtc.Value)}"
                 : string.Empty;
@@ -723,6 +779,20 @@ internal sealed partial class FleetPlanStore
             }
 
             PlanRunEvent[] stepEvents = events.Where(e => e.StepId == step.Id).ToArray();
+            int healedChecks = stepEvents.Count(e => e.Kind == RunEventKind.CheckHealed);
+            int repairs = stepEvents.Count(e => e.Kind == RunEventKind.EnvironmentRepaired && e.FailureClass == "Repaired");
+            if (healedChecks > 0 || repairs > 0)
+            {
+                text.AppendLine($"  - Healing: {(healedChecks > 0 ? $"check changed {healedChecks} time{(healedChecks == 1 ? string.Empty : "s")}" : string.Empty)}" +
+                                $"{(healedChecks > 0 && repairs > 0 ? ", " : string.Empty)}" +
+                                $"{(repairs > 0 ? $"environment repaired {repairs} time{(repairs == 1 ? string.Empty : "s")}" : string.Empty)}");
+            }
+
+            if (step.Status == StepStatus.Pending && PlanGraph.Unmet(plan, step).Where(dependency => StepStatus.IsStopped(dependency.Status)).ToArray() is { Length: > 0 } holdingBack)
+            {
+                text.AppendLine($"  - Waiting on {string.Join(", ", holdingBack.Select(dependency => $"#{dependency.Id}"))} ({"parked or stopped"}); not run.");
+            }
+
             int failedRounds = stepEvents.Count(RepairLadder.IsVerdictRound);
             int highestRung = stepEvents.Where(e => e.Rung is not null).Select(e => e.Rung!.Value).DefaultIfEmpty(RepairLadder.RequestedTierRung).Max();
             if (failedRounds > 0 || highestRung > RepairLadder.RequestedTierRung)
@@ -812,7 +882,8 @@ internal sealed partial class FleetPlanStore
             null,
             null,
             CleanParallelGroup(input.ParallelGroup),
-            RetrySafe: input.RetrySafe);
+            RetrySafe: input.RetrySafe,
+            DependsOn: input.DependsOn is { Length: > 0 } declared ? declared.Where(id => id > 0).Distinct().Order().ToList() : null);
     }
 
     internal static string? NormalizeRecoveryScope(string? scope) =>

@@ -283,44 +283,28 @@ internal sealed partial class PlanRunner
     }
 
     /// <summary>
-    /// Before a step starts: a check that can never finish is healed, or the plan stops with the reason, instead of spending
-    /// every attempt on a step that cannot pass. Replaces the older rule that always stopped such a plan.
+    /// Before a step starts: a check that can never finish is healed, or the step is parked with the reason, instead of
+    /// spending every attempt on a step that cannot pass. Replaces the older rule that always stopped such a plan.
     /// </summary>
-    private async Task<bool> PreflightChecksAsync(string planId, IReadOnlyList<int> stepIds, CancellationToken cancellationToken)
+    private async Task PreflightChecksAsync(string planId, IReadOnlyList<int> stepIds, CancellationToken cancellationToken)
     {
         foreach (int stepId in stepIds)
         {
             PlanRecord plan = _store.Get(planId)!;
             PlanStep? step = plan.Steps.FirstOrDefault(candidate => candidate.Id == stepId);
-            if (step is null || step.Status == StepStatus.Done || string.IsNullOrWhiteSpace(step.Verify) ||
+            if (step is null || step.Status != StepStatus.Pending || string.IsNullOrWhiteSpace(step.Verify) ||
                 CheckDefects.FromCommand(step.Verify, plan.WorkingDirectory) is not { } defect)
             {
                 continue;
             }
 
             HealOutcome outcome = await HealCheckAsync(plan, step, null, step.Tier, null, null, null, step.Machine, defect, null, null, cancellationToken);
-            if (outcome.Kind == HealKind.Healed)
+            if (outcome.Kind != HealKind.Healed)
             {
-                continue;
+                ParkForCheck(plan, step, outcome.Reason ?? Park(plan, step, defect, "No replacement was proposed.").Reason!);
             }
-
-            BlockForCheck(plan, step, null, outcome.Reason ?? Park(plan, step, defect, "No replacement was proposed.").Reason!, deferPlanBlock: false);
-            return false;
-        }
-
-        return true;
-    }
-
-    private void BlockForCheck(PlanRecord plan, PlanStep step, int? attempt, string reason, bool deferPlanBlock)
-    {
-        _store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, step.Id, s => s with
-        {
-            Status = StepStatus.Failed,
-            Note = reason
-        }) with { Status = deferPlanBlock ? PlanStatus.Running : PlanStatus.Blocked });
-        if (!deferPlanBlock)
-        {
-            AddBlockedEvent(plan.Id, step, reason);
         }
     }
+
+    private void ParkForCheck(PlanRecord plan, PlanStep step, string reason) => ParkStep(plan, step, reason, "check");
 }

@@ -18,6 +18,16 @@ internal static class StepStatus
     public const string Running = "running";
     public const string Done = "done";
     public const string Failed = "failed";
+
+    /// <summary>
+    /// The step is stuck (its repair ladder is spent, its check is broken beyond repair, the machine cannot run it) and the
+    /// run goes on without it: only the steps that depend on it wait. Failed is the harder stop that needs a person to look
+    /// at the project first (the run deadline, a backend restart in the middle of a step that is not safe to repeat).
+    /// </summary>
+    public const string Parked = "parked";
+
+    /// <summary>Stuck, one way or the other: waiting for the user to retry the step or skip it.</summary>
+    public static bool IsStopped(string status) => status is Failed or Parked;
 }
 
 internal static class PlanRecoveryScope
@@ -57,7 +67,8 @@ internal sealed record PlanStep(
     string? ParallelGroup = null,
     string? Machine = null,
     bool RetrySafe = false,
-    string? OriginalVerify = null);
+    string? OriginalVerify = null,
+    IReadOnlyList<int>? DependsOn = null);
 
 internal static class RunEventKind
 {
@@ -100,6 +111,9 @@ internal static class RunEventKind
     public const string CheckAudit = "check-audit";
     public const string EnvironmentRepaired = "environment-repaired";
     public const string BlockerReported = "blocker-reported";
+    public const string StepParked = "step-parked";
+    public const string StepRetried = "step-retried";
+    public const string PlanNeedsAttention = "plan-needs-attention";
 }
 
 /// <summary>
@@ -174,7 +188,8 @@ internal sealed record PlanSummary(
     int StepsDone,
     int StepsTotal,
     DateTimeOffset UpdatedUtc,
-    string? ContextId = null);
+    string? ContextId = null,
+    int StepsParked = 0);
 
 /// <summary>What the model supplies for one step when it proposes a plan.</summary>
 internal sealed record PlanStepInput(
@@ -184,7 +199,8 @@ internal sealed record PlanStepInput(
     [property: Description("A shell command that succeeds only if this step actually worked, for example: dotnet build, or npm test. Leave empty only if nothing can be checked automatically")] string? Verify = null,
     [property: Description("How capable a model the step needs: heavy for hard or risky work, standard for ordinary work, light for trivial edits")] string? Tier = null,
     [property: Description("Optional shared short label for two or more consecutive, independent steps that can run at the same time. Leave empty unless their files are disjoint and neither depends on the other")] string? ParallelGroup = null,
-    [property: Description("Set true only when this step's project-local edits and commands are safe to repeat if the backend restarts mid-step. Otherwise false; interrupted steps then wait for user review")] bool RetrySafe = false);
+    [property: Description("Set true only when this step's project-local edits and commands are safe to repeat if the backend restarts mid-step. Otherwise false; interrupted steps then wait for user review")] bool RetrySafe = false,
+    [property: Description("Numbers of the earlier steps this one needs finished first. Leave empty for the usual chain (each step needs the one before it); the last step always needs all of them. A step that cannot be finished holds back only the steps that need it")] int[]? DependsOn = null);
 
 internal sealed record StepMachineRequest(int StepId, string? Machine);
 

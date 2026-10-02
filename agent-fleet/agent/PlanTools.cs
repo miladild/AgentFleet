@@ -183,7 +183,8 @@ internal sealed partial class PlanTools
                 files = step.Files ?? [],
                 verify = step.Verify,
                 tier = step.Tier,
-                parallelGroup = step.ParallelGroup
+                parallelGroup = step.ParallelGroup,
+                dependsOn = step.DependsOn
             })),
             cancellationToken);
 
@@ -322,13 +323,10 @@ internal sealed partial class PlanTools
             return new StepCompletion(false, $"Error: the plan has no step {stepId}. {marker}");
         }
 
-        PlanStep? earlier = plan.Steps.FirstOrDefault(candidate =>
-            candidate.Id < stepId &&
-            candidate.Status != StepStatus.Done &&
-            (step.ParallelGroup is null || candidate.ParallelGroup != step.ParallelGroup));
+        PlanStep? earlier = PlanGraph.Unmet(plan, step).FirstOrDefault();
         if (earlier is not null)
         {
-            return new StepCompletion(false, $"Error: step {earlier.Id} ({earlier.Title}) is not done yet. Steps go in order. {marker}");
+            return new StepCompletion(false, $"Error: step {earlier.Id} ({earlier.Title}) is not done yet, and this step depends on it. {marker}");
         }
 
         if (step.Status == StepStatus.Done)
@@ -1048,7 +1046,27 @@ internal sealed partial class PlanTools
             Field(step, "verify", "verification", "check", "test", "command"),
             Field(step, "tier", "complexity"),
             Field(step, "parallelGroup", "parallel_group"),
-            BooleanField(step, "retrySafe", "retry_safe"));
+            BooleanField(step, "retrySafe", "retry_safe"),
+            StepNumbers(Raw(step, "dependsOn", "depends_on", "dependencies", "depends")));
+    }
+
+    // [1, 3], "1, 3" and ["step 1", "Step 3"] all name steps 1 and 3; nothing named means the chain.
+    private static int[]? StepNumbers(JsonElement? value)
+    {
+        if (value is not { } element)
+        {
+            return null;
+        }
+
+        IEnumerable<string> parts = element.ValueKind switch
+        {
+            JsonValueKind.Array => element.EnumerateArray().Select(item => item.ToString()),
+            JsonValueKind.String or JsonValueKind.Number => [element.ToString()],
+            _ => []
+        };
+        int[] numbers = parts.SelectMany(part => System.Text.RegularExpressions.Regex.Matches(part, @"\d+").Select(match => int.Parse(match.Value)))
+            .Distinct().ToArray();
+        return numbers.Length > 0 ? numbers : null;
     }
 
     private static bool BooleanField(JsonElement obj, params string[] names) =>
