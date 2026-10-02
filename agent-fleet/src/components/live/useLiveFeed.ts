@@ -100,6 +100,8 @@ const RUN_TONE: Record<string, LogLine["tone"]> = {
   "run-lease-busy": "warn",
   "retry-approved": "accent",
   "rung-changed": "accent",
+  "round-rolled-back": "warn",
+  "step-time-limit": "bad",
 };
 
 // A line of the run log in words: which attempt, on which tier, and the part of the detail that matters.
@@ -128,6 +130,10 @@ function runText(event: PlanRunEvent): string {
     }
     case "rung-changed":
       return event.detail || `moved to rung ${event.rung ?? "?"}`;
+    case "round-rolled-back":
+      return event.detail || `round ${event.round ?? "?"} was undone`;
+    case "step-time-limit":
+      return event.detail || "the step used its working time";
     case "check-passed":
       return `✔ check passed${tail(firstLine)}`;
     default:

@@ -39,6 +39,8 @@ export type PlanRunEvent = {
   /** The round within that rung: the model works, then the approved check runs. */
   round?: number | null;
   changedFiles?: string[] | null;
+  /** On a round-classified event: the working time of the round, its model call and its check. */
+  durationSeconds?: number | null;
   detail: string;
 };
 
@@ -155,6 +157,8 @@ const EVENT_STYLE: Record<string, string> = {
   "retry-approved": "text-sky-300",
   "round-classified": "text-violet-300",
   "rung-changed": "text-violet-300",
+  "round-rolled-back": "text-amber-400",
+  "step-time-limit": "text-red-400",
   "inference-probe-passed": "text-emerald-300",
   "workspace-reconciled": "text-sky-300",
   stopped: "text-amber-400",
