@@ -90,8 +90,14 @@ without server-side conversation state.
 - **Three layers stop writes while planning.** The tool list offered to the model is filtered; `GuardCalls` rewrites a call
   to a disallowed tool into `blocked_by_plan_mode`; and the function-invocation layer re-checks at execution time with the
   whole conversation. The first layer alone leaked in testing, because the invocation layer runs any call by name.
-- **Execution is code, not conversation.** `PlanRunner` takes approved plans from a queue, one plan at a time. Steps are
-  sequential by default. Consecutive steps explicitly marked in the same `parallelGroup` can have their first model
+- **Execution is code, not conversation.** `PlanRunner` takes approved plans from a queue, one plan at a time. The plan is a
+  graph (`PlanGraph`: `PlanStep.DependsOn`, read as the straight chain when a saved plan has none, the last step always
+  depending on all): `RunPlanAsync` runs the next step whose dependencies are done, a step that cannot be finished is
+  parked (`StepStatus.Parked`, `ParkStep` in `PlanRunnerParking.cs`, event `step-parked`) and only its dependents wait, and
+  the run ends partial (`EndWithStoppedSteps`, events `plan-needs-attention` and `plan-blocked`) when nothing can run.
+  The run deadline and a restart that is unsafe to repeat still end the whole run. `IPlanNotifier` (`PlanNotices.cs`)
+  gets one notice per transition; `WebhookPlanNotifier` posts it to the optional private-network `notifyUrl`. Steps are
+  run one at a time by default. Consecutive steps explicitly marked in the same `parallelGroup` can have their first model
   attempts run together only when their project-local file paths are disjoint and their distinct tiers have ready nodes.
   Checks run after all group edits finish; retries run sequentially. Each attempt includes bounded text context from the
   step's named project-local files; the prompt labels their contents as untrusted data. State lives in the plan file, so

@@ -132,7 +132,28 @@ steps, and checks each step with a real command instead of trusting itself.
     open conversation does not, so a step resumes in a new conversation that starts from a brief of the rounds before. A
     restart-safe step may resume after a restart if its workspace was synced; an interrupted unsynced workspace is always
     preserved and blocked for review.
-   - If a step still fails, the plan stops as **Blocked**, says which step and why, and leaves your files as they are.
+   - **A stuck step is parked, not the end of the plan.** A plan is a graph, not a queue. Each step may say which earlier
+     steps it needs (`dependsOn`); by default each step needs the one before it (a parallel group's steps need what came
+     before the group), and the last step, the final validation, always needs every other step. When a step cannot be
+     finished (its repair ladder is spent, its check is broken beyond repair, the machine cannot run it, its working time
+     is used, or it keeps failing in a way nobody understands) it is **parked** with its reason, and only the steps that
+     depend on it wait: the runner goes on with every step that does not. Waiting for a machine to come back is not
+     parking. The harder stops still end the whole run: the run deadline, and a restart in the middle of a step that is not
+     safe to repeat. When nothing more can run, the plan stops as **Blocked** with the first parked step's reason, the steps
+     that were not run, and what is done; the steps that did finish stay done and your files stay as they are. In **Live**, a
+     parked step is dashed and amber, the steps waiting for it say `waiting on #2`, and a banner lists each parked step with
+     **retry step** (a fresh repair ladder for that step alone, nothing else restarts) and **skip step and go on** (it counts
+     as done without its check, so what waited for it can start). Approving a blocked plan again, as before, tries every parked
+     step again. A plan proposed with a dependency on an unknown step, on itself or on a later step (that includes every
+     cycle), or between two steps of one parallel group, is sent back to the planner. In a plan file, a step can say
+     `- Depends: 1, 3`.
+   - **The user is told once** when a step is parked, when the run ends with steps that need you, when the plan is done and
+     when the run deadline passes: a line in the run log (**step parked**, **plan needs attention**, **plan done**,
+     **run deadline exceeded**), one message in VS Code per new parked step (never repeated for the same count, not even after a
+     reload), and, if `notifyUrl` is set in the fleet config ([configuration.md](configuration.md)), one small JSON message to
+     that address. The message holds the event, the plan's and the step's titles, the counts of done and parked steps and a
+     cause word (`check-kept-failing`, `check`, `environment`, `working-time`, `unknown-failure`): never a file's contents or a
+     check's output.
 7. **Afterwards.** The **Plans** button lists every plan and how far it got; in VS Code, **`@fleet /status`** shows the
    current plan's report in the chat, with **Stop it**, or **Approve and resume** for a blocked plan. Close the browser and
    VS Code, go to bed: the plan runs in the backend. **Stop** halts a running plan.
@@ -152,7 +173,8 @@ backend's machine at port 3000).
   folder and search it goes through lands around it, the latest one lit, with what it last said underneath and how
   long it has been thinking. Once it proposes the plan, the page shows the plan. When it answers in the chat without
   a plan (it had a question, or the request was not for one), the page says so and shows the answer.
-- **Pipeline.** The steps from left to right, a parallel group stacked in one column (top to bottom in a narrow pane).
+- **Pipeline.** The steps from left to right in stages, by how far they are from the start of the plan: steps that do not
+  depend on each other stand side by side (top to bottom in a narrow pane), and a line joins a step to what it waits for.
   A running step glows and labels the model machine separately from its worker workspace, alongside its latest tool call; data flows along the edges into
   it. A step that needed repair shows where it is on the repair ladder (`↻ rung 2 · round 2`) and keeps its requested tier
   visible. The machine chip and run log show the selected and actual responder, including an automatic climb to the hub. Hover a step for its
@@ -231,6 +253,9 @@ on, the cases its test must cover.
 - `Tier` is heavy, standard or light. Steps that share a `Parallel group` run at the same time on different machines:
   give them different tiers and separate files.
 - `Check` is the command the fleet runs to decide whether the step worked. Name the files a step creates in `Files`.
+- `Depends` (optional) lists the numbers of earlier steps this one needs finished first (`- Depends: 1, 3`). Without it a
+  step needs the one before it, and the last step always needs all of them. Use it for steps that really are independent,
+  so that one that gets stuck holds back only what needs it.
 - Other `##` sections after the steps (notes, an appendix) are ignored.
 
 When your message names a file in this format, the fleet checks it first and tells the planner to hand it over
