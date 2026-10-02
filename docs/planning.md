@@ -74,7 +74,7 @@ steps, and checks each step with a real command instead of trusting itself.
     version probes, `|| true`). It is either the same programs and arguments written so that the shell accepts them, or it
     still runs the project's tests, typecheck or build and keeps everything the original ran. The last step's check must
     still be the whole-project build and tests. A refused proposal gets one more try with the reason; after that the step
-    stops with what was refused and why. A step's check changes at most twice. The original is kept on the step
+    stops with what was refused and why. A step's check changes at most twice, and a sign that two audits found nothing behind is ignored for the rest of the step. The original is kept on the step
     (`originalVerify`, shown on its card), the run log has a **check healed** line with the check before and after, and the
     report lists **Checks changed by Fleet**. A healed check runs again at once in the same workspace and costs no round.
     With **Ask me first**, the step stops with the proposal instead; approve again with **Fix automatically** to apply it.
