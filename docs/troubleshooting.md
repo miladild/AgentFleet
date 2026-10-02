@@ -124,16 +124,38 @@ this.
 
 ## Plans
 
-- **Blocked at a step.** Open the plan (or `@fleet /status` in VS Code): the step says how many attempts it took and the
-  last problem. Look at the files, fix what is wrong (or the step's check), and press **Approve and resume**; finished
-  steps are kept and it continues from the blocked one.
-- **"Waiting ... before trying again" in the run log.** No machine could answer (the network, or the fallback machine,
-  was down). The step waits for up to about an hour without spending its attempts; nothing needs doing unless it lasts.
+- **Blocked, with a parked step.** The plan stopped because nothing more could run. Open it (or `@fleet /status` in VS Code):
+  the report says which step is parked and why, which steps waited for it, and what to do. Fix the cause, then **retry step**
+  (a fresh repair ladder for that one step) or **skip step** (it counts as done without its check). **Approve and resume**
+  retries every parked step. Steps that did not depend on the parked one have already run.
+- **"Waiting ... before retrying" in the run log.** No machine could answer, or a worker could not be reached. The step waits,
+  asks the machine for a small real answer each time it wakes, and carries on by itself; waiting costs no attempt. It keeps
+  going until the run deadline, so a night-long outage is survived and nothing needs doing unless it outlasts the deadline.
+- **"The check was changed" (check healed) in the run log.** The step's saved check could not run or never finished, and Fleet
+  replaced it by one that still tests the work. The report lists the old and the new check under "Checks changed by Fleet". If
+  you would rather be asked first, approve the plan with **Broken checks: Ask me first**.
+- **A step stopped with "the fleet could not change it by itself".** Its check is broken and no replacement passed the rules
+  (it would have passed without the work, or tested less). Change the step's check to one that finishes and tests the result,
+  or skip the step, then approve again.
+- **"Blocked by unattended plan policy".** A step tried a command that only a person may run: git, a remote service, a delete of
+  folders, a change to a security setting or to the machine's configuration. The command did not run. If the project really
+  needs it, do it yourself and retry the step.
+- **A check fails on a Windows worker with "running scripts is disabled on this system".** PowerShell's execution policy blocks
+  a program's script (npm's, for example). Fleet runs the same command through `cmd` instead; it never changes the policy. You
+  can also set the policy yourself for the worker account, for example `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`,
+  if you accept what that allows.
+- **A step failed because the machine lacks something** ("is not recognized", "command not found"). A missing runtime
+  (`node`, `dotnet`, `python`) is a worker setup problem: Fleet tries another ready worker of the same tier and otherwise
+  parks the step naming the worker. A missing project dependency is installed once with the project's own command.
 - **The plan was sent back while planning** ("The plan was NOT saved, because it would fail when it runs"). That is the
-  fleet catching a bad check before the night; the planner fixes it and proposes again. If it keeps failing, say in your
-  request how the project is tested (for example "tests run with `npm test`").
+  fleet catching a bad check, or a dependency on an unknown step, on itself or on a later step, before the night; the planner
+  fixes it and proposes again. If it keeps failing, say in your request how the project is tested (for example "tests run with
+  `npm test`").
 - **A check hangs.** It timed out after 120 seconds. Usually something keeps the process alive: a timer, a server, a watch
-  mode. Reject the plan and ask for a check that finishes on its own.
+  mode. After two identical timeouts Fleet audits the check and may replace it with one that finishes; otherwise the step is
+  parked.
+- **I did not hear about it.** Notices are one line in the run log and one message in VS Code per newly parked step. For
+  messages elsewhere, set `notifyUrl` in the fleet configuration (see [configuration.md](configuration.md#notifyurl)).
 - **The plan has no diagram.** The model's diagram failed validation twice, or the web UI was not reachable from the
   backend (`FLEET_FRONTEND_URL`). The plan says so.
 - **Planning is slow.** It runs on your strongest model. See "Nothing happens for minutes" above.

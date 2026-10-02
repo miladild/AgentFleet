@@ -143,10 +143,12 @@ finally { Enable-FleetTasks }
 
 Write-Step 'Waiting for the backend to answer /health'
 $healthUrl = "http://localhost:$BackendPort/health"
-$deadline = (Get-Date).AddSeconds(60)
+# The first /health after a start asks every machine for a real answer, and a model that has to be loaded takes a while:
+# measured at 17 seconds on a healthy fleet. Waiting too briefly reported a failed deploy for a backend that was fine.
+$deadline = (Get-Date).AddSeconds(150)
 $health = $null
 while ((Get-Date) -lt $deadline -and -not $health) {
-    try { $health = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 5 }
+    try { $health = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 45 }
     catch {
         # A 503 (fallback node down) still carries the node list in the body.
         if ($_.ErrorDetails.Message) { try { $health = $_.ErrorDetails.Message | ConvertFrom-Json } catch { } }
@@ -154,7 +156,7 @@ while ((Get-Date) -lt $deadline -and -not $health) {
     }
 }
 
-if (-not $health) { throw "The backend did not answer $healthUrl within 60 seconds. Check $backendTarget\logs." }
+if (-not $health) { throw "The backend did not answer $healthUrl within 150 seconds. Check $backendTarget\logs." }
 
 Write-Host "Overall: $($health.status)"
 foreach ($node in $health.nodes) {
