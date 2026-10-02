@@ -508,4 +508,28 @@ public sealed partial class PlanRunnerTests
         Assert.Empty(agent.Audits);
         Assert.Contains(after.Events!, e => e.Kind is RunEventKind.CheckFailed or RunEventKind.FinalValidationFailed);
     }
+
+    [Fact]
+    public async Task A_false_alarm_costs_at_most_two_audits_even_for_a_sign_only_a_shell_can_give()
+    {
+        PlanRecord plan = RepairPlan(machine: null, PlanRecoveryScope.AllowHubRescue);
+        int calls = 0;
+        FakeStepAgent agent = new((_, _, _) =>
+        {
+            File.WriteAllText(SourceFile, $"try {++calls}");
+            return Task.FromResult("Worked on it.");
+        });
+        (FleetOptions options, FleetHealthMonitor health) = HubFleet();
+
+        // The words are a shell's, but the check ran: a test of the project printed them. The auditor sees a sound check.
+        await RepairRunner(agent, _ => "Exit code: 1\n--- stdout ---\nFAILED widget::a\nThe syntax of the command is incorrect.", options, health, roundsPerRung: 4)
+            .RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Blocked, after.Status);
+        Assert.Equal(2, agent.Audits.Count);
+        Assert.Equal(2, after.Events!.Count(e => e.Kind == RunEventKind.CheckAudit && e.FailureClass == "Started"));
+        Assert.Equal("dotnet build", after.Steps[0].Verify);
+        Assert.True(after.Events!.Count(e => e.Kind is RunEventKind.CheckFailed or RunEventKind.FinalValidationFailed) >= 4);
+    }
 }

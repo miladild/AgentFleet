@@ -12,8 +12,9 @@ internal sealed partial class PlanRunner
     /// <summary>The most times the fleet changes one step's check before it stops and asks.</summary>
     public const int MaxHealsPerStep = 2;
 
-    // Audits that found nothing wrong with a check that only looked suspicious (a timeout, a model's word): after two the
-    // signal is ignored, so a slow test suite does not cost a hub call every round.
+    // Audits that changed nothing (the check was found sound, or no proposal was usable): after two, a sign is ignored for the
+    // rest of the step, so a slow test suite or a false alarm does not cost a call to the hub every round. A check that can
+    // never finish is not ignored: it cannot pass whatever else is true.
     private const int MaxIdleAuditsPerStep = 2;
 
     // The proposal and, when the guard refuses it, one more with the reason.
@@ -189,10 +190,13 @@ internal sealed partial class PlanRunner
             return hard ? Park(plan, step, defect, limit) : new HealOutcome(HealKind.Continue);
         }
 
-        if (!hard && events.Count(runEvent => runEvent.Kind == RunEventKind.CheckAudit && runEvent.FailureClass == "NoDefect") >= MaxIdleAuditsPerStep)
+        int audits = events.Count(runEvent => runEvent.Kind == RunEventKind.CheckAudit && runEvent.FailureClass == "Started");
+        if (defect.Kind != CheckDefectKind.NeverFinishes && audits - heals >= MaxIdleAuditsPerStep)
         {
             return new HealOutcome(HealKind.Continue);
         }
+
+        Note($"Auditing the check: {defect.Name}. {defect.Evidence}", "Started");
 
         string? hub = _fleetOptions?.Nodes.SingleOrDefault(node => node.Fallback)?.Name;
         bool useHub = hub is not null && PlanRecoveryScope.AllowsHubRescue(plan.RecoveryScope);
