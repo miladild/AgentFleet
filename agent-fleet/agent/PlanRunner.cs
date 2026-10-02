@@ -1721,6 +1721,58 @@ internal sealed partial class PlanRunner
     private Task DelayBeforeRetryAsync(TimeSpan delay, CancellationToken cancellationToken) =>
         _delayAsync(delay, cancellationToken);
 
+    /// <summary>How often a long outage pause looks whether the machine is back.</summary>
+    internal static readonly TimeSpan WakeCheckInterval = TimeSpan.FromMinutes(1);
+
+    // A real small probe of a machine, the same one that follows an outage pause. A probe that fails to run is a probe that failed.
+    private async Task<NodeHealthSnapshot> ProbeMachineAsync(string machine, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _healthMonitor!.GetNodeAsync(machine, cancellationToken, forceProbe: true, forceInferenceProbe: true);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Could not probe model machine {Machine} during a plan outage wait.", machine);
+            return new NodeHealthSnapshot(machine, string.Empty, false, false, false, DateTimeOffset.UtcNow, exception.Message);
+        }
+    }
+
+    /// <summary>
+    /// Waits out an outage pause. When the machine is down at the start of the pause (its probe says so), a long pause is cut into
+    /// minutes and the machine is asked between them, so one that comes back two seconds in does not leave the step idle for
+    /// fifteen minutes. A machine whose probe passes from the start (the real call failed, the probe did not) keeps the whole pause:
+    /// asking it every minute would only hammer it. Returns the probe that ended the pause early, or null when all of it was waited.
+    /// </summary>
+    private async Task<NodeHealthSnapshot?> WaitUnlessItAnswersAsync(TimeSpan delay, string? machine, CancellationToken cancellationToken)
+    {
+        if (_healthMonitor is null || machine is null || delay <= WakeCheckInterval ||
+            (await ProbeMachineAsync(machine, cancellationToken)).Ready)
+        {
+            await DelayBeforeRetryAsync(delay, cancellationToken);
+            return null;
+        }
+
+        TimeSpan left = delay;
+        while (left > WakeCheckInterval)
+        {
+            await DelayBeforeRetryAsync(WakeCheckInterval, cancellationToken);
+            left -= WakeCheckInterval;
+            NodeHealthSnapshot probe = await ProbeMachineAsync(machine, cancellationToken);
+            if (probe.Ready)
+            {
+                return probe;
+            }
+        }
+
+        await DelayBeforeRetryAsync(left, cancellationToken);
+        return null;
+    }
+
     private async Task<(string? ModelOverride, int Waits)> WaitForInfrastructureRecoveryAsync(
         PlanRecord plan,
         PlanStep step,
@@ -1745,33 +1797,21 @@ internal sealed partial class PlanRunner
             _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.Waiting, tier, node: failedModel,
                 detail: $"Infra failure on {failedNode}: {Summarize(failure ?? "unknown failure")}. Waiting {Duration(delay)} (wait {waitNumber}) before probing and retrying; this does not count as an attempt.",
                 modelNode: failedModel, workspaceNode: workspace);
-            await DelayBeforeRetryAsync(delay, cancellationToken);
+            NodeHealthSnapshot? early = await WaitUnlessItAnswersAsync(delay, failedModel, cancellationToken);
 
             if (plan.RunDeadlineUtc is { } runDeadline && _utcNow() >= runDeadline)
                 return (null, waits);
             if (_healthMonitor is null || failedModel is null)
                 return (null, waits);
 
-            NodeHealthSnapshot probe;
-            try
-            {
-                probe = await _healthMonitor.GetNodeAsync(failedModel, cancellationToken,
-                    forceProbe: true, forceInferenceProbe: true);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception exception)
-            {
-                _logger.LogWarning(exception, "Could not probe model machine {Machine} after plan outage wait {Wait}.", failedModel, waitNumber);
-                probe = new NodeHealthSnapshot(failedModel, string.Empty, false, false, false, DateTimeOffset.UtcNow, exception.Message);
-            }
-
+            NodeHealthSnapshot probe = early ?? await ProbeMachineAsync(failedModel, cancellationToken);
             if (probe.Ready)
             {
                 _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.InferenceProbePassed, tier,
-                    node: failedModel, detail: $"A small inference probe passed on {failedModel}; retrying the model attempt now.",
+                    node: failedModel,
+                    detail: early is null
+                        ? $"A small inference probe passed on {failedModel}; retrying the model attempt now."
+                        : $"{failedModel} answered a small inference probe again before the pause ({Duration(delay)}) was over; retrying the model attempt now.",
                     modelNode: failedModel, workspaceNode: workspace);
                 return (failedModel, waits);
             }

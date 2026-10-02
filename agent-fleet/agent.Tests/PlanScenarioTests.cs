@@ -233,6 +233,133 @@ public sealed partial class PlanRunnerTests
         Assert.Equal(2, done.Events!.Count(e => e.Kind == RunEventKind.CheckHealed));
     }
 
+    // A machine that answers its probes only while the given switch says it is up.
+    private sealed class SwitchableNodeHandler(Func<bool> up) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (!up())
+            {
+                throw new HttpRequestException("No connection could be made because the target machine actively refused it.");
+            }
+
+            string body = request.Method == HttpMethod.Post
+                ? "{\"choices\":[{\"message\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}"
+                : "{\"models\":[{\"name\":\"m:latest\"}]}";
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json")
+            });
+        }
+    }
+
+    private sealed class SwitchableNodeFactory(Func<bool> up) : IHttpClientFactory
+    {
+        public HttpClient CreateClient(string name) => new(new SwitchableNodeHandler(up)) { Timeout = Timeout.InfiniteTimeSpan };
+    }
+
+    [Fact]
+    public async Task A_machine_that_comes_back_three_minutes_into_a_fifteen_minute_pause_ends_the_pause_there()
+    {
+        (FleetOptions options, _) = HubFleet();
+        DateTimeOffset start = DateTimeOffset.UtcNow;
+        DateTimeOffset now = start;
+        var health = new FleetHealthMonitor(options, new SwitchableNodeFactory(() => now >= start.AddMinutes(3)));
+        PlanRecord plan = RepairPlan("worker-a", PlanRecoveryScope.WorkerOnly);
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            if (now < start.AddMinutes(3))
+            {
+                throw new HttpRequestException("No connection could be made because the target machine actively refused it.");
+            }
+
+            File.WriteAllText(SourceFile, "done");
+            return Task.FromResult("Done.");
+        });
+
+        await RepairRunner(agent, Pass, options, health, utcNow: () => now, transientDelay: _ => TimeSpan.FromMinutes(15),
+            delayAsync: (delay, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                now += delay;
+                return Task.CompletedTask;
+            }).RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Done, after.Status);
+        // Waiting the whole pause would have cost fifteen minutes; the machine was asked every minute and was found at three.
+        Assert.Equal(TimeSpan.FromMinutes(3), now - start);
+        Assert.Equal(1, after.Steps[0].Attempts);
+        Assert.Single(after.Events!, e => e.Kind == RunEventKind.Waiting);
+        PlanRunEvent probe = Assert.Single(after.Events!, e => e.Kind == RunEventKind.InferenceProbePassed);
+        Assert.Contains("before the pause (15 minutes) was over", probe.Detail);
+    }
+
+    [Fact]
+    public async Task A_machine_whose_probe_passes_all_along_keeps_the_whole_pause_so_it_is_not_asked_every_minute()
+    {
+        // The real call failed and the probe did not: retrying every minute would only hammer a machine that is up.
+        (FleetOptions options, _) = HubFleet();
+        DateTimeOffset start = DateTimeOffset.UtcNow;
+        DateTimeOffset now = start;
+        var health = new FleetHealthMonitor(options, new SwitchableNodeFactory(() => true));
+        PlanRecord plan = RepairPlan("worker-a", PlanRecoveryScope.WorkerOnly);
+        int calls = 0;
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            if (++calls == 1)
+            {
+                throw new HttpRequestException("Response status code does not indicate success: 500 (Internal Server Error).");
+            }
+
+            File.WriteAllText(SourceFile, "done");
+            return Task.FromResult("Done.");
+        });
+
+        await RepairRunner(agent, Pass, options, health, utcNow: () => now, transientDelay: _ => TimeSpan.FromMinutes(15),
+            delayAsync: (delay, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                now += delay;
+                return Task.CompletedTask;
+            }).RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.Equal(TimeSpan.FromMinutes(15), now - start);
+        Assert.DoesNotContain("before the pause", Assert.Single(after.Events!, e => e.Kind == RunEventKind.InferenceProbePassed).Detail);
+    }
+
+    [Fact]
+    public async Task A_machine_that_stays_down_is_waited_for_in_slices_and_the_run_still_ends_at_its_deadline()
+    {
+        (FleetOptions options, _) = HubFleet();
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        var health = new FleetHealthMonitor(options, new SwitchableNodeFactory(() => false));
+        PlanRecord plan = RepairPlan("worker-a", PlanRecoveryScope.WorkerOnly);
+        Store.Update(plan.Id, current => current with { RunDeadlineUtc = now.AddHours(1) });
+        var agent = new FakeStepAgent((_, _, _) => throw new HttpRequestException("No connection could be made because the target machine actively refused it."));
+        List<TimeSpan> pauses = [];
+
+        await RepairRunner(agent, Pass, options, health, utcNow: () => now, transientDelay: _ => TimeSpan.FromMinutes(15),
+            delayAsync: (delay, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                pauses.Add(delay);
+                now += delay;
+                return Task.CompletedTask;
+            }).RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Blocked, after.Status);
+        Assert.Equal(0, after.Steps[0].Attempts);
+        Assert.Single(after.Events!, e => e.Kind == RunEventKind.RunDeadlineExceeded);
+        Assert.InRange(after.Events!.Count(e => e.Kind == RunEventKind.Waiting), 3, 5);
+        // Pauses of a minute, and never one that would cross the deadline.
+        Assert.Contains(TimeSpan.FromMinutes(1), pauses);
+        Assert.Equal(TimeSpan.FromHours(1), TimeSpan.FromTicks(pauses.Sum(pause => pause.Ticks)));
+    }
+
     private sealed class DownWorkspaces : IWorkerWorkspaceManager
     {
         private readonly object _gate = new();
