@@ -106,7 +106,16 @@ without server-side conversation state.
   changed, climbs at once; a round that leaves the step worse than its best round is undone from an in-memory checkpoint of
   the changed files (`PlanTools.RestoreToSnapshotAsync`); a step also has a working-time limit and a loop guard stops a model
   turn that repeats one failing call (`ToolLoopGuard`); climbing changes only the model route, never the workspace or the
-  tier, and the rung survives a restart through the run log. Before model tools run, a worker
+  tier, and the rung survives a restart through the run log. A check that is broken rather than failing is not a round:
+  `PlanRunner.RunCheckWithRepairsAsync` (in `PlanRunnerHealing.cs`) runs the check inside the worker scope and, on a defect
+  (`CheckDefects`: never exits, shell parse error, missing program or file, two identical timeouts, a model's
+  `report_blocker` backed by the output), asks an auditor session (`IStepAgent.OpenSession(role)` with
+  `PlanRunnerToolPolicy.CheckAuditRole`: read-only tools and `propose_check`, nothing else) for one replacement that
+  `CheckGuard` accepts or refuses; an accepted one is stored (`PlanStep.OriginalVerify` keeps the saved check), logged as
+  `check-healed` and run again in the same workspace. `EnvironmentDoctor` does the same for a project dependency the
+  machine lacks, from a fixed list of project-local commands. Before a step starts, `PreflightChecksAsync` heals a check
+  that can never finish. The plan's `HealChecks` (`auto` or `ask`) decides whether a proposal is applied or parks the step.
+  Before model tools run, a worker
   staging transport failure may move to a ready same-tier workspace; a workspace conflict or sync failure blocks. The route
   journal records both machines. Every step has a bounded check, the last step must provide whole-project validation, a
   cross-process lease prevents duplicate runners, and an eight-hour deadline bounds a run.
