@@ -48,6 +48,23 @@ export function explain(detail: string | null | undefined, step: PlanStep | null
         "is what is wrong: skip it. If the file should exist, retry.",
     };
   }
+  if (/set to ask first/.test(text)) {
+    const proposal = text.match(/changing the check from `[^`]*` to `([^`]+)`/)?.[1];
+    return {
+      short: `waiting for you to approve a new check${proposal ? `: ${proposal}` : ""}`,
+      hint:
+        "This plan is set to ask before the fleet changes a check. The proposal and why are in the run log. Approve and resume with " +
+        "\"Broken checks: Fix automatically\" to let the fleet apply it, or change the check yourself, or skip the step.",
+    };
+  }
+  if (/could not change it by itself/.test(text)) {
+    return {
+      short: `its check \`${step?.verify ?? "?"}\` is broken and the fleet could not fix it`,
+      hint:
+        "The check cannot run or finish, so the fleet stopped instead of spending the step's rounds on it. It asked for a replacement and none was one it is " +
+        "allowed to use (the run log has what it refused and why). Change the step's check to one that finishes and checks the work, or skip the step, then approve again.",
+    };
+  }
   if (/does not exit on its own/.test(text)) {
     return {
       short: `its check \`${step?.verify ?? "?"}\` never finishes`,

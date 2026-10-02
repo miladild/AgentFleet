@@ -10,6 +10,8 @@ export type PlanStep = {
   detail: string;
   files: string[];
   verify: string | null;
+  /** The check as it was saved, when the fleet changed it because it could not run or finish. */
+  originalVerify?: string | null;
   tier: string;
   machine?: string | null;
   parallelGroup?: string | null;
@@ -41,6 +43,9 @@ export type PlanRunEvent = {
   changedFiles?: string[] | null;
   /** On a round-classified event: the working time of the round, its model call and its check. */
   durationSeconds?: number | null;
+  /** On a check-healed event: the check as it was, and the check the step has from now on. */
+  checkBefore?: string | null;
+  checkAfter?: string | null;
   detail: string;
 };
 
@@ -61,6 +66,8 @@ export type Plan = {
   exportedPlanPath?: string | null;
   contextId?: string | null;
   recoveryScope?: string | null;
+  /** What the runner does with a check that is broken, not failing: "auto" fixes it, "ask" parks the step with the proposal. */
+  healChecks?: string | null;
   runDeadlineUtc?: string | null;
 };
 
@@ -159,6 +166,10 @@ const EVENT_STYLE: Record<string, string> = {
   "rung-changed": "text-violet-300",
   "round-rolled-back": "text-amber-400",
   "step-time-limit": "text-red-400",
+  "check-healed": "text-emerald-300",
+  "check-audit": "text-amber-300",
+  "environment-repaired": "text-emerald-300",
+  "blocker-reported": "text-amber-300",
   "inference-probe-passed": "text-emerald-300",
   "workspace-reconciled": "text-sky-300",
   stopped: "text-amber-400",
@@ -187,6 +198,11 @@ function RunLog({ planId, events }: { planId: string; events: PlanRunEvent[] }) 
                   {e.detail}
                 </div>
               )}
+              {e.checkBefore != null && e.checkAfter != null && (
+                <div className="font-mono text-[10px] text-neutral-400 whitespace-pre-wrap break-words pl-3">
+                  <span className="text-neutral-600">was</span> {e.checkBefore} <span className="text-neutral-600">now</span> {e.checkAfter}
+                </div>
+              )}
             </div>
           );
         })}
@@ -212,6 +228,7 @@ export function PlanCard({ planId }: { planId: string }) {
   const [actionError, setActionError] = useState<string | null>(null);
   const [exportToProject, setExportToProject] = useState(false);
   const [recoveryChoice, setRecoveryChoice] = useState<string | null>(null);
+  const [healChoice, setHealChoice] = useState<string | null>(null);
 
   async function approve() {
     setBusy(true);
@@ -223,6 +240,7 @@ export function PlanCard({ planId }: { planId: string }) {
         body: JSON.stringify({
           exportToProject,
           recoveryScope: recoveryChoice ?? plan?.recoveryScope ?? "worker-only",
+          healChecks: healChoice ?? plan?.healChecks ?? "auto",
         }),
       });
       if (!res.ok) {
@@ -356,6 +374,11 @@ export function PlanCard({ planId }: { planId: string }) {
                         {step.id === plan.steps[plan.steps.length - 1]?.id ? "runner final validation: " : "verify: "}{step.verify}
                       </div>
                     )}
+                    {step.originalVerify && (
+                      <div className="text-[11px] font-mono text-emerald-300/80" title="The fleet changed this step's check because it could not run or finish. The original is kept here and in the run log.">
+                        check changed by the fleet, was: {step.originalVerify}
+                      </div>
+                    )}
                     {step.note && (
                       <div className={`text-[11px] ${step.status === "failed" ? "text-red-400" : "text-neutral-400"}`}>
                         {step.note}
@@ -396,6 +419,22 @@ export function PlanCard({ planId }: { planId: string }) {
               >
                 <option value="worker-only">Worker only</option>
                 <option value="allow-hub-rescue">Allow hub model rescue after worker failure</option>
+              </select>
+            </label>
+          )}
+          {canApprove && (
+            <label className="flex items-center gap-1.5 text-[11px] text-neutral-400">
+              <span>Broken checks</span>
+              <select
+                aria-label="What to do with a broken check"
+                value={healChoice ?? plan.healChecks ?? "auto"}
+                onChange={(event) => setHealChoice(event.target.value)}
+                disabled={busy}
+                title="A check that cannot run or finish (never exits, does not parse in the machine's shell, names a program that is not there) is not a failing test. The fleet can change it by itself within strict rules and keeps the original, or stop and ask you."
+                className="rounded border border-neutral-700 bg-neutral-900 px-1.5 py-1 text-[11px] text-neutral-200"
+              >
+                <option value="auto">Fix automatically</option>
+                <option value="ask">Ask me first</option>
               </select>
             </label>
           )}
