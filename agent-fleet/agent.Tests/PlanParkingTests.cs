@@ -368,4 +368,33 @@ public sealed class PlanGraphTests : PlanTestBase
         IReadOnlyList<string> problems = tools.Review(@"C:\p", steps);
         Assert.DoesNotContain(problems, problem => problem.Contains("cycle") || problem.Contains("not in the plan"));
     }
+
+    [Fact]
+    public async Task The_proposal_tool_refuses_a_cycle_and_saves_a_graph_with_its_dependencies()
+    {
+        string root = Path.Combine(PlansDirectory, "project");
+        Directory.CreateDirectory(root);
+        PlanTools tools = new(Store, new FakeValidator(code => new DiagramCheck(true, true, code, null)),
+            (_, _, _) => Task.FromResult("Exit code: 0"), workerWorkspacesEnabled: true);
+        PlanStepInput Part(string title, params int[] dependsOn) =>
+            new(title, "do " + title, [], "npm test", "standard", DependsOn: dependsOn.Length > 0 ? dependsOn : null);
+        JsonElement Steps(params PlanStepInput[] steps) => JsonSerializer.SerializeToElement(steps);
+
+        string refused = await tools.ProposePlanAsync("Cycle", "G", root, null, null, null, null,
+            Steps(Part("a", 2), Part("b", 1), Part("c")), default);
+        Assert.Contains("NOT saved", refused);
+        Assert.Contains("a cycle of dependencies", refused);
+        Assert.Empty(Store.List());
+
+        string unknown = await tools.ProposePlanAsync("Unknown", "G", root, null, null, null, null,
+            Steps(Part("a"), Part("b", 9), Part("c")), default);
+        Assert.Contains("step 9, which is not in the plan", unknown);
+        Assert.Empty(Store.List());
+
+        string saved = await tools.ProposePlanAsync("Graph", "G", root, null, null, null, null,
+            Steps(Part("a"), Part("b", 1), Part("c", 1), Part("d")), default);
+        Assert.StartsWith("Plan saved", saved);
+        PlanRecord plan = Store.Get(Assert.Single(Store.List()).Id)!;
+        Assert.Equal([[], [1], [1], [1, 2, 3]], plan.Steps.Select(step => (IReadOnlyList<int>)(step.DependsOn ?? [])).ToArray());
+    }
 }
