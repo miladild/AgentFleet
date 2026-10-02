@@ -384,7 +384,8 @@ internal sealed partial class FleetPlanStore
         bool? editToolCalled = null,
         int? rung = null,
         int? round = null,
-        IReadOnlyList<string>? changedFiles = null)
+        IReadOnlyList<string>? changedFiles = null,
+        int? durationSeconds = null)
     {
         string text = detail ?? string.Empty;
         int limit = kind == RunEventKind.FilesChanged ? MaxFilesChangedCharacters : MaxEventDetailCharacters;
@@ -395,7 +396,7 @@ internal sealed partial class FleetPlanStore
 
         var entry = new PlanRunEvent(DateTimeOffset.UtcNow, stepId, attempt, kind, tier, node, text, modelNode, workspaceNode,
             failureClass, failureSignature, failureSignatureSize, filesChanged, toolCalls, editToolCalled, rung, round,
-            changedFiles is { Count: > 0 } ? changedFiles.Take(MaxChangedFilesPerEvent).ToList() : null);
+            changedFiles is { Count: > 0 } ? changedFiles.Take(MaxChangedFilesPerEvent).ToList() : null, durationSeconds);
         return Update(id, plan =>
         {
             List<PlanRunEvent> events = [.. plan.Events ?? [], entry];
@@ -693,7 +694,9 @@ internal sealed partial class FleetPlanStore
             int highestRung = stepEvents.Where(e => e.Rung is not null).Select(e => e.Rung!.Value).DefaultIfEmpty(RepairLadder.RequestedTierRung).Max();
             if (failedRounds > 0 || highestRung > RepairLadder.RequestedTierRung)
             {
-                text.AppendLine($"  - Repair ladder: {failedRounds} failed round{(failedRounds == 1 ? string.Empty : "s")}, reached rung {highestRung} ({RepairLadder.Name(highestRung)})");
+                int undone = stepEvents.Count(e => e.Kind == RunEventKind.RoundRolledBack && e.FailureClass == "RolledBack");
+                text.AppendLine($"  - Repair ladder: {failedRounds} failed round{(failedRounds == 1 ? string.Empty : "s")}, reached rung {highestRung} ({RepairLadder.Name(highestRung)})" +
+                                (undone > 0 ? $"; {undone} round{(undone == 1 ? " was" : "s were")} undone because the check got worse" : string.Empty));
             }
         }
 

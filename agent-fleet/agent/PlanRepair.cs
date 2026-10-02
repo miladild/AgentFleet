@@ -68,6 +68,26 @@ internal static class RepairLadder
         return new RepairPosition(rung, inRung, total);
     }
 
+    /// <summary>
+    /// A file that a package manager or a build rewrites as a side effect, which is not a change to the code the failing check
+    /// is about: lock files, build caches and logs. A round that changed only these made no progress on the step, unless the
+    /// step names the file.
+    /// </summary>
+    public static bool IsIncidentalFile(string path)
+    {
+        string name = path.Replace('\\', '/').Split('/')[^1];
+        return name.EndsWith(".lock", StringComparison.OrdinalIgnoreCase) ||
+               name.EndsWith(".tsbuildinfo", StringComparison.OrdinalIgnoreCase) ||
+               name.EndsWith(".log", StringComparison.OrdinalIgnoreCase) ||
+               name.Equals("package-lock.json", StringComparison.OrdinalIgnoreCase) ||
+               name.Equals("npm-shrinkwrap.json", StringComparison.OrdinalIgnoreCase) ||
+               name.Equals("packages.lock.json", StringComparison.OrdinalIgnoreCase) ||
+               name.Equals("pnpm-lock.yaml", StringComparison.OrdinalIgnoreCase) ||
+               name.Equals("bun.lockb", StringComparison.OrdinalIgnoreCase) ||
+               name.Equals("go.sum", StringComparison.OrdinalIgnoreCase) ||
+               name.Equals("poetry.lock", StringComparison.OrdinalIgnoreCase);
+    }
+
     /// <summary>A round whose check ran and failed (a model call that never got that far has no round number).</summary>
     public static bool IsVerdictRound(PlanRunEvent runEvent) =>
         runEvent.Kind == RunEventKind.RoundClassified && runEvent.Round is not null &&
@@ -97,6 +117,41 @@ internal static class RepairLadder
     }
 }
 
+/// <summary>How the project stood after a round, by what the approved check said.</summary>
+/// <param name="Compiles">False when the check printed compile, syntax or build errors.</param>
+/// <param name="Failures">How many failing names (or, when it does not build, distinct error codes) the check printed.</param>
+internal readonly record struct RoundScore(bool Compiles, int Failures)
+{
+    /// <summary>
+    /// Worse than the best round so far: code that stopped building where it used to build, or more failing names. Fewer
+    /// failures that come with code that no longer builds do not count as better: no test ran.
+    /// </summary>
+    public bool IsWorseThan(RoundScore best) =>
+        (best.Compiles && !Compiles) || (Compiles == best.Compiles && Failures > best.Failures);
+
+    /// <summary>The score of a failed check, or null when its output names no failures (a hash of it cannot be counted).</summary>
+    public static RoundScore? Of(FailureFingerprint signature, string? checkOutput) =>
+        signature.Items.Count == 0
+            ? null
+            : new RoundScore(!PlanFailure.BuildBroken(checkOutput) && !signature.Items.Any(PlanFailure.IsBuildErrorCode), signature.Items.Count);
+
+    public string Describe() => Compiles
+        ? $"{Failures} failing"
+        : $"code that does not build ({Failures} error code{(Failures == 1 ? string.Empty : "s")})";
+}
+
+/// <summary>What the runner undid after a round that left the step worse than its best round.</summary>
+/// <param name="Round">The round that was undone.</param>
+/// <param name="NewFailures">The failures that round brought that the best round did not have.</param>
+/// <param name="Restored">The files put back as they were after the best round.</param>
+internal sealed record RollbackNote(
+    int Round,
+    RoundScore Worse,
+    int BestRound,
+    RoundScore Best,
+    IReadOnlyList<string> NewFailures,
+    IReadOnlyList<string> Restored);
+
 /// <summary>The words the runner says to a model between rounds, and the brief a fresh conversation starts from.</summary>
 internal static class RepairMessages
 {
@@ -119,6 +174,7 @@ internal static class RepairMessages
     /// <param name="sameOutput">The check printed what it printed after the round before.</param>
     /// <param name="changedFiles">The files the last round changed; null when that could not be told.</param>
     /// <param name="handover">Said first when a more capable model has just taken over the conversation.</param>
+    /// <param name="rollback">Said instead of the comparison with the round before when that round was undone.</param>
     public static string Build(
         PlanRecord plan,
         PlanStep step,
@@ -128,7 +184,8 @@ internal static class RepairMessages
         IReadOnlyList<string> currentFailing,
         bool sameOutput,
         IReadOnlyList<string>? changedFiles,
-        string? handover = null)
+        string? handover = null,
+        RollbackNote? rollback = null)
     {
         var text = new StringBuilder();
         if (!string.IsNullOrWhiteSpace(handover))
@@ -143,7 +200,12 @@ internal static class RepairMessages
         text.AppendLine(string.IsNullOrWhiteSpace(failure) ? "(no output)" : failure);
 
         var changes = new List<string>();
-        if (currentFailing.Count > 0)
+        if (rollback is not null)
+        {
+            text.AppendLine();
+            text.AppendLine(RollbackSentence(rollback));
+        }
+        else if (currentFailing.Count > 0)
         {
             if (previousFailing.Count > 0)
             {
@@ -164,7 +226,7 @@ internal static class RepairMessages
             changes.Add("the check printed the same as after the round before");
         }
 
-        if (changedFiles is not null)
+        if (changedFiles is not null && rollback is null)
         {
             changes.Add(changedFiles.Count == 0
                 ? "you changed no file in the last round, so nothing could have changed the result"
@@ -223,7 +285,12 @@ internal static class RepairMessages
                 : round.FilesChanged is > 0 ? $"changed {round.FilesChanged} file(s)" : "changed no file";
             IReadOnlyList<string> names = FailingNames(round.FailureSignature);
             string result = names.Count > 0 ? $"the check then failed on {List(names)}" : "the check then failed";
-            text.AppendLine($"- Round {number} on {machine}: {files}; {result}.{Said(stepEvents, round)}");
+            string undone = stepEvents.Any(runEvent => runEvent.Kind == RunEventKind.RoundRolledBack &&
+                string.Equals(runEvent.FailureClass, "RolledBack", StringComparison.Ordinal) &&
+                runEvent.Attempt == round.Attempt && runEvent.Rung == round.Rung && runEvent.Round == round.Round)
+                ? " It left the step worse than the best round before it, so it was undone."
+                : string.Empty;
+            text.AppendLine($"- Round {number} on {machine}: {files}; {result}.{Said(stepEvents, round)}{undone}");
             if (round.ChangedFiles is not null)
             {
                 touched.AddRange(round.ChangedFiles.Where(file => !touched.Contains(file, StringComparer.OrdinalIgnoreCase)));
@@ -237,6 +304,16 @@ internal static class RepairMessages
 
         text.AppendLine("Find the root cause first, then fix it. Do not repeat an approach that already failed: read the failing test or check and the code it exercises before you edit anything.");
         return text.ToString();
+    }
+
+    private static string RollbackSentence(RollbackNote rollback)
+    {
+        string broke = rollback.NewFailures.Count > 0 ? $" It broke: {List(rollback.NewFailures)}." : string.Empty;
+        string files = rollback.Restored.Count > 0 ? $" ({List(rollback.Restored)})" : string.Empty;
+        return $"Round {rollback.Round} made the check worse, so the fleet undid it: it left {rollback.Worse.Describe()} where round " +
+               $"{rollback.BestRound} had {rollback.Best.Describe()}.{broke} The files are back as they were after round {rollback.BestRound}{files}, " +
+               "so they are not as you left them: read them again before you edit. Do not repeat that change. The output above is the check's " +
+               "result for this state: fix what is still failing in another way.";
     }
 
     // The model's own summary of the round, from the attempt-ended event of the same round.

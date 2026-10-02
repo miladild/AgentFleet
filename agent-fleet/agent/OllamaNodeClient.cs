@@ -310,6 +310,14 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
                     contents.Add(new TextContent(text.Text[..LongPart] + Removed));
                     changed = true;
                     break;
+                // The check output of an earlier round of a plan step, sent back to the model as a follow-up message: the newer
+                // rounds say what is still failing, so the old text can go. (The task, the first user message, is never
+                // reached here, and neither is anyone's own message in a chat: only a follow-up that carries a plan's marker.)
+                case TextContent text when message.Role == ChatRole.User && text.Text is { Length: > 4 * LongPart } &&
+                                           FleetPlanStore.FindMarkerId(text.Text) is not null:
+                    contents.Add(new TextContent(text.Text[..(2 * LongPart)] + Removed));
+                    changed = true;
+                    break;
                 default:
                     contents.Add(content);
                     break;

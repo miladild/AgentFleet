@@ -45,9 +45,11 @@ public sealed partial class PlanRunnerTests
     }
 
     private PlanRunner RepairRunner(FakeStepAgent agent, Func<string, string> verify, FleetOptions? options = null,
-        FleetHealthMonitor? health = null, int roundsPerRung = RepairLadder.DefaultRoundsPerRung) =>
-        new(Store, RepairTools(verify), agent, NullLogger.Instance, fleetOptions: options, healthMonitor: health,
-            transientDelay: _ => TimeSpan.Zero, delayAsync: (_, _) => Task.CompletedTask, roundsPerRung: roundsPerRung);
+        FleetHealthMonitor? health = null, int roundsPerRung = RepairLadder.DefaultRoundsPerRung,
+        Func<DateTimeOffset>? utcNow = null, TimeSpan? stepClock = null, TimeSpan? attemptTimeout = null) =>
+        new(Store, RepairTools(verify), agent, NullLogger.Instance, attemptTimeout: attemptTimeout, fleetOptions: options, healthMonitor: health,
+            transientDelay: _ => TimeSpan.Zero, delayAsync: (_, _) => Task.CompletedTask, utcNow: utcNow, roundsPerRung: roundsPerRung,
+            stepClock: stepClock);
 
     private PlanRecord RepairPlan(string? machine, string scope)
     {
@@ -436,6 +438,297 @@ public sealed partial class PlanRunnerTests
         Assert.Contains("FAILED one::exists", firstStepSession.Messages[1].Text);
         Assert.Equal(1, after.Steps[0].Attempts);
     }
+
+    // What the fake model writes in each round and what the check then says about those files.
+    private static string ChecksOf(string content) => content switch
+    {
+        "fixed" => Pass("check"),
+        "one" => FailWith("t1", "t2"),
+        "broke it" => FailWith("t1", "t2", "t3", "t4"),
+        "broke the build" => "Exit code: 1\n--- stdout ---\nsrc/a.ts(3,5): error TS2322: Type 'string' is not assignable to type 'number'.",
+        "two" => FailWith("t1", "t3"),
+        "two again" => FailWith("t2", "t4"),
+        _ => FailWith("t1", "t2", "t3")
+    };
+
+    private async Task<(PlanRecord Plan, FakeStepAgent Agent)> RunWritingAsync(string[] writes, int roundsPerRung = 3, bool allowHub = false)
+    {
+        (FleetOptions options, FleetHealthMonitor health) = HubFleet();
+        PlanRecord plan = RepairPlan("worker-a", allowHub ? PlanRecoveryScope.AllowHubRescue : PlanRecoveryScope.WorkerOnly);
+        int calls = 0;
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            File.WriteAllText(SourceFile, writes[Math.Min(calls++, writes.Length - 1)]);
+            return Task.FromResult($"Wrote {writes[Math.Min(calls - 1, writes.Length - 1)]}.");
+        });
+        await RepairRunner(agent, _ => ChecksOf(File.ReadAllText(SourceFile)), options, health, roundsPerRung).RunPlanAsync(plan.Id, default);
+        return (Store.Get(plan.Id)!, agent);
+    }
+
+    [Fact]
+    public async Task A_round_that_breaks_more_tests_is_undone_and_the_next_message_says_so()
+    {
+        File.WriteAllText(Path.Combine(ProjectDirectory, "earlier.cs"), "an earlier step's work");
+
+        (PlanRecord after, FakeStepAgent agent) = await RunWritingAsync(["one", "broke it", "fixed"]);
+
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.Equal("fixed", File.ReadAllText(SourceFile));
+        Assert.Equal("an earlier step's work", File.ReadAllText(Path.Combine(ProjectDirectory, "earlier.cs")));
+        PlanRunEvent undone = Assert.Single(after.Events!, runEvent => runEvent.Kind == RunEventKind.RoundRolledBack);
+        Assert.Equal("RolledBack", undone.FailureClass);
+        Assert.Equal(2, undone.Round);
+        Assert.Equal(["a.cs"], undone.ChangedFiles);
+        Assert.Contains("4 failing where round 1 had 2 failing, so it was undone", undone.Detail);
+        // What the model is told: what happened, what it broke, and the check output of the state it is in now.
+        string message = Assert.Single(agent.Sessions).Messages[2].Text;
+        Assert.Contains("Round 2 made the check worse, so the fleet undid it", message);
+        Assert.Contains("It broke: t3, t4.", message);
+        Assert.Contains("read them again before you edit", message);
+        Assert.Contains("FAILED t1", message);
+        Assert.DoesNotContain("FAILED t4", message);
+        Assert.DoesNotContain("Since your last round", message);
+    }
+
+    [Fact]
+    public async Task The_files_really_are_the_best_rounds_when_the_round_after_a_bad_one_is_checked()
+    {
+        string seenAtRoundThree = string.Empty;
+        (FleetOptions options, FleetHealthMonitor health) = HubFleet();
+        PlanRecord plan = RepairPlan("worker-a", PlanRecoveryScope.WorkerOnly);
+        string[] writes = ["one", "broke it", "one"];
+        int calls = 0;
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            // The model's file tools run before the check: what it finds on disk at the start of round 3 is round 1's file.
+            if (calls == 2)
+            {
+                seenAtRoundThree = File.ReadAllText(SourceFile);
+            }
+
+            File.WriteAllText(SourceFile, writes[Math.Min(calls++, writes.Length - 1)]);
+            return Task.FromResult("Done.");
+        });
+
+        await RepairRunner(agent, _ => ChecksOf(File.ReadAllText(SourceFile)), options, health).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal("one", seenAtRoundThree);
+    }
+
+    [Fact]
+    public async Task A_round_whose_code_no_longer_builds_is_undone_even_when_it_names_fewer_failures()
+    {
+        (PlanRecord after, FakeStepAgent agent) = await RunWritingAsync(["one", "broke the build", "fixed"]);
+
+        Assert.Equal(PlanStatus.Done, after.Status);
+        PlanRunEvent undone = Assert.Single(after.Events!, runEvent => runEvent.Kind == RunEventKind.RoundRolledBack);
+        Assert.Contains("code that does not build (1 error code) where round 1 had 2 failing", undone.Detail);
+        string message = Assert.Single(agent.Sessions).Messages[2].Text;
+        Assert.Contains("Round 2 made the check worse", message);
+        Assert.Contains("code that does not build (1 error code) where round 1 had 2 failing. It broke: TS2322.", message);
+        Assert.Contains("Repair ladder: 2 failed rounds, reached rung 1 (the requested tier); 1 round was undone because the check got worse",
+            FleetPlanStore.ToReportMarkdown(after));
+    }
+
+    [Fact]
+    public async Task A_round_that_ties_the_best_is_kept_and_becomes_the_state_to_go_back_to()
+    {
+        // 2 failing, 2 failing (other names: kept, and now the best), then 3 failing: back to the second round's file.
+        (PlanRecord after, _) = await RunWritingAsync(["one", "two again", "three", "three"], roundsPerRung: 5);
+
+        PlanRunEvent[] undone = after.Events!.Where(runEvent => runEvent.Kind == RunEventKind.RoundRolledBack).ToArray();
+        Assert.NotEmpty(undone);
+        Assert.All(undone, runEvent => Assert.Contains("had 2 failing", runEvent.Detail));
+        Assert.Equal("two again", File.ReadAllText(SourceFile));
+        Assert.DoesNotContain(after.Events!, runEvent => runEvent.Kind == RunEventKind.RoundRolledBack && runEvent.Rung == 1 && runEvent.Round == 2);
+    }
+
+    [Fact]
+    public async Task After_an_undone_round_the_next_one_is_compared_with_the_state_the_project_is_in()
+    {
+        // Round 3 changes nothing and the project is back at round 1's state: the same failures, no change: a stall.
+        (FleetOptions options, FleetHealthMonitor health) = HubFleet();
+        PlanRecord plan = RepairPlan("worker-a", PlanRecoveryScope.WorkerOnly);
+        int calls = 0;
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            if (++calls <= 2)
+            {
+                File.WriteAllText(SourceFile, calls == 1 ? "one" : "broke it");
+            }
+
+            return Task.FromResult("Done.");
+        });
+
+        await RepairRunner(agent, _ => ChecksOf(File.ReadAllText(SourceFile)), options, health).RunPlanAsync(plan.Id, default);
+
+        PlanRunEvent[] rounds = Store.Get(plan.Id)!.Events!.Where(runEvent => runEvent.Kind == RunEventKind.RoundClassified).ToArray();
+        Assert.Equal(nameof(FailureClass.CodeProgress), rounds[0].FailureClass);
+        Assert.Equal(nameof(FailureClass.CodeProgress), rounds[1].FailureClass);
+        Assert.Equal(nameof(FailureClass.Stall), rounds[2].FailureClass);
+        // It was the best round's state that the third check ran on, not the undone round's.
+        Assert.Equal(rounds[0].FailureSignature, rounds[2].FailureSignature);
+        Assert.NotEqual(rounds[1].FailureSignature, rounds[2].FailureSignature);
+        Assert.Equal("one", File.ReadAllText(SourceFile));
+    }
+
+    [Fact]
+    public async Task A_step_that_ends_without_passing_leaves_the_project_at_its_best_state_and_says_so()
+    {
+        (PlanRecord after, _) = await RunWritingAsync(["three", "one", "broke it", "broke it", "broke it", "broke it", "broke it"]);
+
+        Assert.Equal(PlanStatus.Blocked, after.Status);
+        Assert.Equal("one", File.ReadAllText(SourceFile));
+        Assert.Contains("left as it was after its best round (round 2, 2 failing)", after.Steps[0].Note);
+        Assert.Contains(after.Events!, runEvent => runEvent.Kind == RunEventKind.PlanBlocked && runEvent.Detail.Contains("best round (round 2"));
+    }
+
+    [Fact]
+    public async Task A_conversation_that_starts_after_an_undone_round_is_told_about_it_in_its_brief()
+    {
+        (PlanRecord after, FakeStepAgent agent) = await RunWritingAsync(["one", "broke it", "broke it", "broke it", "fixed"]);
+
+        Assert.Equal(PlanStatus.Done, after.Status);
+        string brief = agent.Sessions[1].Messages[0].Text;
+        Assert.Contains("Round 2 on worker-a: changed a.cs; the check then failed on t1, t2, t3, t4.", brief);
+        Assert.Contains("It left the step worse than the best round before it, so it was undone.", brief);
+        // The fresh conversation is told the check's output for the state the project is in (the best round's), not the worst round's.
+        string wrong = brief[brief.IndexOf("What went wrong:", StringComparison.Ordinal)..brief.IndexOf("Look at what is already on disk", StringComparison.Ordinal)];
+        Assert.Contains("FAILED t1", wrong);
+        Assert.DoesNotContain("FAILED t3", wrong);
+    }
+
+
+    [Fact]
+    public async Task A_step_stops_when_its_working_time_is_used_up_and_leaves_the_project_at_its_best_state()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        PlanRecord plan = RepairPlan("worker-a", PlanRecoveryScope.WorkerOnly);
+        string[] writes = ["three", "one", "two"];
+        int calls = 0;
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            now += TimeSpan.FromMinutes(20); // each model call takes twenty minutes
+            File.WriteAllText(SourceFile, writes[Math.Min(calls++, writes.Length - 1)]);
+            return Task.FromResult("Worked.");
+        });
+
+        await RepairRunner(agent, _ => ChecksOf(File.ReadAllText(SourceFile)), utcNow: () => now, stepClock: TimeSpan.FromMinutes(45))
+            .RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Blocked, after.Status);
+        Assert.Equal(3, agent.Calls.Count); // 20, 40 and 60 minutes: the fourth round never starts
+        PlanRunEvent limit = Assert.Single(after.Events!, runEvent => runEvent.Kind == RunEventKind.StepTimeLimit);
+        Assert.Contains("used its 45 minutes of working time (60 minutes of model calls and checks)", limit.Detail);
+        Assert.Contains("retrying the step gives it a fresh clock", limit.Detail);
+        Assert.Contains("best round", limit.Detail);
+        Assert.Equal([1200, 1200, 1200], after.Events!.Where(runEvent => runEvent.Kind == RunEventKind.RoundClassified).Select(runEvent => runEvent.DurationSeconds));
+        Assert.Contains(after.Events!, runEvent => runEvent.Kind == RunEventKind.PlanBlocked);
+        Assert.Equal(StepStatus.Failed, after.Steps[0].Status);
+    }
+
+    [Fact]
+    public async Task The_working_time_already_used_survives_a_restart()
+    {
+        File.WriteAllText(SourceFile, "old");
+        PlanRecord plan = RepairPlan("worker-a", PlanRecoveryScope.WorkerOnly);
+        for (int round = 1; round <= 2; round++)
+        {
+            Store.AddEvent(plan.Id, 1, 1, RunEventKind.RoundClassified, "standard", "worker-a", "Round classified.", modelNode: "worker-a",
+                failureClass: "CodeProgress", failureSignature: $"t{round}", failureSignatureSize: 1, filesChanged: 1, toolCalls: 3,
+                editToolCalled: true, rung: 1, round: round, changedFiles: ["a.cs"], durationSeconds: 25 * 60);
+        }
+
+        Store.Update(plan.Id, current => current with
+        {
+            Status = PlanStatus.Running,
+            Steps = current.Steps.Select(step => step with { Status = StepStatus.Failed, Attempts = 1 }).ToList()
+        });
+        var agent = new FakeStepAgent((_, _, _) => Task.FromResult("Should not be asked."));
+
+        await RepairRunner(agent, _ => FailWith("t1"), stepClock: TimeSpan.FromMinutes(45)).RunPlanAsync(plan.Id, default);
+
+        Assert.Empty(agent.Calls);
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Blocked, after.Status);
+        Assert.Contains("(50 minutes of model calls and checks)", Assert.Single(after.Events!, runEvent => runEvent.Kind == RunEventKind.StepTimeLimit).Detail);
+    }
+
+    [Fact]
+    public async Task A_model_call_is_stopped_when_the_steps_working_time_runs_out_not_twenty_minutes_later()
+    {
+        PlanRecord plan = RepairPlan("worker-a", PlanRecoveryScope.WorkerOnly);
+        var agent = new FakeStepAgent(async (_, _, token) =>
+        {
+            await Task.Delay(Timeout.Infinite, token);
+            return string.Empty;
+        });
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+
+        await RepairRunner(agent, _ => FailWith("t1"), stepClock: TimeSpan.FromMilliseconds(700)).RunPlanAsync(plan.Id, default);
+
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(30), $"took {watch.Elapsed}");
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Contains("because the step's working time ran out", Assert.Single(after.Events!, runEvent => runEvent.Kind == RunEventKind.TimedOut).Detail);
+        Assert.Contains(after.Events!, runEvent => runEvent.Kind == RunEventKind.StepTimeLimit);
+        Assert.Equal(PlanStatus.Blocked, after.Status);
+        Assert.Single(agent.Calls);
+    }
+
+    [Fact]
+    public async Task A_model_call_never_outlives_the_plans_run_deadline()
+    {
+        PlanRecord plan = RepairPlan("worker-a", PlanRecoveryScope.WorkerOnly);
+        Store.Update(plan.Id, current => current with { RunDeadlineUtc = DateTimeOffset.UtcNow.AddMilliseconds(900) });
+        var agent = new FakeStepAgent(async (_, _, token) =>
+        {
+            await Task.Delay(Timeout.Infinite, token);
+            return string.Empty;
+        });
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+
+        await RepairRunner(agent, _ => FailWith("t1")).RunPlanAsync(plan.Id, default);
+
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(30), $"took {watch.Elapsed}");
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Contains("because the plan's run deadline arrived", Assert.Single(after.Events!, runEvent => runEvent.Kind == RunEventKind.TimedOut).Detail);
+        Assert.Contains(after.Events!, runEvent => runEvent.Kind == RunEventKind.RunDeadlineExceeded);
+        Assert.Equal(PlanStatus.Blocked, after.Status);
+    }
+
+    [Fact]
+    public async Task A_round_that_changed_only_a_lock_file_made_no_progress_and_climbs_at_once()
+    {
+        PlanRecord plan = RepairPlan("worker-a", PlanRecoveryScope.WorkerOnly);
+        int calls = 0;
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            // The model ran an install: the lock file changed, no source file did, and it called no edit tool.
+            File.WriteAllText(Path.Combine(ProjectDirectory, "package-lock.json"), $"{{ \"run\": {++calls} }}");
+            if (calls == 2)
+            {
+                File.WriteAllText(SourceFile, "fixed");
+            }
+
+            return Task.FromResult("Installed things.");
+        })
+        {
+            ToolsOf = _ => (3, false)
+        };
+
+        await RepairRunner(agent, _ => ChecksOf(File.Exists(SourceFile) ? File.ReadAllText(SourceFile) : "none")).RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        PlanRunEvent first = after.Events!.First(runEvent => runEvent.Kind == RunEventKind.RoundClassified);
+        Assert.Equal(nameof(FailureClass.NoOp), first.FailureClass);
+        Assert.Equal(["package-lock.json"], first.ChangedFiles);
+        Assert.Contains("only lock or generated files, so not counted as progress", first.Detail);
+        PlanRunEvent climb = Assert.Single(after.Events!, runEvent => runEvent.Kind == RunEventKind.RungChanged);
+        Assert.Contains("the last round made no edit and changed no file apart from lock or generated files", climb.Detail);
+        Assert.Equal(PlanStatus.Done, after.Status);
+    }
+
 }
 
 public sealed class PlanRepairLogicTests
@@ -533,6 +826,61 @@ public sealed class PlanRepairLogicTests
         Assert.Contains("the check printed the same as after the round before", message);
         Assert.Contains("you changed no file in the last round", message);
     }
+
+    [Theory]
+    [InlineData(true, 6, true, 9, true)]
+    [InlineData(true, 6, true, 6, false)]
+    [InlineData(true, 6, true, 3, false)]
+    [InlineData(true, 6, false, 1, true)]
+    [InlineData(false, 3, true, 9, false)]
+    [InlineData(false, 3, false, 5, true)]
+    public void A_round_is_worse_when_the_code_stops_building_or_more_names_fail(bool bestBuilds, int bestFailures, bool builds, int failures, bool worse) =>
+        Assert.Equal(worse, new RoundScore(builds, failures).IsWorseThan(new RoundScore(bestBuilds, bestFailures)));
+
+    [Fact]
+    public void A_score_comes_from_the_names_in_the_check_output_and_a_hash_of_it_has_none()
+    {
+        string tests = "Exit code: 1\nFAILED a\nFAILED b";
+        Assert.Equal(new RoundScore(true, 2), RoundScore.Of(PlanFailure.FailureSignature(tests), tests));
+
+        string build = "Exit code: 1\nsrc/a.ts(1,1): error TS2322: nope\nsrc/b.ts(2,2): error TS2345: nope";
+        Assert.Equal(new RoundScore(false, 2), RoundScore.Of(PlanFailure.FailureSignature(build), build));
+
+        string syntax = "Exit code: 1\nFAILED parses\nSyntaxError: Unexpected token";
+        Assert.Equal(new RoundScore(false, 1), RoundScore.Of(PlanFailure.FailureSignature(syntax), syntax));
+
+        string unnamed = "Exit code: 1\nsomething went wrong in a way no name captures";
+        Assert.Null(RoundScore.Of(PlanFailure.FailureSignature(unnamed), unnamed));
+    }
+
+    [Fact]
+    public void An_undone_round_is_said_in_place_of_the_comparison_with_the_round_before()
+    {
+        PlanRecord plan = PlanWithOneStep(out PlanStep step);
+        var rollback = new RollbackNote(3, new RoundScore(true, 9), 2, new RoundScore(true, 6), ["widget::b", "widget::c"], ["src/a.ts"]);
+
+        string message = RepairMessages.Build(plan, step, "FAILED widget::a", 4, ["widget::a"], ["widget::a"], sameOutput: false,
+            changedFiles: ["src/a.ts"], rollback: rollback);
+
+        Assert.Contains("Round 3 made the check worse, so the fleet undid it: it left 9 failing where round 2 had 6 failing. It broke: widget::b, widget::c.", message);
+        Assert.Contains("back as they were after round 2 (src/a.ts)", message);
+        Assert.DoesNotContain("Since your last round", message);
+        Assert.DoesNotContain("files you changed in the last round", message);
+    }
+
+    [Theory]
+    [InlineData("package-lock.json", true)]
+    [InlineData("web/package-lock.json", true)]
+    [InlineData("yarn.lock", true)]
+    [InlineData("Cargo.lock", true)]
+    [InlineData("pnpm-lock.yaml", true)]
+    [InlineData("tsconfig.tsbuildinfo", true)]
+    [InlineData("debug.log", true)]
+    [InlineData("src/server/marketHours.ts", false)]
+    [InlineData("package.json", false)]
+    [InlineData("docs/lockfile.md", false)]
+    public void Lock_files_and_build_caches_are_not_progress(string path, bool incidental) =>
+        Assert.Equal(incidental, RepairLadder.IsIncidentalFile(path));
 
     [Fact]
     public void Failing_names_are_read_back_from_a_stored_signature_and_a_hash_has_none()

@@ -224,6 +224,48 @@ public sealed class ContextSizeTests
     }
 
     [Fact]
+    public void Thirty_five_tool_rounds_and_four_repair_messages_keep_the_task_and_the_latest_turns_whole()
+    {
+        string task = "Implement the holidays. [plan:0123456789abcdef0123456789abcdef] " + new string('t', 2_000);
+        List<ChatMessage> conversation = [new(ChatRole.System, "You carry out one plan step."), new(ChatRole.User, task)];
+        for (int round = 0; round < 35; round++)
+        {
+            conversation.Add(new ChatMessage(ChatRole.Assistant, [new FunctionCallContent($"c{round}", "run_command", new Dictionary<string, object?> { ["command"] = "npm test " + new string('a', 3_000) })]));
+            conversation.Add(new ChatMessage(ChatRole.Tool, [new FunctionResultContent($"c{round}", $"Exit code: 1 round {round} " + new string('r', 4_000))]));
+            if (round % 9 == 8)
+            {
+                // A follow-up after a failed check, as the plan runner sends it, carrying the plan's marker.
+                conversation.Add(new ChatMessage(ChatRole.User, $"Round {round / 9 + 2}: the approved check did not pass yet. " + new string('o', 3_000) + " [plan:0123456789abcdef0123456789abcdef]"));
+            }
+        }
+
+        string[] before = conversation.Select(message => message.Text).ToArray();
+        int toolResults = conversation.Count(message => message.Role == ChatRole.Tool);
+        Assert.True(toolResults >= 30);
+
+        IReadOnlyList<ChatMessage> fitted = ContextSizeChatClient.FitToWindow(conversation, null, 28_672, 1.0);
+
+        Assert.True(ContextSizeChatClient.EstimateTokens(fitted, null) <= 28_672);
+        Assert.Equal(conversation.Count, fitted.Count); // nothing is dropped: every call keeps its result
+        Assert.Equal(toolResults, fitted.Count(message => message.Role == ChatRole.Tool));
+        Assert.Equal(task, fitted[1].Text); // the task stays whole
+        for (int index = fitted.Count - 6; index < fitted.Count; index++)
+        {
+            Assert.Equal(before[index], fitted[index].Text); // the latest turns stay whole
+            Assert.Equal(conversation[index].Contents.Count, fitted[index].Contents.Count);
+        }
+
+        Assert.Equal(new string('r', 4_000), ((FunctionResultContent)fitted[^1].Contents[0]).Result?.ToString()![^4_000..]);
+        // The old follow-ups and the old tool output are what gave way.
+        ChatMessage oldFollowUp = fitted.First(message => message.Role == ChatRole.User && message.Text.StartsWith("Round 2:", StringComparison.Ordinal));
+        Assert.Contains("removed to keep this conversation", oldFollowUp.Text);
+        Assert.Contains("removed to keep this conversation", ((FunctionResultContent)fitted[3].Contents[0]).Result!.ToString());
+        // A message that is not a plan's follow-up (a person's own long message in a chat) is not touched.
+        List<ChatMessage> chat = [new(ChatRole.User, "first question"), .. conversation.Skip(2).Take(40), new(ChatRole.User, new string('p', 6_000)), .. conversation.Skip(42).Take(30)];
+        Assert.Equal(new string('p', 6_000), ContextSizeChatClient.FitToWindow(chat, null, 20_000, 1.0).First(message => message.Role == ChatRole.User && message.Text.StartsWith("ppp", StringComparison.Ordinal)).Text);
+    }
+
+    [Fact]
     public async Task A_caller_that_sets_its_own_size_keeps_it()
     {
         ContextSizeChatClient client = Client("{}", 32768, out _);
