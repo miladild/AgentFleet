@@ -425,6 +425,22 @@ internal sealed partial class PlanTools
         return new StepCompletion(true, reply.ToString(), output, restoredNote);
     }
 
+    /// <summary>
+    /// Runs one of the environment doctor's commands (EnvironmentDoctor) the way a check runs: in the plan's folder, on
+    /// the machine the current worker scope selects, as the same limited account, and under the same policy. The
+    /// command comes from the doctor's own list, never from a model.
+    /// </summary>
+    internal async Task<(bool Succeeded, string Output)> RunRepairCommandAsync(PlanRecord plan, string command, CancellationToken cancellationToken)
+    {
+        if (PlanRunnerToolPolicy.CommandRefusal(command) is { } refusal)
+        {
+            return (false, refusal);
+        }
+
+        string result = await _runCommand(command, plan.WorkingDirectory, cancellationToken);
+        return (result.StartsWith("Exit code: 0", StringComparison.Ordinal), ShortenCheckOutput(result));
+    }
+
     public PlanRecord CommitStepDone(string planId, int stepId, string? note)
     {
         return _store.Update(planId, current =>

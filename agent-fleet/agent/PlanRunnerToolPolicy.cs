@@ -9,8 +9,31 @@ internal static partial class PlanRunnerToolPolicy
     {
         "read_file", "write_file", "edit_file", "list_directory", "find_files", "search_files",
         "project_overview", "move_file", "delete_file", "run_command", "run_git_command",
-        "get_plan", "search_context"
+        "get_plan", "search_context", "report_blocker"
     };
+
+    /// <summary>The role of a model asked whether a step's check is broken.</summary>
+    public const string CheckAuditRole = "check-audit";
+
+    // The auditor reads and proposes. It cannot run a command, write a file or call anything else.
+    private static readonly HashSet<string> AuditTools = new(StringComparer.Ordinal)
+    {
+        "read_file", "list_directory", "find_files", "search_files", "project_overview", "propose_check"
+    };
+
+    /// <summary>
+    /// Whether a tool is offered on a plan runner request. report_blocker is for a model carrying out a step and
+    /// propose_check for the auditor; neither is offered in chat, and the auditor gets nothing that changes anything.
+    /// </summary>
+    public static bool Offers(string toolName, bool fromRunner, string? role)
+    {
+        if (toolName is "report_blocker" or "propose_check")
+        {
+            return fromRunner && (role == CheckAuditRole ? toolName == "propose_check" : toolName == "report_blocker");
+        }
+
+        return !(fromRunner && role == CheckAuditRole) || AuditTools.Contains(toolName);
+    }
 
     [GeneratedRegex(@"(?ix)
         \b(?:git(?:\.exe)?\s+(?:(?:--no-pager|-c\s+\S+|-C\s+\S+)\s+)*(?:add|commit|push|pull|fetch|reset|clean|checkout|restore|rebase|merge|cherry-pick|tag|worktree|stash|switch|revert))\b
@@ -26,8 +49,15 @@ internal static partial class PlanRunnerToolPolicy
     [GeneratedRegex(@"\b(?:git(?:\.exe)?|gh(?:\.exe)?)\b", RegexOptions.IgnoreCase)]
     private static partial Regex RepositoryCli();
 
-    public static string? Refusal(string toolName, string? command = null)
+    public static string? Refusal(string toolName, string? command = null, string? role = null)
     {
+        if (role == CheckAuditRole)
+        {
+            return AuditTools.Contains(toolName)
+                ? null
+                : $"Blocked: `{toolName}` is not available while a check is being audited. You can read files and call propose_check.";
+        }
+
         if (!AllowedTools.Contains(toolName))
         {
             return $"Blocked by unattended plan policy: `{toolName}` is outside the local project tool set. Use project file tools and local checks; external and custom tools need a separate user-approved action.";

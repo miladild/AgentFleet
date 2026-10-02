@@ -385,7 +385,9 @@ internal sealed partial class FleetPlanStore
         int? rung = null,
         int? round = null,
         IReadOnlyList<string>? changedFiles = null,
-        int? durationSeconds = null)
+        int? durationSeconds = null,
+        string? checkBefore = null,
+        string? checkAfter = null)
     {
         string text = detail ?? string.Empty;
         int limit = kind == RunEventKind.FilesChanged ? MaxFilesChangedCharacters : MaxEventDetailCharacters;
@@ -396,7 +398,8 @@ internal sealed partial class FleetPlanStore
 
         var entry = new PlanRunEvent(DateTimeOffset.UtcNow, stepId, attempt, kind, tier, node, text, modelNode, workspaceNode,
             failureClass, failureSignature, failureSignatureSize, filesChanged, toolCalls, editToolCalled, rung, round,
-            changedFiles is { Count: > 0 } ? changedFiles.Take(MaxChangedFilesPerEvent).ToList() : null, durationSeconds);
+            changedFiles is { Count: > 0 } ? changedFiles.Take(MaxChangedFilesPerEvent).ToList() : null, durationSeconds,
+            Shorten(checkBefore), Shorten(checkAfter));
         return Update(id, plan =>
         {
             List<PlanRunEvent> events = [.. plan.Events ?? [], entry];
@@ -413,7 +416,7 @@ internal sealed partial class FleetPlanStore
     public event Action<string>? Approved;
 
     // Only a plan that is waiting (or blocked and needs another go-ahead) can be approved.
-    public PlanRecord? Approve(string id, bool exportToProject = false, string? recoveryScope = null)
+    public PlanRecord? Approve(string id, bool exportToProject = false, string? recoveryScope = null, string? healChecks = null)
     {
         bool changed = false;
         bool retryingBlockedPlan = false;
@@ -438,6 +441,7 @@ internal sealed partial class FleetPlanStore
                 ApprovedUtc = approvedAt,
                 RunDeadlineUtc = approvedAt + DefaultRunDuration,
                 RecoveryScope = NormalizeRecoveryScope(recoveryScope) ?? NormalizeRecoveryScope(plan.RecoveryScope) ?? PlanRecoveryScope.WorkerOnly,
+                HealChecks = NormalizeHealChecks(healChecks) ?? NormalizeHealChecks(plan.HealChecks) ?? PlanHealChecks.Auto,
                 Steps = steps
             };
             if (exportToProject)
@@ -581,6 +585,11 @@ internal sealed partial class FleetPlanStore
                 text.AppendLine($"  - {(step.Id == plan.Steps[^1].Id ? "Runner final validation" : "Verify")}: `{step.Verify}`");
             }
 
+            if (step.OriginalVerify is not null)
+            {
+                text.AppendLine($"  - Check changed by the fleet: it was `{step.OriginalVerify}`");
+            }
+
             text.AppendLine($"  - Backend restart: {(step.RetrySafe ? "this local step may resume automatically" : "pause for review before retrying")}");
 
             if (!string.IsNullOrWhiteSpace(step.Note))
@@ -603,6 +612,7 @@ internal sealed partial class FleetPlanStore
         text.AppendLine();
         text.AppendLine($"Status: **{plan.Status.Replace('-', ' ')}**. {Marker(plan.Id)}");
         text.AppendLine($"Recovery scope: {(PlanRecoveryScope.AllowsHubRescue(plan.RecoveryScope) ? "hub model rescue allowed after worker failure" : "worker only")}");
+        text.AppendLine($"Broken checks: {(PlanHealChecks.IsAuto(plan.HealChecks) ? "fixed automatically" : "the fleet asks first")}");
         if (plan.WorkingDirectory is not null)
         {
             text.AppendLine($"Working directory: `{plan.WorkingDirectory}`");
@@ -651,6 +661,29 @@ internal sealed partial class FleetPlanStore
             text.AppendLine("```");
             text.AppendLine(filesChanged.Detail);
             text.AppendLine("```");
+        }
+
+        PlanRunEvent[] healed = events.Where(e => e.Kind == RunEventKind.CheckHealed).ToArray();
+        if (healed.Length > 0)
+        {
+            text.AppendLine();
+            text.AppendLine("## Checks changed by Fleet");
+            foreach (PlanRunEvent e in healed)
+            {
+                string title = plan.Steps.FirstOrDefault(step => step.Id == e.StepId)?.Title ?? string.Empty;
+                text.AppendLine($"- Step {e.StepId} ({title}): `{e.CheckBefore}` became `{e.CheckAfter}`. {e.Detail.ReplaceLineEndings(" ")}");
+            }
+        }
+
+        PlanRunEvent[] repaired = events.Where(e => e.Kind == RunEventKind.EnvironmentRepaired).ToArray();
+        if (repaired.Length > 0)
+        {
+            text.AppendLine();
+            text.AppendLine("## Environment repairs");
+            foreach (PlanRunEvent e in repaired)
+            {
+                text.AppendLine($"- Step {e.StepId}: {e.Detail.ReplaceLineEndings(" ")}");
+            }
         }
 
         text.AppendLine();
@@ -721,6 +754,11 @@ internal sealed partial class FleetPlanStore
             {
                 text.AppendLine($"  > {e.Detail.ReplaceLineEndings(" ")}");
             }
+
+            if (e.CheckBefore is not null || e.CheckAfter is not null)
+            {
+                text.AppendLine($"  > check: `{e.CheckBefore}` -> `{e.CheckAfter}`");
+            }
         }
 
         return text.ToString().TrimEnd() + "\n";
@@ -784,6 +822,18 @@ internal sealed partial class FleetPlanStore
             PlanRecoveryScope.AllowHubRescue => PlanRecoveryScope.AllowHubRescue,
             _ => null
         };
+
+    internal static string? NormalizeHealChecks(string? mode) =>
+        mode?.Trim().ToLowerInvariant() switch
+        {
+            PlanHealChecks.Auto => PlanHealChecks.Auto,
+            PlanHealChecks.Ask => PlanHealChecks.Ask,
+            _ => null
+        };
+
+    // A check is one command; a model's rewrite of it that runs to pages is not a check.
+    private static string? Shorten(string? text) =>
+        text is null ? null : text.Length <= 600 ? text : text[..600] + "...";
 
     private static string? CleanParallelGroup(string? group)
     {

@@ -986,6 +986,71 @@ public sealed class FleetStepSessionTests
     }
 
     [Fact]
+    public async Task A_conversation_with_a_role_carries_it_to_the_router_and_is_not_nudged_to_make_a_change()
+    {
+        var client = new ScriptedChatClient(_ => null, _ => string.Empty);
+        IStepSession session = Agent(client).OpenSession(PlanRunnerToolPolicy.CheckAuditRole);
+
+        StepAgentReply reply = await session.SendAsync("audit this check", "heavy", "hub", default);
+
+        // An answer in words, or none, is a valid audit: there is nothing to finish, so nothing asks for a change.
+        Assert.Single(client.Requests);
+        Assert.Equal(string.Empty, reply.Text);
+        Assert.Equal(PlanRunnerToolPolicy.CheckAuditRole, client.Options[0]!.AdditionalProperties![FleetRoutingChatClient.RunnerRoleKey]);
+        Assert.Equal("heavy", client.Options[0]!.AdditionalProperties![FleetRoutingChatClient.RunnerTierKey]);
+        Assert.Equal("hub", client.Options[0]!.AdditionalProperties![FleetRoutingChatClient.RunnerMachineKey]);
+
+        // A conversation that carries out a step has no role.
+        var stepClient = new ScriptedChatClient(_ => null);
+        await Agent(stepClient).OpenSession().SendAsync("the whole task", "standard", null, default);
+        Assert.False(stepClient.Options[0]!.AdditionalProperties!.ContainsKey(FleetRoutingChatClient.RunnerRoleKey));
+    }
+
+    [Fact]
+    public async Task The_tool_calls_of_a_turn_come_back_with_their_arguments_as_text()
+    {
+        var client = new CallingChatClient(
+            new FunctionCallContent("c1", "propose_check", new Dictionary<string, object?> { ["check"] = "npm run build", ["why"] = "dev never exits" }),
+            new FunctionCallContent("c2", "report_blocker", new Dictionary<string, object?>
+            {
+                ["kind"] = System.Text.Json.JsonDocument.Parse("\"environment\"").RootElement,
+                ["evidence"] = System.Text.Json.JsonDocument.Parse("{\"a\":1}").RootElement
+            }),
+            new FunctionCallContent("c3", "edit_file", null));
+        IStepSession session = new FleetStepAgent(new ChatClientAgent(client, instructions: "test", name: "test")).OpenSession();
+
+        StepAgentReply reply = await session.SendAsync("the whole task", "standard", null, default);
+
+        Assert.Equal(3, reply.ToolCalls);
+        Assert.NotNull(reply.Calls);
+        Assert.Equal(["propose_check", "report_blocker", "edit_file"], reply.Calls.Select(call => call.Name));
+        Assert.Equal("npm run build", reply.Calls[0].Arguments["check"]);
+        Assert.Equal("environment", reply.Calls[1].Arguments["kind"]);
+        Assert.Equal("{\"a\":1}", reply.Calls[1].Arguments["evidence"]);
+        Assert.Empty(reply.Calls[2].Arguments);
+        Assert.Equal("npm run build", CheckAudit.ProposalFrom(reply)!.Value.Check);
+        Assert.Equal("environment", CheckAudit.BlockerFrom(reply)!.Kind);
+    }
+
+    private sealed class CallingChatClient(params AIContent[] contents) : IChatClient
+    {
+        private int _sent;
+
+        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default) =>
+            // The tools are not registered with the agent, so the invocation loop asks once more; a model answers in words then.
+            Task.FromResult(new ChatResponse(_sent++ == 0 ? new ChatMessage(ChatRole.Assistant, [.. contents]) : new ChatMessage(ChatRole.Assistant, "done")));
+
+        public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+
+        public void Dispose()
+        {
+        }
+    }
+
+    [Fact]
     public async Task An_empty_reply_is_nudged_once_inside_the_same_conversation()
     {
         var client = new ScriptedChatClient(_ => null, call => call == 1 ? string.Empty : "done");

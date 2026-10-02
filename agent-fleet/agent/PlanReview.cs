@@ -12,16 +12,16 @@ namespace AgentFleet;
 internal static partial class PlanReview
 {
     // Shell built-ins a check may start with: they are not programs on PATH.
-    private static readonly HashSet<string> BuiltIns = new(StringComparer.OrdinalIgnoreCase)
+    internal static readonly HashSet<string> BuiltIns = new(StringComparer.OrdinalIgnoreCase)
     {
-        "cd", "echo", "test", "[", "type", "dir", "exit", "true", "false", "set", "if", "call", "pushd", "popd", "where", "findstr"
+        "cd", "echo", "test", "[", "type", "dir", "exit", "true", "false", "set", "if", "call", "pushd", "popd", "where", "findstr", "chdir", "set-location", "sl"
     };
 
     [GeneratedRegex(@"&&|\|\||;|\|")]
-    private static partial Regex CommandSeparators();
+    internal static partial Regex CommandSeparators();
 
     [GeneratedRegex("\"[^\"]*\"|'[^']*'|\\S+")]
-    private static partial Regex Tokens();
+    internal static partial Regex Tokens();
 
     [GeneratedRegex(@"\.[A-Za-z0-9]{1,6}$")]
     private static partial Regex FileExtension();
@@ -73,79 +73,93 @@ internal static partial class PlanReview
 
         for (int index = 0; index < steps.Count; index++)
         {
-            PlanStepInput step = steps[index];
-            int number = index + 1;
-            if (string.IsNullOrWhiteSpace(step.Verify))
-            {
-                problems.Add($"Step {number} ({step.Title}) has no bounded check. Every unattended step needs a command that proves it worked.");
-                continue;
-            }
-
-            string verify = step.Verify.Trim();
-            if (PlanRunnerToolPolicy.CommandRefusal(verify) is { } refusal)
-            {
-                problems.Add($"Step {number} ({step.Title}): its check is not safe for unattended retries. {refusal}");
-                continue;
-            }
-
-            string? firstProgram = FirstProgram(verify);
-            if (firstProgram is null || !IsRunnable(firstProgram, root, programExists))
-            {
-                string launcherHint = OperatingSystem.IsWindows() &&
-                    (string.Equals(firstProgram, "python", StringComparison.OrdinalIgnoreCase) || string.Equals(firstProgram, "python3", StringComparison.OrdinalIgnoreCase)) &&
-                    QuickProcess.FindOnPath("py") is not null
-                    ? " The Windows Python launcher is available as py; use a check such as py -3 --version if that matches the project."
-                    : string.Empty;
-                problems.Add(
-                    $"Step {number} ({step.Title}): its check \"{Clip(verify)}\" is not a command the selected machine can run" +
-                    (firstProgram is not null && LooksLikeProgram(firstProgram) ? $" ({firstProgram} is not installed on the selected machine)" : string.Empty) +
-                    ". The fleet runs the check exactly as written: give a command that fails when the step did not work, such as node --test test/x.test.js, npm test or dotnet test." + launcherHint);
-                continue;
-            }
-
-            if (NeverFinishes(verify, root) is { } endless)
-            {
-                problems.Add(
-                    $"Step {number} ({step.Title}): its check \"{Clip(verify)}\" runs {endless}, which does not exit on its own, so the fleet " +
-                    "would stop it at its time limit and the step would fail every attempt. Check the step with something that finishes: its " +
-                    "tests, the build or the typecheck (a test can start the server, call it and stop it). A plan cannot leave a server " +
-                    "running; tell the user the command that starts it instead.");
-                continue;
-            }
-
-            if (root is null)
-            {
-                continue;
-            }
-
-            foreach (string file in FilesIn(verify))
-            {
-                string full = Resolve(root, file);
-                if (File.Exists(full) || Directory.Exists(full))
-                {
-                    continue;
-                }
-
-                int creator = IndexOfStepNaming(steps, root, full);
-                if (creator > index)
-                {
-                    problems.Add(
-                        $"Step {number} ({step.Title}): its check uses {file}, which step {creator + 1} creates, so it cannot pass when step {number} is done. " +
-                        "Write the code and its test in the same step, or check this step with something that exists by then.");
-                }
-                else if (creator < 0)
-                {
-                    problems.Add(
-                        $"Step {number} ({step.Title}): its check uses {file}, which does not exist and no step names in its files. " +
-                        "List it in the files of the step that creates it.");
-                }
-            }
+            problems.AddRange(CheckProblems(root, steps, index, programExists));
         }
 
         return problems;
     }
 
-    private static bool IsWholeProjectValidation(string command, string? root, int depth = 0)
+    /// <summary>
+    /// What is wrong with one step's check: not a command the machine can run, one that never finishes, a file it uses
+    /// that nothing creates in time. Empty when the check is sound. The same rules decide a plan at proposal time and a
+    /// healed check at run time.
+    /// </summary>
+    internal static IReadOnlyList<string> CheckProblems(string? root, IReadOnlyList<PlanStepInput> steps, int index, Func<string, bool>? programExists = null)
+    {
+        programExists ??= program => QuickProcess.FindOnPath(program) is not null;
+        var found = new List<string>();
+        PlanStepInput step = steps[index];
+        int number = index + 1;
+        if (string.IsNullOrWhiteSpace(step.Verify))
+        {
+            found.Add($"Step {number} ({step.Title}) has no bounded check. Every unattended step needs a command that proves it worked.");
+            return found;
+        }
+
+        string verify = step.Verify.Trim();
+        if (PlanRunnerToolPolicy.CommandRefusal(verify) is { } refusal)
+        {
+            found.Add($"Step {number} ({step.Title}): its check is not safe for unattended retries. {refusal}");
+            return found;
+        }
+
+        string? firstProgram = FirstProgram(verify);
+        if (firstProgram is null || !IsRunnable(firstProgram, root, programExists))
+        {
+            string launcherHint = OperatingSystem.IsWindows() &&
+                (string.Equals(firstProgram, "python", StringComparison.OrdinalIgnoreCase) || string.Equals(firstProgram, "python3", StringComparison.OrdinalIgnoreCase)) &&
+                QuickProcess.FindOnPath("py") is not null
+                ? " The Windows Python launcher is available as py; use a check such as py -3 --version if that matches the project."
+                : string.Empty;
+            found.Add(
+                $"Step {number} ({step.Title}): its check \"{Clip(verify)}\" is not a command the selected machine can run" +
+                (firstProgram is not null && LooksLikeProgram(firstProgram) ? $" ({firstProgram} is not installed on the selected machine)" : string.Empty) +
+                ". The fleet runs the check exactly as written: give a command that fails when the step did not work, such as node --test test/x.test.js, npm test or dotnet test." + launcherHint);
+            return found;
+        }
+
+        if (NeverFinishes(verify, root) is { } endless)
+        {
+            found.Add(
+                $"Step {number} ({step.Title}): its check \"{Clip(verify)}\" runs {endless}, which does not exit on its own, so the fleet " +
+                "would stop it at its time limit and the step would fail every attempt. Check the step with something that finishes: its " +
+                "tests, the build or the typecheck (a test can start the server, call it and stop it). A plan cannot leave a server " +
+                "running; tell the user the command that starts it instead.");
+            return found;
+        }
+
+        if (root is null)
+        {
+            return found;
+        }
+
+        foreach (string file in FilesIn(verify))
+        {
+            string full = Resolve(root, file);
+            if (File.Exists(full) || Directory.Exists(full))
+            {
+                continue;
+            }
+
+            int creator = IndexOfStepNaming(steps, root, full);
+            if (creator > index)
+            {
+                found.Add(
+                    $"Step {number} ({step.Title}): its check uses {file}, which step {creator + 1} creates, so it cannot pass when step {number} is done. " +
+                    "Write the code and its test in the same step, or check this step with something that exists by then.");
+            }
+            else if (creator < 0)
+            {
+                found.Add(
+                    $"Step {number} ({step.Title}): its check uses {file}, which does not exist and no step names in its files. " +
+                    "List it in the files of the step that creates it.");
+            }
+        }
+
+        return found;
+    }
+
+    internal static bool IsWholeProjectValidation(string command, string? root, int depth = 0)
     {
         if (depth > 2) return false;
         foreach (string segment in CommandSeparators().Split(command))
@@ -187,7 +201,7 @@ internal static partial class PlanReview
         return false;
     }
 
-    private static bool HasFinalValidation(string command, string? root)
+    internal static bool HasFinalValidation(string command, string? root)
     {
         if (!IsWholeProjectValidation(command, root)) return false;
         if (root is null) return true;
@@ -307,7 +321,7 @@ internal static partial class PlanReview
         return null;
     }
 
-    private static string? ScriptBody(string? root, string script)
+    internal static string? ScriptBody(string? root, string script)
     {
         try
         {
@@ -331,8 +345,11 @@ internal static partial class PlanReview
         }
     }
 
+    private static bool IsDirectoryChange(string word) =>
+        word.ToLowerInvariant() is "cd" or "pushd" or "chdir" or "set-location" or "sl";
+
     // The program the check starts with, after any leading "cd folder &&".
-    private static string? FirstProgram(string command)
+    internal static string? FirstProgram(string command)
     {
         foreach (string segment in CommandSeparators().Split(command))
         {
@@ -342,7 +359,7 @@ internal static partial class PlanReview
                 continue;
             }
 
-            if (first.Equals("cd", StringComparison.OrdinalIgnoreCase) || first.Equals("pushd", StringComparison.OrdinalIgnoreCase))
+            if (IsDirectoryChange(first))
             {
                 continue;
             }
@@ -359,7 +376,7 @@ internal static partial class PlanReview
         foreach (string segment in CommandSeparators().Split(command))
         {
             string? first = Tokens().Matches(segment).Select(match => match.Value.Trim('"', '\'')).FirstOrDefault();
-            if (first is null || first.Equals("cd", StringComparison.OrdinalIgnoreCase) || first.Equals("pushd", StringComparison.OrdinalIgnoreCase))
+            if (first is null || IsDirectoryChange(first))
             {
                 continue;
             }
@@ -373,7 +390,7 @@ internal static partial class PlanReview
         return used;
     }
 
-    private static bool IsRunnable(string program, string? root, Func<string, bool> programExists)
+    internal static bool IsRunnable(string program, string? root, Func<string, bool> programExists)
     {
         if (BuiltIns.Contains(program) || programExists(program))
         {
@@ -391,11 +408,11 @@ internal static partial class PlanReview
     }
 
     // Words that are clearly meant as programs, as opposed to the first word of a sentence.
-    private static bool LooksLikeProgram(string word) =>
+    internal static bool LooksLikeProgram(string word) =>
         word.Length > 0 && (char.IsLower(word[0]) || word.Contains('.') || word.Contains('-'));
 
     // Arguments that look like files: a path with a slash, or a name with an extension. Flags, globs and URLs are not.
-    private static IEnumerable<string> FilesIn(string command)
+    internal static IEnumerable<string> FilesIn(string command)
     {
         foreach (Match match in Tokens().Matches(command).Skip(1))
         {
@@ -429,7 +446,7 @@ internal static partial class PlanReview
         return -1;
     }
 
-    private static string Resolve(string root, string path)
+    internal static string Resolve(string root, string path)
     {
         try
         {
