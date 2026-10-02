@@ -18,7 +18,7 @@ internal sealed record CheckDefect(CheckDefectKind Kind, string Evidence)
     public string Name => Kind switch
     {
         CheckDefectKind.NeverFinishes => "the check never finishes",
-        CheckDefectKind.ShellSyntax => "the shell cannot parse the check",
+        CheckDefectKind.ShellSyntax => "the shell cannot run the check as written",
         CheckDefectKind.ProgramMissing => "the check's program is not there",
         CheckDefectKind.FileMissing => "a file the check names is not there",
         CheckDefectKind.TimedOut => "the check timed out twice with the same output",
@@ -44,7 +44,10 @@ internal static partial class CheckDefects
         |was\sunexpected\sat\sthis\stime
         |The\sfilename,\sdirectory\sname,\sor\svolume\slabel\ssyntax\sis\sincorrect
         |(?:sh|bash|dash):\s(?:-c:\s)?(?:line\s\d+:\s)?(?:\d+:\s)?syntax\serror
-        |syntax\serror\snear\sunexpected\stoken")]
+        |syntax\serror\snear\sunexpected\stoken
+        |running\sscripts\sis\sdisabled\son\sthis\ssystem
+        |is\snot\sdigitally\ssigned\.\sYou\scannot\srun\sthis\sscript
+        |\bPSSecurityException\b")]
     private static partial Regex ShellSyntax();
 
     [GeneratedRegex(@"(?ix)

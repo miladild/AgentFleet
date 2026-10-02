@@ -46,6 +46,24 @@ internal static partial class PlanRunnerToolPolicy
         |(?:^|[\s/\\""'=(])\.\.(?=$|[\s/\\""')])")]
     private static partial Regex UnsafeCommand();
 
+    // What a plan step must never do to the machine it runs on: a model that is stuck will try anything that makes its check
+    // pass, and measured on a real worker it set the limited account's PowerShell execution policy so that a blocked npm
+    // script would run. These change a security setting, a service, an account or the machine's configuration, and they
+    // outlive the plan, so they are refused whoever asks and whatever the scope (Process included: it is never needed).
+    [GeneratedRegex(@"(?ix)
+        \bSet-ExecutionPolicy\b
+        |\b(?:Set|Add|Remove)-MpPreference\b|\bDisable-WindowsOptionalFeature\b|\bDisable-NetFirewall(?:Rule|Profile)\b
+        |\bnetsh(?:\.exe)?\s+advfirewall\b|\b(?:New|Set|Remove|Enable)-NetFirewall(?:Rule|Profile)\b
+        |\breg(?:\.exe)?\s+(?:add|delete|import|load|unload|restore)\b|\bregedit(?:\.exe)?\b
+        |\b(?:New|Set|Remove)-ItemProperty\b[^\r\n]*\bHK(?:LM|CU|CR|U|CC)\b[:\\]
+        |\bschtasks(?:\.exe)?\s+/(?:create|change|delete)\b|\b(?:Register|Set|Unregister)-ScheduledTask\b
+        |\b(?:New|Set|Remove)-Service\b|\bsc(?:\.exe)?\s+(?:create|config|delete|failure)\b
+        |\bnet(?:1)?\s+(?:user|localgroup|accounts)\b|\b(?:New|Set|Remove)-LocalUser\b|\b(?:Add|Remove)-LocalGroupMember\b
+        |\bsetx(?:\.exe)?\b|\bSetEnvironmentVariable\s*\([^)]*,\s*['""]?(?:User|Machine)\b
+        |\b(?:icacls|takeown|cacls)(?:\.exe)?\b|\bSet-Acl\b
+        |\b(?:npm|pnpm|yarn|bun)\s+(?:\S+\s+)*(?:-g|--global|--location[= ]global)(?=\s|$)|\byarn\s+global\b|\bnpm\s+config\s+set\b")]
+    private static partial Regex MachineChange();
+
     [GeneratedRegex(@"\b(?:git(?:\.exe)?|gh(?:\.exe)?)\b", RegexOptions.IgnoreCase)]
     private static partial Regex RepositoryCli();
 
@@ -83,6 +101,12 @@ internal static partial class PlanRunnerToolPolicy
         if (RepositoryCli().IsMatch(command))
         {
             return "Blocked by unattended plan policy: Git and GitHub commands cannot run through the shell. Use the dedicated read-only Git inspection tool when needed; repository writes and remote GitHub actions require a separate user-approved action.";
+        }
+
+        if (MachineChange().IsMatch(command))
+        {
+            return "Blocked by unattended plan policy: this command changes a security setting or the configuration of the machine (execution policy, firewall, Defender, registry, services, scheduled tasks, accounts, permissions, environment, global packages). " +
+                   "Plan commands work inside the project only. If the project cannot be built here without such a change, say so in one sentence instead of trying it.";
         }
 
         if (UnsafeCommand().IsMatch(command))

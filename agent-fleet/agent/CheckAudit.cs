@@ -60,7 +60,7 @@ internal static class CheckAudit
         text.AppendLine("Decide whether the CHECK is wrong, not the work. A failing test, an assertion or a compiler error is the work's failure and the check is fine: in that case answer in words that the check is not defective, and do not call propose_check.");
         text.AppendLine($"If the check itself is broken, call {ProposeTool} once with a replacement. The fleet applies a replacement only if all of this holds:");
         text.AppendLine("- It is one line that finishes by itself, uses programs that exist on that machine, and names only files that exist or that a step creates.");
-        text.AppendLine("- It is either the same programs and the same arguments written so that the shell accepts them (for example && is not valid in Windows PowerShell 5.1: use ; or run it through cmd), or it still runs the project's own tests, typecheck or build and keeps every test or build the original ran.");
+        text.AppendLine("- It is either the same programs and the same arguments written so that the shell accepts them (for example && is not valid in Windows PowerShell 5.1: use ; or run it through cmd; and when PowerShell's execution policy refuses to run a program's .ps1 script, such as npm.ps1, run the same command through cmd: cmd /c \"npm test\"), or it still runs the project's own tests, typecheck or build and keeps every test or build the original ran. Never change a security setting such as the execution policy.");
         text.AppendLine("- It cannot pass without the work: no echo, true, exit 0, version probes, dir, type, and nothing that swallows a failure such as || true.");
         if (last)
         {
