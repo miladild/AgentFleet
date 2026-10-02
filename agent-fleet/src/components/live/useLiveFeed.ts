@@ -102,6 +102,10 @@ const RUN_TONE: Record<string, LogLine["tone"]> = {
   "rung-changed": "accent",
   "round-rolled-back": "warn",
   "step-time-limit": "bad",
+  "check-healed": "good",
+  "check-audit": "warn",
+  "environment-repaired": "good",
+  "blocker-reported": "warn",
 };
 
 // A line of the run log in words: which attempt, on which tier, and the part of the detail that matters.
@@ -134,6 +138,12 @@ function runText(event: PlanRunEvent): string {
       return event.detail || `round ${event.round ?? "?"} was undone`;
     case "step-time-limit":
       return event.detail || "the step used its working time";
+    case "check-healed":
+      return `the check was changed${event.checkBefore != null && event.checkAfter != null ? `: ${event.checkBefore} → ${event.checkAfter}` : ""}${tail(firstLine)}`;
+    case "check-audit":
+    case "environment-repaired":
+    case "blocker-reported":
+      return firstLine || event.kind.replace(/-/g, " ");
     case "check-passed":
       return `✔ check passed${tail(firstLine)}`;
     default:

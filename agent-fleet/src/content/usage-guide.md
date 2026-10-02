@@ -76,7 +76,13 @@ Turn it on when you would want to review the approach before anything changes.
    tier stays the same.
    A round that makes the check worse is undone before the next one, and a step
    has 45 minutes of working time. A step that ends without passing leaves its
-   files at the best state it reached. The run log shows the selected machine and each climb;
+   files at the best state it reached. A check that is itself broken (it never
+   exits, the machine's shell cannot parse it, it names a program that is not
+   there) is not a failing test: the fleet asks a model to audit it, applies a
+   replacement only if fixed rules allow it, keeps the original and logs both,
+   and does not spend a round on it. Choose **Ask me first** under **Broken
+   checks** to be asked instead. When a worker lacks the dependencies the project
+   declares, the fleet installs them once with the project's own command. The run log shows the selected machine and each climb;
    a user-selected machine takes priority. During a plan, files and verification
    commands run in that machine's staged project, then changes sync back to the
    hub checkout for review. A missing-runtime or SDK error stops retries and

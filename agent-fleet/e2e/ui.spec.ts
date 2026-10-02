@@ -211,9 +211,11 @@ test.beforeEach(async ({ page }) => {
             { atUtc: at(5), stepId: 1, attempt: 1, kind: "round-classified", tier: "standard", node: "hub", modelNode: "hub", failureClass: "CodeProgress", filesChanged: 1, changedFiles: ["src/widget.ts"], rung: 2, round: 1, detail: "Round classified: CodeProgress." },
             { atUtc: at(5), stepId: 1, attempt: 1, kind: "round-rolled-back", tier: "standard", node: "hub", modelNode: "hub", failureClass: "RolledBack", rung: 2, round: 1, changedFiles: ["src/widget.ts"], detail: "Round 1 (rung 2) left 9 failing where round 2 had 6 failing, so it was undone: src/widget.ts, as they were after round 2." },
             { atUtc: at(6), stepId: 1, attempt: 1, kind: "attempt-started", tier: "standard", node: "hub", modelNode: "hub", rung: 2, round: 2, detail: "Round 2: the output of the failed check goes back into the same conversation." },
+            { atUtc: at(7), stepId: 1, attempt: 1, kind: "check-healed", tier: "standard", node: "hub", rung: 2, round: 2, checkBefore: "npm run build && npm test", checkAfter: "npm run build; if ($?) { npm test }", detail: "The check was changed because the shell cannot parse the check: PowerShell 5.1 has no && (Same programs and arguments, written so the shell accepts them.)" },
+            { atUtc: at(8), stepId: 1, attempt: 1, kind: "environment-repaired", tier: "standard", node: "worker-a", failureClass: "Repaired", failureSignature: "node-modules", rung: 2, round: 2, detail: "Install the project's declared dependencies. `npm ci` succeeded: added 120 packages" },
           ],
           steps: [
-            { id: 1, title: "Fix the failing tests", detail: "Make the widget tests pass.", files: ["src/widget.ts"], verify: "npm test", tier: "standard", machine: "worker-a", status: "running", note: null, attempts: 1 },
+            { id: 1, title: "Fix the failing tests", detail: "Make the widget tests pass.", files: ["src/widget.ts"], verify: "npm run build; if ($?) { npm test }", originalVerify: "npm run build && npm test", tier: "standard", machine: "worker-a", status: "running", note: null, attempts: 1 },
           ],
         },
         events: [],
@@ -355,6 +357,10 @@ test("shows where a step is on the repair ladder and says each climb in plain wo
   await expect(log).toContainText("round 1 (rung 2): failed, but the failures changed · changed src/widget.ts");
   await expect(log).toContainText("Climbing from rung 1 (the requested tier) to rung 2 (the hub model, same conversation) on hub");
   await expect(log).toContainText("so it was undone: src/widget.ts, as they were after round 2");
+
+  // A check the fleet changed says what it was and what it is, and a repair of the machine is a line of its own.
+  await expect(log).toContainText("the check was changed: npm run build && npm test → npm run build; if ($?) { npm test }");
+  await expect(log).toContainText("`npm ci` succeeded: added 120 packages");
 });
 
 test("shows an error and its successful cross-agent handoff in Context", async ({ page }) => {
