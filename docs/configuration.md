@@ -31,7 +31,8 @@ fallback, found 2."
   "tools": { ... },
   "mcpServers": { ... },
   "sandbox": { ... },
-  "history": { "deleteAfterDays": 90 }
+  "history": { "deleteAfterDays": 90 },
+  "notifyUrl": "http://192.168.1.50:8080/fleet"
 }
 ```
 
@@ -127,6 +128,16 @@ How long the durable record keeps chats. See [context.md](context.md#keeping-it-
 |---|---|
 | `deleteAfterDays` | Delete a chat and its record once nothing has happened in it for this many days, 1 to 3650. `0` or missing keeps everything. A chat an unfinished plan runs in is kept. |
 
+### `notifyUrl`
+
+Optional, off when missing. An address on the private network that gets one small JSON message (`POST`) when a plan needs
+you: a step was parked, the run ended with steps waiting, the plan is done, the run deadline passed. See
+[planning.md](planning.md). The fleet is LAN-only, so the address must be loopback, a private or link-local address, a
+Tailscale address, or a name that resolves to one; a public address is refused when the file loads. Redirects are not
+followed, and there is no way to put a user name or password in the address. The message carries the event, the plan's id
+and title, the step's number and title, the counts of done, parked and total steps and a cause word, never a file's
+contents or a check's output. It is edited in the file; a save from the Config panel keeps it.
+
 ## Environment variables
 
 The backend reads these from its own environment, not from `.env.local`. When you run it with `npm run dev` or as a task,
@@ -187,6 +198,7 @@ The backend answers these on port 8000. They are what the web UI and the VS Code
 | `GET`, `POST /api/fleet-mode`, `/api/plan-mode` | The two switches |
 | `GET /api/plans`, `/api/plans/{id}`, `/api/plans/{id}/markdown`, `/api/plans/{id}/report` | Plans, a readable copy, and the run report |
 | `POST /api/plans/{id}/approve`, `/reject`, `/stop` | Act on a plan |
+| `POST /api/plans/{id}/retry?step=`, `/skip?step=` | Try one parked or stopped step again with a fresh repair ladder, or count it as done without its check; the rest of the plan is left alone |
 | `POST /api/plans` | Save a plan written elsewhere (the VS Code extension's Copilot tool uses it): `title`, `goal`, `workingDirectory` and `steps` as in `propose_plan`; `dryRun` only reviews it, `approve` starts it. A plan that would fail is refused with its `problems` |
 | `GET`, `PUT`, `DELETE /api/sessions[/{id}]` | Saved conversations (the visible chats of the durable record) |
 | `GET /api/contexts[/{id}[/events|deliveries|artifacts|export]]`, `POST .../decisions|compact` | The durable record. See [context.md](context.md) |

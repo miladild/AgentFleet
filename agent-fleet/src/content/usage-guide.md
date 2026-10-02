@@ -96,7 +96,13 @@ Turn it on when you would want to review the approach before anything changes.
    firewall rules. In **Live**, choose a configured text machine for an awaiting,
    ready or failed step; its requested tier stays the same. Running steps,
    dependency-waiting steps and parallel peers already in flight cannot move.
-   If a step still cannot pass, the plan stops as *Blocked* and tells you where.
+   If a step still cannot pass it is *parked*: set aside with its reason, while every
+   step that does not depend on it goes on. Steps can say which earlier steps they
+   need (by default each needs the one before it, and the last needs all of them).
+   The plan stops as *Blocked* only when nothing more can run, and tells you what
+   is done, what is parked and what waited for it. In **Live**, retry one parked
+   step or skip it from its banner. You are told once when a step is parked, when
+   the run ends with steps waiting for you and when the plan is done.
 
 You can close the chat and come back: the **Plans** button lists every plan and
 how far it got, and a plan that was running when the backend restarted keeps its
