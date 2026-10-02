@@ -532,4 +532,40 @@ public sealed partial class PlanRunnerTests
         Assert.Equal("dotnet build", after.Steps[0].Verify);
         Assert.True(after.Events!.Count(e => e.Kind is RunEventKind.CheckFailed or RunEventKind.FinalValidationFailed) >= 4);
     }
+
+    [Fact]
+    public async Task A_check_the_workers_shell_refuses_to_run_because_scripts_are_blocked_goes_through_cmd_and_nobody_changes_the_machine()
+    {
+        // Measured on a real worker: PowerShell's execution policy blocked npm.ps1, and the model that was left to deal with
+        // it changed the account's policy. The fix is the same command through cmd, decided by the audit, not by the model.
+        WriteProject("""{"scripts":{"test":"node --test"}}""");
+        PlanRecord plan = HealPlan("npm run test");
+        const string Blocked = "Exit code: 1\n--- stdout ---\n\n--- stderr ---\nnpm : File C:\\Program Files\\nodejs\\npm.ps1 cannot be loaded because running scripts is disabled on this system. " +
+                               "For more information, see about_Execution_Policies.\nAt line:1 char:1\n+ CategoryInfo : SecurityError: (:) [], PSSecurityException";
+        FakeStepAgent agent = Healer(_ => FakeStepAgent.Proposes("cmd /c \"npm run test\"", "PowerShell's execution policy blocks npm.ps1"));
+        (FleetOptions options, FleetHealthMonitor health) = HubFleet();
+        List<string> commands = [];
+
+        await RepairRunner(agent, command =>
+        {
+            commands.Add(command);
+            return command.StartsWith("cmd /c", StringComparison.Ordinal) ? Pass(command) : Blocked;
+        }, options, health).RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.Equal("cmd /c \"npm run test\"", after.Steps[0].Verify);
+        Assert.Equal("npm run test", after.Steps[0].OriginalVerify);
+        Assert.Equal(["npm run test", "cmd /c \"npm run test\""], commands);
+        PlanRunEvent healed = Assert.Single(after.Events!, e => e.Kind == RunEventKind.CheckHealed);
+        Assert.Contains("Same programs and arguments", healed.Detail);
+        Assert.Contains("cannot run the check as written", healed.Detail);
+        // No round was spent on it, and the audit was told what is allowed and what never is.
+        Assert.Equal(1, after.Steps[0].Attempts);
+        Assert.DoesNotContain(after.Events!, e => e.Kind == RunEventKind.CheckFailed);
+        FakeAuditCall audit = Assert.Single(agent.Audits);
+        Assert.Contains("running scripts is disabled", audit.Message);
+        Assert.Contains("cmd /c", audit.Message);
+        Assert.Contains("Never change a security setting", audit.Message);
+    }
 }

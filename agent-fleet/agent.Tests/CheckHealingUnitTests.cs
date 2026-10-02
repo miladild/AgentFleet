@@ -31,6 +31,9 @@ public sealed class CheckDefectsTests : IDisposable
     [InlineData("The filename, directory name, or volume label syntax is incorrect.")]
     [InlineData("sh: 1: Syntax error: \"&&\" unexpected")]
     [InlineData("bash: -c: line 1: syntax error near unexpected token `&&'")]
+    [InlineData(@"npm : File C:\Program Files\nodejs\npm.ps1 cannot be loaded because running scripts is disabled on this system. For more information, see about_Execution_Policies.")]
+    [InlineData(@"File C:\x\tool.ps1 is not digitally signed. You cannot run this script on the current system.")]
+    [InlineData("+ CategoryInfo : SecurityError: (:) [], PSSecurityException")]
     public void A_command_the_shell_cannot_parse_is_a_defect(string output)
     {
         CheckDefect? defect = CheckDefects.FromOutput("npm run build && npm test", output, _project, [StepNaming()]);

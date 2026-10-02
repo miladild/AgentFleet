@@ -65,6 +65,68 @@ public sealed class PlanRunnerToolPolicyTests
     }
 
     [Theory]
+    // Measured on a real worker: a stuck model set the limited account's execution policy so that a blocked npm script would run.
+    [InlineData("Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned")]
+    [InlineData("Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass")]
+    [InlineData("powershell -Command \"Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass\"")]
+    [InlineData("pwsh -NoProfile -c set-executionpolicy bypass; npm test")]
+    [InlineData("Set-MpPreference -DisableRealtimeMonitoring $true")]
+    [InlineData(@"Add-MpPreference -ExclusionPath C:\work")]
+    [InlineData("netsh advfirewall set allprofiles state off")]
+    [InlineData("New-NetFirewallRule -DisplayName x -Direction Inbound -LocalPort 3000 -Action Allow")]
+    [InlineData(@"reg add HKCU\Software\Demo /v A /d 1")]
+    [InlineData(@"reg.exe delete HKLM\Software\Demo /f")]
+    [InlineData(@"Set-ItemProperty -Path HKCU:\Software\Demo -Name A -Value 1")]
+    [InlineData("schtasks /create /tn x /tr calc.exe /sc daily")]
+    [InlineData("Register-ScheduledTask -TaskName x -Action $a")]
+    [InlineData("sc config Spooler start= disabled")]
+    [InlineData(@"New-Service -Name x -BinaryPathName c:\x.exe")]
+    [InlineData("net user bob pass /add")]
+    [InlineData("net localgroup administrators bob /add")]
+    [InlineData("setx PATH \"%PATH%;C:\\tools\"")]
+    [InlineData("[Environment]::SetEnvironmentVariable('PATH', 'x', 'User')")]
+    [InlineData("icacls . /grant Everyone:F")]
+    [InlineData("takeown /f build")]
+    [InlineData("npm install -g typescript")]
+    [InlineData("npm i --global eslint")]
+    [InlineData("yarn global add serve")]
+    [InlineData(@"npm config set prefix C:\tools")]
+    public void A_command_that_changes_a_security_setting_or_the_machines_configuration_is_refused(string command)
+    {
+        string? refusal = PlanRunnerToolPolicy.CommandRefusal(command);
+        Assert.NotNull(refusal);
+        Assert.Contains("security setting or the configuration of the machine", refusal);
+        Assert.NotNull(PlanRunnerToolPolicy.Refusal("run_command", command));
+    }
+
+    [Theory]
+    // Looking is fine, and so is everything a check does inside the project.
+    [InlineData("Get-ExecutionPolicy -List")]
+    [InlineData("Get-ExecutionPolicy")]
+    [InlineData("cmd /c \"npm run test\"")]
+    [InlineData("npm install --no-audit")]
+    [InlineData("npm ci --ignore-scripts")]
+    [InlineData("npm run build -- --global-name=Demo")]
+    [InlineData("npm config get prefix")]
+    [InlineData("node -e \"console.log(process.env.PATH)\"")]
+    [InlineData(@"reg query HKCU\Software\Demo")]
+    [InlineData("sc query Spooler")]
+    [InlineData("dotnet tool restore")]
+    [InlineData("python -m venv .venv")]
+    [InlineData("net use")]
+    public void Looking_at_the_machine_and_ordinary_project_commands_are_not_refused(string command) =>
+        Assert.Null(PlanRunnerToolPolicy.CommandRefusal(command));
+
+    [Fact]
+    public void An_approved_check_that_changes_the_machine_is_refused_before_it_runs()
+    {
+        // The same rule stands in front of the plan's own checks, so a check cannot be the way in.
+        Assert.NotNull(PlanRunnerToolPolicy.CommandRefusal("Set-ExecutionPolicy Bypass; npm test"));
+        string? reason = PlanReview.CheckProblems(@"C:\p", [new PlanStepInput("a", "d", [], "Set-ExecutionPolicy Bypass; npm test", "standard")], 0, _ => true).FirstOrDefault();
+        Assert.Contains("not safe for unattended retries", reason);
+    }
+
+    [Theory]
     [InlineData("cd .. && npm test")]
     [InlineData("type ..\\other\\notes.txt")]
     [InlineData("cat ../other/notes.txt")]
