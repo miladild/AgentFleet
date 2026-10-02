@@ -39,6 +39,37 @@ internal sealed class WebhookPlanNotifier(HttpClient client, string url, ILogger
 {
     public static readonly TimeSpan Timeout = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// The handler a notifier should use. The name is resolved again here, at the moment of connecting, and the connection is made
+    /// to an address that was checked: a name whose answer changes between a check and the connection cannot reach a public address.
+    /// </summary>
+    public static SocketsHttpHandler CreateHandler() => new()
+    {
+        AllowAutoRedirect = false,
+        UseProxy = false,
+        ConnectCallback = async (context, cancellationToken) =>
+        {
+            IPAddress[] addresses = await Dns.GetHostAddressesAsync(context.DnsEndPoint.Host, cancellationToken);
+            IPAddress? target = addresses.FirstOrDefault(IsPrivate);
+            if (target is null || addresses.Any(address => !IsPrivate(address)))
+            {
+                throw new HttpRequestException("The notice address is not on the private network (the fleet is LAN-only).");
+            }
+
+            var socket = new Socket(target.AddressFamily, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+            try
+            {
+                await socket.ConnectAsync(new IPEndPoint(target, context.DnsEndPoint.Port), cancellationToken);
+                return new NetworkStream(socket, ownsSocket: true);
+            }
+            catch
+            {
+                socket.Dispose();
+                throw;
+            }
+        }
+    };
+
     /// <summary>Why a URL cannot be a notice address, or null when it can (the name is resolved later, when a notice is sent).</summary>
     public static string? Problem(string? url)
     {
@@ -134,8 +165,9 @@ internal sealed class WebhookPlanNotifier(HttpClient client, string url, ILogger
                 logger.LogWarning("The plan notice to {Host} was answered with HTTP {Status}.", uri.Host, (int)response.StatusCode);
             }
         }
-        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or SocketException or InvalidOperationException)
+        catch (Exception exception)
         {
+            // Fire and forget: whatever goes wrong here is logged and goes no further.
             logger.LogWarning("The plan notice could not be sent: {Message}", exception.Message);
         }
     }

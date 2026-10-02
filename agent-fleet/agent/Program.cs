@@ -777,7 +777,7 @@ if (!string.IsNullOrWhiteSpace(fleetConfigStore.Current.NotifyUrl))
     else
     {
         planNotifier = new WebhookPlanNotifier(
-            new HttpClient(new HttpClientHandler { AllowAutoRedirect = false, UseProxy = false }) { Timeout = WebhookPlanNotifier.Timeout },
+            new HttpClient(WebhookPlanNotifier.CreateHandler()) { Timeout = WebhookPlanNotifier.Timeout },
             fleetConfigStore.Current.NotifyUrl.Trim(),
             loggerFactory.CreateLogger("AgentFleet.PlanNotices"));
     }

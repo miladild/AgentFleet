@@ -118,13 +118,11 @@ internal static partial class PlanFailure
 
         if (exception is not null)
         {
-            return exception is UnauthorizedAccessException || EnvironmentFailure().IsMatch(evidence)
-                ? FailureClass.Environment
-                : FailureClass.Unknown;
+            // An environment pattern in the evidence was already answered above.
+            return exception is UnauthorizedAccessException ? FailureClass.Environment : FailureClass.Unknown;
         }
 
         if (CheckSyntaxError().IsMatch(evidence)) return FailureClass.CheckDefect;
-        if (EnvironmentFailure().IsMatch(evidence)) return FailureClass.Environment;
         if (MissingCheckInput().IsMatch(evidence)) return FailureClass.CheckDefect;
 
         FailureFingerprint current = FailureSignature(checkOutput);

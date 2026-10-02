@@ -61,7 +61,7 @@ internal static partial class PlanRunnerToolPolicy
         |\bnet(?:1)?\s+(?:user|localgroup|accounts)\b|\b(?:New|Set|Remove)-LocalUser\b|\b(?:Add|Remove)-LocalGroupMember\b
         |\bsetx(?:\.exe)?\b|\bSetEnvironmentVariable\s*\([^)]*,\s*['""]?(?:User|Machine)\b
         |\b(?:icacls|takeown|cacls)(?:\.exe)?\b|\bSet-Acl\b
-        |\b(?:npm|pnpm|yarn|bun)\s+(?:\S+\s+)*(?:-g|--global|--location[= ]global)(?=\s|$)|\byarn\s+global\b|\bnpm\s+config\s+set\b")]
+        |\b(?:npm|pnpm|yarn|bun)\s+(?:(?!--(?:\s|$))\S+\s+)*(?:-g|--global|--location[= ]global)(?=\s|$)|\byarn\s+global\b|\bnpm\s+config\s+set\b")]
     private static partial Regex MachineChange();
 
     [GeneratedRegex(@"\b(?:git(?:\.exe)?|gh(?:\.exe)?)\b", RegexOptions.IgnoreCase)]

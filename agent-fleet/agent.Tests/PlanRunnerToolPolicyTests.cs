@@ -108,6 +108,11 @@ public sealed class PlanRunnerToolPolicyTests
     [InlineData("npm ci --ignore-scripts")]
     [InlineData("npm run build -- --global-name=Demo")]
     [InlineData("npm config get prefix")]
+    // After a standalone -- the flags are the script's own: mocha's -g is a grep, not npm's global flag.
+    [InlineData("npm test -- -g \"slow\"")]
+    [InlineData("npm run test -- -g foo")]
+    [InlineData("pnpm test -- --global-setup=x")]
+    [InlineData("yarn test -- -g x")]
     [InlineData("node -e \"console.log(process.env.PATH)\"")]
     [InlineData(@"reg query HKCU\Software\Demo")]
     [InlineData("sc query Spooler")]

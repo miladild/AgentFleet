@@ -142,6 +142,28 @@ public sealed class CheckGuardTests : IDisposable
         Assert.True(Judge("node src/index.js; npm run dev", "node src/index.js; npm run build").Accepted);
     }
 
+    [Theory]
+    // The exit code of a chain is its last command's: a harmless command at the end would make the check pass whatever the tests did.
+    [InlineData("npm run build; ls")]
+    [InlineData("npm run build || dir")]
+    [InlineData("npm run build | cat")]
+    [InlineData("npm run build && type package.json")]
+    [InlineData("node --test; rem done")]
+    [InlineData("npm run build; Get-Date")]
+    [InlineData("npm run build; Write-Host ok")]
+    public void A_harmless_command_added_after_the_tests_is_refused(string proposal)
+    {
+        CheckVerdict verdict = Judge("npm run dev", proposal);
+        Assert.False(verdict.Accepted, proposal);
+        Assert.Contains("which the original check did not run", verdict.Reason);
+    }
+
+    [Fact]
+    public void A_harmless_command_the_original_already_ran_may_stay()
+    {
+        Assert.True(Judge("echo start; npm run dev", "echo start; npm run build").Accepted);
+    }
+
     [Fact]
     public void A_shell_wrapper_does_not_hide_what_runs()
     {

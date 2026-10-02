@@ -8,6 +8,16 @@ namespace AgentFleet;
 /// </summary>
 internal static class PlanGraph
 {
+    /// <summary>
+    /// The step numbers in a piece of text ("1, 3", "Step 1 and step 3"). A run of digits too long to be a step number is read as
+    /// one that is not in the plan, so the review says so instead of the parse failing.
+    /// </summary>
+    public static int[] ParseStepNumbers(string? text) =>
+        System.Text.RegularExpressions.Regex.Matches(text ?? string.Empty, @"\d+")
+            .Select(match => match.Value.Length > 6 ? int.MaxValue : int.Parse(match.Value))
+            .Distinct()
+            .ToArray();
+
     /// <summary>The ids this step waits for: its own list when it has one, else the default; the last step always waits for all.</summary>
     public static IReadOnlyList<int> DependenciesOf(IReadOnlyList<PlanStep> steps, PlanStep step)
     {

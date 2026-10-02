@@ -331,6 +331,27 @@ public sealed class PlanGraphTests : PlanTestBase
     }
 
     [Fact]
+    public void A_step_number_too_long_to_be_a_step_is_a_step_that_is_not_in_the_plan_and_never_a_crash()
+    {
+        Assert.Equal([1, 3], PlanGraph.ParseStepNumbers("Step 1, and step 3 (and 3)"));
+        Assert.Equal([int.MaxValue], PlanGraph.ParseStepNumbers("99999999999"));
+        Assert.Equal([2, int.MaxValue], PlanGraph.ParseStepNumbers("2 and 123456789012345678901234567890"));
+        Assert.Empty(PlanGraph.ParseStepNumbers(null));
+
+        IReadOnlyList<string> problems = PlanGraph.Problems([Input("a"), Input("b", dependsOn: PlanGraph.ParseStepNumbers("99999999999"))]);
+        Assert.Contains("which is not in the plan", Assert.Single(problems));
+
+        JsonElement steps = JsonSerializer.SerializeToElement(new object[]
+        {
+            new { title = "a", detail = "d", verify = "npm test" },
+            new { title = "b", detail = "d", verify = "npm test", dependsOn = new[] { "step 99999999999" } }
+        });
+        PlanTools tools = new(Store, new FakeValidator(code => new DiagramCheck(true, true, code, null)), (_, _, _) => Task.FromResult("Exit code: 0"));
+        IReadOnlyList<string> review = tools.Review(@"C:\p", steps);
+        Assert.Contains(review, problem => problem.Contains("which is not in the plan"));
+    }
+
+    [Fact]
     public void A_proposed_plan_with_a_bad_graph_is_sent_back_with_the_problems_in_the_review()
     {
         string root = Path.Combine(Path.GetTempPath(), $"fleet-graph-{Guid.NewGuid():N}");

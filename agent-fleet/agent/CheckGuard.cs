@@ -144,8 +144,10 @@ internal static partial class CheckGuard
         }
 
         // The only new things a rewrite may add are the project's own tests and builds, and a change of folder: a model
-        // reading output it did not write is not given a way to make the machine run anything else.
-        foreach (string[] added in proposed.Where(words => words[0] != "cd" && !IsValidation(words) && Substantive(words) &&
+        // reading output it did not write is not given a way to make the machine run anything else. That includes a
+        // harmless-looking last command (`npm test; ls`, `npm test || dir`, `npm test | cat`): the exit code of a chain is the
+        // last command's, so a trivial one at the end would make the check pass whatever the tests did.
+        foreach (string[] added in proposed.Where(words => words[0] != "cd" && !IsValidation(words) &&
                      !before.Any(original => original.SequenceEqual(words, StringComparer.Ordinal))))
         {
             return Reject($"It adds `{string.Join(' ', added)}`, which the original check did not run and which is not a test or a build.");

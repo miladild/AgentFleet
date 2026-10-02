@@ -98,7 +98,9 @@ export function explain(detail: string | null | undefined, step: PlanStep | null
 /** What the repair ladder did for a step since its run last started or was approved again. */
 export function ladderOf(plan: LivePlan, stepId: number | undefined): Ladder {
   const events = plan.events ?? [];
-  const boundary = events.findLastIndex((event) => event.kind === "run-started" || event.kind === "resumed" || event.kind === "retry-approved");
+  const boundary = events.findLastIndex((event) =>
+    event.kind === "run-started" || event.kind === "resumed" || event.kind === "retry-approved" ||
+    (event.kind === "step-retried" && event.stepId === stepId));
   let rounds = 0;
   let rung = 1;
   for (const event of events.slice(boundary + 1)) {
@@ -172,7 +174,8 @@ export function blockOf(plan: LivePlan): Block | null {
     };
   }
 
-  const since = events.findLastIndex((event) => event.kind === "run-started" || event.kind === "resumed");
+  const since = events.findLastIndex((event) =>
+    event.kind === "run-started" || event.kind === "resumed" || (event.kind === "step-retried" && event.stepId === step?.id));
   const machines: string[] = [];
   for (const event of events.slice(Math.max(0, since))) {
     const machine = event.modelNode ?? event.node;
