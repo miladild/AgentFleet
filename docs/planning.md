@@ -31,7 +31,8 @@ steps, and checks each step with a real command instead of trusting itself.
    revised plan. Typing `approve` also works. (`approve the idea but change step 3` counts as feedback, not approval.)
    New plans allow hub-model rescue: when a step's worker cannot get a failing check to pass, the hub model takes over (see
    the repair ladder below). Choose **Worker only** to keep every model call on the step's workers. Existing plans keep
-   their saved recovery scope. Each step also says whether it
+   their saved recovery scope. **Broken checks** decides what happens when a step's check is itself broken rather than
+   failing (see below): **Fix automatically**, the default, or **Ask me first**. Each step also says whether it
    may resume automatically after a backend restart; steps not marked restart-safe stop for review if interrupted.
    In the web UI, you can optionally check **Save a Markdown copy** before approving; it writes the plan into the project
    folder shown on the card. The default is off.
@@ -60,6 +61,33 @@ steps, and checks each step with a real command instead of trusting itself.
      waits for a machine. A model call is cut short when it would run past that time or past the plan's run deadline, and a
      step that has used its working time without passing stops with the log's **step time limit** line and everything it
      tried; retrying the step gives it a fresh clock.
+  - **A broken check is not a failing check.** Fleet tells them apart. A failing test, an assertion or a compiler error is a
+    verdict: only the model changes the code, and the check is never edited. A check that cannot run or finish is a defect of
+    the plan, and spending a round on it only wastes the night. The signs are a command that never exits (a dev server, a
+    watcher), a command the machine's shell cannot parse (Windows PowerShell 5.1 has no `&&`), a program or file the check
+    names that is not there, a check stopped at its time limit twice with the same output, and a model's `report_blocker`
+    call (`check_cannot_pass`) whose evidence is really in the check's output. A sign only starts an **audit**: the hub's
+    model when the plan allows hub rescue (otherwise the model of the worker that did the work) reads the project, with
+    read-only tools, and proposes one replacement with `propose_check`; it may also answer that the check is fine. A fixed
+    set of rules, not the model, decides whether the proposal is used. It must be one line that finishes, name only
+    programs and files that exist (or that a step creates), and not pass whatever happens (`echo`, `true`, `exit 0`,
+    version probes, `|| true`). It is either the same programs and arguments written so that the shell accepts them, or it
+    still runs the project's tests, typecheck or build and keeps everything the original ran. The last step's check must
+    still be the whole-project build and tests. A refused proposal gets one more try with the reason; after that the step
+    stops with what was refused and why. A step's check changes at most twice. The original is kept on the step
+    (`originalVerify`, shown on its card), the run log has a **check healed** line with the check before and after, and the
+    report lists **Checks changed by Fleet**. A healed check runs again at once in the same workspace and costs no round.
+    With **Ask me first**, the step stops with the proposal instead; approve again with **Fix automatically** to apply it.
+  - **Environment doctor.** When a check fails because the machine lacks what the project itself declares (a fresh worker
+    copy has no `node_modules`), the runner repairs it once per cause and step and runs the check again without costing a
+    round. It runs `npm ci` (`npm install` when there is no lock file) when a package declared in `package.json` is missing,
+    `dotnet restore` when the tool asks for a restore, and `pip install -r requirements.txt` only into the project's own
+    virtual environment. These are commands from a fixed list, run in the project folder as the limited worker account:
+    never a global install, never elevation, never a package the project does not declare (that is for the model to add).
+    A yarn or pnpm project, a Python project without a virtual environment and a missing `.env` are not repaired: the
+    check's output the model sees ends with a note saying exactly what is missing. Fleet does not create a `.env` from
+    `.env.example` because worker copies exclude `.env` files and a created one would sync back into your project. Each
+    repair is an **environment repaired** line in the run log and a section of the report.
     - In a Git project, the runner restores a tracked file that a step deletes when no plan step names it, and reports
       the path (a test once deleted the project's own config file on every run). The runner does not commit between steps;
       read-only Git inspection is available through its dedicated tool, while shell Git commands are blocked. The fleet notes the changed and new files before

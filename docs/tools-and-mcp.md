@@ -23,6 +23,7 @@ This page lists what it has, how to switch tools off, and how to add more.
 | `web_fetch` | Fetches a page and returns its readable text. |
 | `http_request` | Calls an HTTP API with any method, headers and body, and returns the status and the raw body (JSON pretty-printed). For trying a local server you are building or any REST API. |
 | `propose_plan`, `get_plan` | Plan mode only. See [planning.md](planning.md). |
+| `report_blocker`, `propose_check` | Offered only to the plan runner, never in chat: `report_blocker` lets a step's model say that the check cannot pass or that the machine is what stops the work (a hint the runner verifies against the check's own output), and `propose_check` is how the auditor of a broken check proposes a replacement. See [planning.md](planning.md). |
 
 All file and command tools work on **the hub machine's own disk**, as the account the backend runs as. Give full paths.
 
