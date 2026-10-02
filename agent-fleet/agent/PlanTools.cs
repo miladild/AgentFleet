@@ -1064,8 +1064,7 @@ internal sealed partial class PlanTools
             JsonValueKind.String or JsonValueKind.Number => [element.ToString()],
             _ => []
         };
-        int[] numbers = parts.SelectMany(part => System.Text.RegularExpressions.Regex.Matches(part, @"\d+").Select(match => int.Parse(match.Value)))
-            .Distinct().ToArray();
+        int[] numbers = parts.SelectMany(PlanGraph.ParseStepNumbers).Distinct().ToArray();
         return numbers.Length > 0 ? numbers : null;
     }
 

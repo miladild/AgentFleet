@@ -92,6 +92,29 @@ public sealed class PlanNoticeTests : PlanTestBase
     }
 
     [Fact]
+    public async Task The_handler_refuses_to_connect_to_a_public_address_before_any_connection_is_made()
+    {
+        // The check is made where the connection is made, so a name whose answer changes after an earlier check cannot get through.
+        using var client = new HttpClient(WebhookPlanNotifier.CreateHandler()) { Timeout = TimeSpan.FromSeconds(5) };
+        HttpRequestException refused = await Assert.ThrowsAsync<HttpRequestException>(() => client.GetAsync("http://8.8.8.8:9/hook"));
+        Assert.Contains("private network", refused.InnerException?.Message ?? refused.Message);
+        Assert.False(client.DefaultRequestHeaders.Contains("Location"));
+    }
+
+    private sealed class BrokenHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            throw new InvalidCastException("something unexpected");
+    }
+
+    [Fact]
+    public async Task Whatever_goes_wrong_while_sending_stays_inside_the_task()
+    {
+        var notifier = new WebhookPlanNotifier(new HttpClient(new BrokenHandler()), "http://127.0.0.1:1/notify", NullLogger.Instance);
+        await notifier.SendAsync(Notice());
+    }
+
+    [Fact]
     public async Task A_failing_webhook_is_logged_and_never_thrown_into_the_run()
     {
         var handler = new RecordingHandler(HttpStatusCode.InternalServerError);

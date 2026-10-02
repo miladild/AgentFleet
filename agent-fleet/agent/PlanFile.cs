@@ -279,7 +279,7 @@ internal static partial class PlanFile
                     group = NoneToNull(Unquote(value));
                     break;
                 case "depends" or "dependson":
-                    int[] numbers = Regex.Matches(value, @"\d+").Select(match => int.Parse(match.Value)).Distinct().ToArray();
+                    int[] numbers = PlanGraph.ParseStepNumbers(value);
                     dependsOn = numbers.Length > 0 ? numbers : null;
                     break;
                 case "files":
