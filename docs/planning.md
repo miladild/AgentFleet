@@ -51,8 +51,15 @@ steps, and checks each step with a real command instead of trusting itself.
      worker or hub edits and block instead of overwriting. Existing worker files that differ from the hub are preserved and
      staging stops. External web, HTTP, MCP/custom, GitHub CLI, publishing, deployment, and known remote-shell commands are blocked
      at the tool boundary. **Only a passing check and successful sync mark a step done.**
-   - An attempt ends after 25 rounds of tool calls (`FLEET_PLAN_STEP_TOOL_ROUNDS`) or 20 minutes, whichever comes
-     first, so a model going round in circles cannot hold a machine; the step's check then decides.
+   - A model turn ends after 25 rounds of tool calls (`FLEET_PLAN_STEP_TOOL_ROUNDS`) or 20 minutes, whichever comes
+     first, so a model going round in circles cannot hold a machine; the step's check then decides. A turn also ends early
+     when the model makes the same call and gets the same error back: the third time the result carries a short note ("this is
+     not working, try a different approach"), the fifth ends the turn. Only failing calls count, and timings in the error
+     text do not make two failures different.
+   - A step has a **working time** of 45 minutes (`FLEET_PLAN_STEP_MINUTES`): its model calls and its checks, not the time it
+     waits for a machine. A model call is cut short when it would run past that time or past the plan's run deadline, and a
+     step that has used its working time without passing stops with the log's **step time limit** line and everything it
+     tried; retrying the step gives it a fresh clock.
     - In a Git project, the runner restores a tracked file that a step deletes when no plan step names it, and reports
       the path (a test once deleted the project's own config file on every run). The runner does not commit between steps;
       read-only Git inspection is available through its dedicated tool, while shell Git commands are blocked. The fleet notes the changed and new files before
@@ -71,7 +78,12 @@ steps, and checks each step with a real command instead of trusting itself.
 
     A round that changed nothing (no edit, and no file changed), or that leaves the same failures with no file changed, does
     not wait for its three rounds: the step climbs at once. Every climb is a **rung changed** line in the run log with its
-    reason. When the last rung has had its rounds, the plan stops as **Blocked**. The runner executes the last step's approved
+    reason. A round that leaves the step worse than its best round so far (more failing names, or code that stopped
+    building) is **undone**: the runner puts the project's changed and new files back as they were after the best round
+    before the next round, tells the model what it broke, and logs **round rolled back**. Lock files and build caches that a
+    round only rewrote as a side effect do not count as progress. When the last rung has had its rounds, or the working time
+    is used, the plan stops as **Blocked** with the project left at the best state it reached. (The best state is kept in
+    memory: a backend restart forgets it, and the step goes on from the files as they are.) The runner executes the last step's approved
     whole-project validation on the worker after edits are synced, records the source snapshot ID and bounded command output,
     and gives failures the same repair rounds. The requested task tier stays fixed. If worker staging has a connection
     failure before model tools or edits run, Fleet can move to another ready worker at the same tier; it waits for the original

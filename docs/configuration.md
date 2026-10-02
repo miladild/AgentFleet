@@ -146,6 +146,7 @@ set them in your user environment variables. For a Windows service set them on t
 | `FLEET_HEALTH_CACHE_SECONDS` | 10 | How often nodes are probed (1 to 300) |
 | `SHELL_EXECUTION_TIMEOUT_SECONDS` | 120 | How long one `run_command` may run |
 | `FLEET_PLAN_STEP_TOOL_ROUNDS` | 25 | How many rounds of tool calls one model turn at a plan step may make before it ends and the step's check decides (5 to 200) |
+| `FLEET_PLAN_STEP_MINUTES` | 45 | How long one plan step may work (its model calls and checks, not waiting for a machine) before it stops with what it tried (5 to 480) |
 | `FLEET_PLAN_ROUNDS_PER_RUNG` | 3 | How many rounds (the model works, then the approved check runs) a plan step gets on each rung of the repair ladder before it climbs to the next (1 to 10) |
 | `FLEET_CONTEXT_LENGTH` | 32768 | The most tokens of context a machine is asked for when it does not set `contextLength` |
 | `SANDBOX_*` | | The same settings as the `sandbox` section, used when the file does not give them |
