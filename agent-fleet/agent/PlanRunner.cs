@@ -495,6 +495,9 @@ internal sealed partial class PlanRunner
                 }
 
                 runCancellation.Token.ThrowIfCancellationRequested();
+
+                // A step the user retried while the run went on starts from what the log says went wrong, as one retried at approval does.
+                _lastFailures[planId] = LastFailures(current);
                 if (!await RunStepAsync(current, step, runCancellation.Token, firstAttempt: step.Attempts + 1,
                         previousFailure: LastFailure(planId, step.Id)) &&
                     _store.Get(planId)!.Status == PlanStatus.Blocked)
