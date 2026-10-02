@@ -49,6 +49,12 @@ internal static partial class PlanFailure
     [GeneratedRegex(@"(?:ParserError|UnexpectedToken|MissingEndCurlyBrace|SyntaxError|syntax error|unexpected token)", RegexOptions.IgnoreCase)]
     private static partial Regex CheckSyntaxError();
 
+    [GeneratedRegex(@"(?:\bSyntaxError\b|\bIndentationError\b|\bParserError\b|\berror\s+(?:CS|TS)\d+|\bBuild FAILED\b|could not compile|compilation (?:failed|error))", RegexOptions.IgnoreCase)]
+    private static partial Regex BuildBrokenOutput();
+
+    [GeneratedRegex(@"^(?:CS|TS|MSB|NETSDK)\d+$", RegexOptions.IgnoreCase)]
+    private static partial Regex BuildErrorCode();
+
     [GeneratedRegex(@"(?:llama-server(?:\.exe)?[^\r\n]{0,80}not found|not found[^\r\n]{0,80}llama-server)", RegexOptions.IgnoreCase)]
     private static partial Regex MissingLlamaServer();
 
@@ -145,6 +151,13 @@ internal static partial class PlanFailure
         if (!editToolCalled && filesChanged == 0) return FailureClass.NoOp;
         return FailureClass.CodeProgress;
     }
+
+    /// <summary>The check printed compile, syntax or build errors: the code does not build, so no test result is to be trusted.</summary>
+    internal static bool BuildBroken(string? checkOutput) =>
+        !string.IsNullOrEmpty(checkOutput) && BuildBrokenOutput().IsMatch(AnsiEscape().Replace(checkOutput, string.Empty));
+
+    /// <summary>A failure signature item that is a compiler or build error code (CS1002, TS2322) and not a failing test.</summary>
+    internal static bool IsBuildErrorCode(string item) => BuildErrorCode().IsMatch(item);
 
     internal static bool IsInfrastructure(Exception? exception, string? evidence = null)
     {

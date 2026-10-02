@@ -532,25 +532,11 @@ void RecordToolCall(FunctionInvocationContext context, string toolName, string r
     contextJournal.RecordToolExecution(context.CallContent?.CallId, toolName, arguments, result, isError || ToolReturnedError(result));
 }
 
-bool ToolReturnedError(string result)
-{
-    string output = result.TrimStart();
-    if (output.StartsWith("Error:", StringComparison.OrdinalIgnoreCase) ||
-        output.StartsWith("Failed:", StringComparison.OrdinalIgnoreCase))
-    {
-        return true;
-    }
+bool ToolReturnedError(string result) => ToolLoopGuard.IsError(result);
 
-    const string exitCodePrefix = "Exit code:";
-    if (output.StartsWith(exitCodePrefix, StringComparison.OrdinalIgnoreCase))
-    {
-        int end = output.IndexOfAny(['\r', '\n']);
-        string value = (end < 0 ? output[exitCodePrefix.Length..] : output[exitCodePrefix.Length..end]).Trim();
-        return int.TryParse(value, out int exitCode) && exitCode != 0;
-    }
-
-    return false;
-}
+// A plan step's model that makes the same call and gets the same error back is told so on the third time and stopped on the
+// fifth (see ToolLoopGuard).
+Microsoft.Extensions.Logging.ILogger toolLoopLogger = loggerFactory.CreateLogger("AgentFleet.ToolLoop");
 
 // How many tool rounds one attempt at a plan step gets. Measured: a small worker wrote and ran the same test file for more
 // than ten minutes, and the hub once spent 34 rounds on one step. After the budget the model's turn ends and the step's own
@@ -558,6 +544,11 @@ bool ToolReturnedError(string result)
 int planStepToolRounds = int.TryParse(builder.Configuration["FLEET_PLAN_STEP_TOOL_ROUNDS"], out int stepRounds) && stepRounds is >= 5 and <= 200
     ? stepRounds
     : 25;
+
+// How long one plan step may work (model calls and checks, not waiting for a machine) before it stops with what it tried.
+int planStepMinutes = int.TryParse(builder.Configuration["FLEET_PLAN_STEP_MINUTES"], out int stepMinutes) && stepMinutes is >= 5 and <= 480
+    ? stepMinutes
+    : (int)PlanRunner.DefaultStepClock.TotalMinutes;
 
 // How many rounds (model works, then the approved check runs) a step gets on each rung of the repair ladder before it
 // climbs to the next one.
@@ -632,6 +623,11 @@ IChatClient agentClient = new ChatClientBuilder(fleetClient)
             try
             {
                 object? result = await context.Function.InvokeAsync(context.Arguments, cancellationToken);
+                if (fromRunner)
+                {
+                    result = ToolLoopGuard.Apply(context, result, toolLoopLogger);
+                }
+
                 RecordToolCall(context, toolName, result?.ToString() ?? string.Empty, isError: false);
 
                 // A saved plan ends the turn. The planner has nothing left to do, but it has been seen proposing again and
@@ -748,7 +744,8 @@ var planRunner = new PlanRunner(
     recorder: new PlanContextRecorder(contextStore, planStore, loggerFactory.CreateLogger("AgentFleet.PlanContext")),
     journal: contextJournal,
     sleepGuard: new SystemSleepGuard(loggerFactory.CreateLogger("AgentFleet.Power")),
-    roundsPerRung: planRoundsPerRung);
+    roundsPerRung: planRoundsPerRung,
+    stepClock: TimeSpan.FromMinutes(planStepMinutes));
 planStore.Approved += planRunner.Enqueue;
 app.Lifetime.ApplicationStarted.Register(() => planRunner.Start(app.Lifetime.ApplicationStopping));
 

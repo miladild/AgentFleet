@@ -80,6 +80,8 @@ internal static class RunEventKind
     public const string InferenceProbePassed = "inference-probe-passed";
     public const string WorkspaceReconciled = "workspace-reconciled";
     public const string RungChanged = "rung-changed";
+    public const string RoundRolledBack = "round-rolled-back";
+    public const string StepTimeLimit = "step-time-limit";
 }
 
 /// <summary>
@@ -94,6 +96,7 @@ internal static class RunEventKind
 /// is set only when the check ran, so a restart can count the rounds that really happened.
 /// </param>
 /// <param name="ChangedFiles">The project files the round changed (the first few), where git could tell.</param>
+/// <param name="DurationSeconds">On a round-classified event: the working time of the round, its model call and its check.</param>
 internal sealed record PlanRunEvent(
     DateTimeOffset AtUtc,
     int? StepId,
@@ -112,7 +115,8 @@ internal sealed record PlanRunEvent(
     bool? EditToolCalled = null,
     int? Rung = null,
     int? Round = null,
-    IReadOnlyList<string>? ChangedFiles = null);
+    IReadOnlyList<string>? ChangedFiles = null,
+    int? DurationSeconds = null);
 
 /// <summary>
 /// A plan is a durable artifact, not chat text: it is saved as a file, shown to the user

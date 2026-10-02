@@ -131,6 +131,13 @@ internal sealed partial class PlanRunner
     private const int MaxStepContextBytesPerFile = 32 * 1024;
     private const int MaxStepContextCharacters = 48_000;
     private static readonly TimeSpan DefaultAttemptTimeout = TimeSpan.FromMinutes(20);
+
+    /// <summary>
+    /// How long a step may work (its model calls and its checks, not the time it waits for a machine) before it stops with
+    /// everything it tried: a step that cannot be fixed in this time will not be by more of the same, and the rest of the
+    /// plan, and the user, should hear about it. A retry gives the step a fresh clock.
+    /// </summary>
+    public static readonly TimeSpan DefaultStepClock = TimeSpan.FromMinutes(45);
     private static readonly char[] LineBreaks = ['\r', '\n'];
 
     private readonly FleetPlanStore _store;
@@ -156,6 +163,7 @@ internal sealed partial class PlanRunner
     private readonly Func<DateTimeOffset> _utcNow;
     private readonly ISleepGuard _sleepGuard;
     private readonly int _roundsPerRung;
+    private readonly TimeSpan _stepClock;
 
     public PlanRunner(
         FleetPlanStore store,
@@ -173,9 +181,11 @@ internal sealed partial class PlanRunner
         FleetModeService? modeService = null,
         Func<TimeSpan, CancellationToken, Task>? delayAsync = null,
         Func<DateTimeOffset>? utcNow = null,
-        int roundsPerRung = RepairLadder.DefaultRoundsPerRung)
+        int roundsPerRung = RepairLadder.DefaultRoundsPerRung,
+        TimeSpan? stepClock = null)
     {
         _roundsPerRung = Math.Max(1, roundsPerRung);
+        _stepClock = stepClock is { } clock && clock > TimeSpan.Zero ? clock : DefaultStepClock;
         _transientDelay = transientDelay ?? DefaultTransientDelay;
         _delayAsync = delayAsync ?? Task.Delay;
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
@@ -733,6 +743,8 @@ internal sealed partial class PlanRunner
         int rung = position.Rung;
         int roundsInRung = position.RoundsInRung;
         int roundsTotal = position.RoundsTotal;
+        TimeSpan worked = TimeSpan.FromSeconds(earlierEvents
+            .Where(runEvent => runEvent.Kind == RunEventKind.RoundClassified).Sum(runEvent => runEvent.DurationSeconds ?? 0));
         string? hub = _fleetOptions?.Nodes.SingleOrDefault(node => node.Fallback)?.Name;
         bool hubAllowed = hub is not null && PlanRecoveryScope.AllowsHubRescue(plan.RecoveryScope);
 
@@ -747,6 +759,8 @@ internal sealed partial class PlanRunner
         RoundOutcome? lastRound = null;
         string? handover = null;
         bool gaveUp = false;
+        StepCheckpoint? best = null;
+        RollbackNote? rollback = null;
 
         // The restart landed after the last round of a rung and before the climb was written down.
         if (roundsInRung >= _roundsPerRung)
@@ -782,13 +796,19 @@ internal sealed partial class PlanRunner
                     return false;
                 }
 
+                if (worked >= _stepClock)
+                {
+                    BlockForStepClock(plan, step, attempt, worked, deferPlanBlock, best);
+                    return false;
+                }
+
                 string tier = step.Tier;
                 int round = roundsInRung + 1;
                 string? repairMessage = null;
                 string? brief = null;
                 if (conversation.HasHistory)
                 {
-                    repairMessage = BuildRepairMessage(plan, step, lastFailure, round, lastRound, handover);
+                    repairMessage = BuildRepairMessage(plan, step, lastFailure, round, lastRound, handover, rollback);
                 }
                 else if (RepairMessages.Brief(StepEventsSinceRetry(plan.Id, step.Id)) is { Length: > 0 } earlierRounds)
                 {
@@ -797,10 +817,11 @@ internal sealed partial class PlanRunner
 
                 handover = null;
                 bool continuing = repairMessage is not null;
+                DateTimeOffset roundStarted = _utcNow();
                 ModelAttemptResult model = await RunModelAttemptAsync(
                     plan, step, attempt, lastFailure, tier, parallelGroup: false, cancellationToken: cancellationToken,
                     workspaceOverride: workspaceOverride ?? (continuing ? conversationWorkspace : null), modelMachineOverride: modelOverride,
-                    round: new RoundContext(conversation, rung, round, repairMessage, brief));
+                    round: new RoundContext(conversation, rung, round, repairMessage, brief), limit: LimitFor(plan, worked));
                 if (model.Machine is not null)
                 {
                     conversationWorkspace = model.Machine;
@@ -809,9 +830,9 @@ internal sealed partial class PlanRunner
                 if (!model.ShouldVerify)
                 {
                     model.Workspace?.Dispose();
-                    IReadOnlyList<string> failedAttemptFiles = await ChangedFilesSinceAsync(plan, model.WorkBefore, cancellationToken);
+                    WorkChange failedAttemptChange = await ChangedFilesSinceAsync(plan, model.WorkBefore, cancellationToken);
                     RoundOutcome failedRound = await RecordRoundClassifiedAsync(plan, step, attempt, model, model.Failure ?? string.Empty,
-                        passed: false, failedAttemptFiles, rung);
+                        passed: false, failedAttemptChange.Files, rung);
                     FailureClass roundClass = failedRound.Class;
                     if (model.WorkspaceFailure is { } workspaceFailure)
                     {
@@ -958,9 +979,11 @@ internal sealed partial class PlanRunner
                     model.Workspace?.Dispose();
                 }
                 long? verification = RecordCheck(plan, step, attempt, result, model.ModelNode);
+                WorkChange change = await ChangedFilesSinceAsync(plan, model.WorkBefore, cancellationToken);
+                TimeSpan roundTime = _utcNow() - roundStarted;
+                worked += roundTime;
                 RoundOutcome outcome = await RecordRoundClassifiedAsync(plan, step, attempt, model,
-                    result.Output ?? result.Message, result.Done, await ChangedFilesSinceAsync(plan, model.WorkBefore, cancellationToken),
-                    rung, round);
+                    result.Output ?? result.Message, result.Done, change.Files, rung, round, (int)Math.Ceiling(roundTime.TotalSeconds));
                 if (result.Done)
                 {
                     _tools.CommitStepDone(plan.Id, step.Id, Summarize(model.Summary));
@@ -1020,12 +1043,30 @@ internal sealed partial class PlanRunner
                     modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round);
                 plan = _store.Get(plan.Id)!;
 
+                // The best state the project has been in so far is kept; a round that leaves it worse is undone before the
+                // next one, so a repair loop cannot end up further from passing than it has been.
+                rollback = null;
+                if (change.After is { } after && RoundScore.Of(outcome.Signature, result.Output ?? result.Message) is { } score)
+                {
+                    if (best is null || !score.IsWorseThan(best.Score))
+                    {
+                        best = new StepCheckpoint(rung, round, score, outcome.Signature.Value, outcome.Signature.Items, lastFailure, after);
+                    }
+                    else
+                    {
+                        rollback = await RollBackAsync(plan, step, attempt, tier, model, rung, round, score, outcome, best, cancellationToken);
+                        if (rollback is not null)
+                        {
+                            lastFailure = best.Output;
+                        }
+                    }
+                }
+
                 lastRound = outcome;
                 roundsInRung++;
                 roundsTotal++;
                 RepairDecision decision = RepairLadder.Decide(rung, roundsInRung, _roundsPerRung, outcome.NoChange,
-                    outcome.NoOp ? "the last round made no edit and changed no file" : "the last round left the same failures and changed no file",
-                    HubRungAvailable(step, hub, hubAllowed, model.ModelNode));
+                    NoChangeReason(outcome), HubRungAvailable(step, hub, hubAllowed, model.ModelNode));
                 if (decision.Move != RepairMove.NextRound)
                 {
                     (rung, roundsInRung, modelOverride, conversationOver, gaveUp, handover) = await MoveAsync(
@@ -1045,15 +1086,18 @@ internal sealed partial class PlanRunner
 
         int attemptsUsed = _store.Get(plan.Id)?.Steps.FirstOrDefault(candidate => candidate.Id == step.Id)?.Attempts ?? 0;
         string rounds = $"{roundsTotal} round{(roundsTotal == 1 ? string.Empty : "s")} over {attemptsUsed} attempt{(attemptsUsed == 1 ? string.Empty : "s")}";
+        string kept = best is null
+            ? string.Empty
+            : $" The project is left as it was after its best round (round {best.Round}, {best.Score.Describe()}).";
         _store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, step.Id, s => s with
         {
             Status = StepStatus.Failed,
-            Note = $"Did not pass its check after {rounds}."
+            Note = $"Did not pass its check after {rounds}.{kept}"
         }) with { Status = deferPlanBlock ? PlanStatus.Running : PlanStatus.Blocked });
         if (!deferPlanBlock)
         {
             AddBlockedEvent(plan.Id, step,
-                $"Step {step.Id} ({step.Title}) did not pass its check after {rounds}: every rung of the repair ladder had its rounds.");
+                $"Step {step.Id} ({step.Title}) did not pass its check after {rounds}: every rung of the repair ladder had its rounds.{kept}");
         }
 
         return false;
@@ -1200,14 +1244,85 @@ internal sealed partial class PlanRunner
         return target;
     }
 
-    private string BuildRepairMessage(PlanRecord plan, PlanStep step, string? failure, int round, RoundOutcome? last, string? handover)
+    private string BuildRepairMessage(PlanRecord plan, PlanStep step, string? failure, int round, RoundOutcome? last, string? handover,
+        RollbackNote? rollback = null)
     {
         IReadOnlyList<string> current = last is not null
             ? last.Signature.Items
             : PlanFailure.FailureSignature(failure).Items;
         IReadOnlyList<string> previous = last is null ? [] : RepairMessages.FailingNames(last.PreviousSignature);
         return RepairMessages.Build(plan, step, failure ?? string.Empty, round, previous, current, last?.SameAsPrevious ?? false,
-            last is { FilesKnown: true } ? last.ChangedFiles : null, handover);
+            last is { FilesKnown: true } ? last.ChangedFiles : null, handover, rollback);
+    }
+
+    /// <summary>The best state the step's project has been in, as the approved check saw it, and the files as they were then.</summary>
+    private sealed record StepCheckpoint(
+        int Rung,
+        int Round,
+        RoundScore Score,
+        string Signature,
+        IReadOnlyList<string> Names,
+        string? Output,
+        PlanTools.WorkSnapshot Snapshot);
+
+    // Puts the project back to the best round's files after a round that left it worse, and writes that into the run log.
+    // Null when the files could not be put back (the log then says why); the step goes on from the files as they are.
+    private async Task<RollbackNote?> RollBackAsync(
+        PlanRecord plan,
+        PlanStep step,
+        int attempt,
+        string tier,
+        ModelAttemptResult model,
+        int rung,
+        int round,
+        RoundScore worse,
+        RoundOutcome outcome,
+        StepCheckpoint best,
+        CancellationToken cancellationToken)
+    {
+        PlanTools.WorkRestore restored = await _tools.RestoreToSnapshotAsync(plan, best.Snapshot, cancellationToken);
+        if (restored.Refusal is not null)
+        {
+            _logger.LogWarning("Plan {PlanId} step {StepId}: round {Round} left the step worse but could not be undone: {Reason}.",
+                plan.Id, step.Id, round, restored.Refusal);
+            _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.RoundRolledBack, tier, node: model.ModelNode,
+                detail: $"Round {round} left {worse.Describe()}, worse than round {best.Round}'s {best.Score.Describe()}, but it could not be undone ({restored.Refusal}). The step goes on from the files as they are.",
+                modelNode: model.ModelNode, workspaceNode: model.Machine, failureClass: "Refused", rung: rung, round: round);
+            return null;
+        }
+
+        string[] newFailures = outcome.Signature.Items.Except(best.Names, StringComparer.OrdinalIgnoreCase).ToArray();
+        string left = restored.Left.Count == 0
+            ? string.Empty
+            : $" {restored.Left.Count} changed file(s) could not be put back: {string.Join(", ", restored.Left.Take(5))}.";
+        string files = restored.Restored.Count == 0 ? "nothing needed putting back" : string.Join(", ", restored.Restored.Take(8)) + (restored.Restored.Count > 8 ? ", ..." : string.Empty);
+        string detail = $"Round {round} (rung {rung}) left {worse.Describe()} where round {best.Round} had {best.Score.Describe()}, so it was undone: " +
+                        $"{files}, as they were after round {best.Round}.{left}";
+        _logger.LogInformation("Plan {PlanId} step {StepId}: {Detail}", plan.Id, step.Id, detail);
+        _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.RoundRolledBack, tier, node: model.ModelNode, detail: detail,
+            modelNode: model.ModelNode, workspaceNode: model.Machine, failureClass: "RolledBack", failureSignature: best.Signature,
+            failureSignatureSize: best.Score.Failures, filesChanged: restored.Restored.Count, rung: rung, round: round,
+            changedFiles: restored.Restored);
+        return new RollbackNote(round, worse, best.Round, best.Score, newFailures, restored.Restored);
+    }
+
+    private static string NoChangeReason(RoundOutcome outcome)
+    {
+        string apart = outcome.ChangedFiles.Count > 0 && outcome.MeaningfulFiles.Count == 0 ? " apart from lock or generated files" : string.Empty;
+        return outcome.NoOp
+            ? $"the last round made no edit and changed no file{apart}"
+            : $"the last round left the same failures and changed no file{apart}";
+    }
+
+    private static bool StepNames(PlanRecord plan, PlanStep step, string relative)
+    {
+        if (string.IsNullOrWhiteSpace(plan.WorkingDirectory))
+        {
+            return false;
+        }
+
+        string full = Path.GetFullPath(Path.Combine(plan.WorkingDirectory, relative.Replace('/', Path.DirectorySeparatorChar)));
+        return FleetPlanContext.DeclaredPaths(plan, step).Any(declared => FleetPlanContext.Names(declared, full));
     }
 
     /// <summary>What one round did, as the repair ladder reads it.</summary>
@@ -1216,20 +1331,46 @@ internal sealed partial class PlanRunner
         FailureFingerprint Signature,
         string? PreviousSignature,
         IReadOnlyList<string> ChangedFiles,
+        IReadOnlyList<string> MeaningfulFiles,
         bool FilesKnown,
         bool EditToolCalled)
     {
         public bool SameAsPrevious => PreviousSignature is not null && Signature.Size > 0 &&
             string.Equals(PreviousSignature, Signature.Value, StringComparison.Ordinal);
 
-        // Where git could not tell, an edit tool call stands for "changed something".
-        public bool Changed => FilesKnown ? ChangedFiles.Count > 0 : EditToolCalled;
+        // Where git could not tell, an edit tool call stands for "changed something". Lock files and build caches do not count.
+        public bool Changed => FilesKnown ? MeaningfulFiles.Count > 0 : EditToolCalled;
 
         public bool NoOp => !EditToolCalled && !Changed;
 
         public bool Stall => SameAsPrevious && !Changed;
 
         public bool NoChange => NoOp || Stall;
+    }
+
+    /// <summary>A model call is stopped sooner than the usual attempt timeout when the step or the plan is about to run out of time.</summary>
+    /// <param name="Reason">Said in the run log: why the call was stopped when it was ("the step's working time ran out").</param>
+    private sealed record CallLimit(TimeSpan Duration, string Reason);
+
+    private CallLimit? LimitFor(PlanRecord plan, TimeSpan worked)
+    {
+        CallLimit? limit = null;
+        TimeSpan left = _stepClock - worked;
+        if (left < _attemptTimeout)
+        {
+            limit = new CallLimit(left, "the step's working time ran out");
+        }
+
+        if (plan.RunDeadlineUtc is { } deadline)
+        {
+            TimeSpan untilDeadline = deadline - _utcNow();
+            if (untilDeadline < (limit?.Duration ?? _attemptTimeout))
+            {
+                limit = new CallLimit(untilDeadline, "the plan's run deadline arrived");
+            }
+        }
+
+        return limit is null ? null : limit with { Duration = limit.Duration < TimeSpan.FromSeconds(1) ? TimeSpan.FromSeconds(1) : limit.Duration };
     }
 
     /// <summary>The conversation a model call belongs to, and where on the repair ladder it is.</summary>
@@ -1375,13 +1516,19 @@ internal sealed partial class PlanRunner
         bool passed,
         IReadOnlyList<string> changedFiles,
         int? rung = null,
-        int? round = null)
+        int? round = null,
+        int? durationSeconds = null)
     {
-        int filesChanged = changedFiles.Count;
+        // A package manager's lock file or a build cache rewritten as a side effect is not progress on the step.
+        IReadOnlyList<string> meaningful = changedFiles
+            .Where(file => !RepairLadder.IsIncidentalFile(file) || StepNames(plan, step, file))
+            .ToArray();
+        int filesChanged = meaningful.Count;
         PlanRecord current = _store.Get(plan.Id) ?? plan;
         FailureRound[] history = (current.Events ?? [])
-            .Where(runEvent => runEvent.StepId == step.Id && runEvent.Kind == RunEventKind.RoundClassified &&
-                runEvent.FailureSignatureSize > 0 && !string.Equals(runEvent.FailureClass, "Passed", StringComparison.Ordinal))
+            .Where(runEvent => runEvent.StepId == step.Id && runEvent.FailureSignatureSize > 0 &&
+                ((runEvent.Kind == RunEventKind.RoundClassified && !string.Equals(runEvent.FailureClass, "Passed", StringComparison.Ordinal)) ||
+                 (runEvent.Kind == RunEventKind.RoundRolledBack && string.Equals(runEvent.FailureClass, "RolledBack", StringComparison.Ordinal))))
             .Select(runEvent => new FailureRound(runEvent.FailureSignature, runEvent.FailureSignatureSize ?? 0,
                 runEvent.FilesChanged ?? 0, runEvent.EditToolCalled ?? false))
             .ToArray();
@@ -1392,43 +1539,51 @@ internal sealed partial class PlanRunner
                 ? FailureClass.Infra
                 : PlanFailure.Classify(model.FailureException, failureOutput, history, filesChanged, model.EditToolCalled);
         string failureClass = passed ? "Passed" : classification.ToString();
-        string files = filesChanged == 0
+        string files = changedFiles.Count == 0
             ? "0"
-            : $"{filesChanged} ({string.Join(", ", changedFiles.Take(5))}{(filesChanged > 5 ? ", ..." : string.Empty)})";
+            : $"{changedFiles.Count} ({string.Join(", ", changedFiles.Take(5))}{(changedFiles.Count > 5 ? ", ..." : string.Empty)})" +
+              (filesChanged == 0 ? ", only lock or generated files, so not counted as progress" : string.Empty);
         string detail = $"Round classified: {failureClass}; signature size: {signature.Size}; files changed: {files}; " +
             $"tool calls: {model.ToolCalls}; edit tool called: {(model.EditToolCalled ? "yes" : "no")}.";
         _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.RoundClassified, step.Tier,
             node: model.ModelNode ?? model.Machine, detail: detail,
             modelNode: model.ModelNode, workspaceNode: model.Machine,
             failureClass: failureClass, failureSignature: signature.Value, failureSignatureSize: signature.Size,
-            filesChanged: filesChanged, toolCalls: model.ToolCalls, editToolCalled: model.EditToolCalled,
-            rung: rung, round: round, changedFiles: changedFiles);
+            filesChanged: changedFiles.Count, toolCalls: model.ToolCalls, editToolCalled: model.EditToolCalled,
+            rung: rung, round: round, changedFiles: changedFiles, durationSeconds: durationSeconds);
         string? previous = history.LastOrDefault(earlier => !string.IsNullOrWhiteSpace(earlier.Signature))?.Signature;
-        return Task.FromResult(new RoundOutcome(classification, signature, previous, changedFiles,
+        return Task.FromResult(new RoundOutcome(classification, signature, previous, changedFiles, meaningful,
             FilesKnown: model.WorkBefore is not null, model.EditToolCalled));
     }
 
-    // The project files a model call changed, as paths inside the project: the files git sees as changed or new before
-    // the call against the same files after it. Empty when git could not tell (see PlanTools.SnapshotWorkAsync).
-    private async Task<IReadOnlyList<string>> ChangedFilesSinceAsync(PlanRecord plan, PlanTools.WorkSnapshot? before, CancellationToken cancellationToken)
+    /// <summary>The project files a model call changed (paths inside the project) and the project as it stands after it.</summary>
+    /// <param name="After">The changed and new files now, for a checkpoint; null when git could not tell.</param>
+    private sealed record WorkChange(IReadOnlyList<string> Files, PlanTools.WorkSnapshot? After);
+
+    // The files git sees as changed or new before the call against the same files after it, and the ones it deleted. Empty
+    // when git could not tell (see PlanTools.SnapshotWorkAsync).
+    private async Task<WorkChange> ChangedFilesSinceAsync(PlanRecord plan, PlanTools.WorkSnapshot? before, CancellationToken cancellationToken)
     {
-        if (before is null) return [];
+        if (before is null) return new WorkChange([], null);
         PlanRecord fresh = _store.Get(plan.Id) ?? plan;
         PlanTools.WorkSnapshot? after = await _tools.SnapshotWorkAsync(fresh, cancellationToken);
-        if (after is null) return [];
+        if (after is null) return new WorkChange([], null);
 
         StringComparer comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
         string[] paths = before.Files.Keys.Concat(after.Files.Keys).Distinct(comparer).ToArray();
-        return paths
+        string[] files = paths
             .Where(path =>
                 !before.Files.TryGetValue(path, out byte[]? previous) ||
                 !after.Files.TryGetValue(path, out byte[]? current) ||
                 !previous.AsSpan().SequenceEqual(current))
+            .Concat(after.Deleted.Where(path => !before.Deleted.Contains(path)))
+            .Distinct(comparer)
             .Select(path => string.IsNullOrWhiteSpace(fresh.WorkingDirectory)
                 ? path
                 : Path.GetRelativePath(fresh.WorkingDirectory, path).Replace('\\', '/'))
             .Order(StringComparer.OrdinalIgnoreCase)
             .ToArray();
+        return new WorkChange(files, after);
     }
 
     private int CountClassifiedRounds(string planId, int stepId, FailureClass failureClass)
@@ -1740,6 +1895,23 @@ internal sealed partial class PlanRunner
         if (!deferPlanBlock) AddBlockedEvent(plan.Id, step, reason);
     }
 
+    private void BlockForStepClock(PlanRecord plan, PlanStep step, int attempt, TimeSpan worked, bool deferPlanBlock, StepCheckpoint? best)
+    {
+        string kept = best is null
+            ? string.Empty
+            : $" The project is left as it was after its best round (round {best.Round}, {best.Score.Describe()}).";
+        string reason = $"Step {step.Id} ({step.Title}) used its {(int)_stepClock.TotalMinutes} minutes of working time ({(int)worked.TotalMinutes} minutes of model calls and checks) " +
+                        $"without passing its check, so it was not started again.{kept} Review the run log; retrying the step gives it a fresh clock.";
+        _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.StepTimeLimit, step.Tier,
+            detail: reason, modelNode: null, workspaceNode: step.Machine);
+        _store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, step.Id, currentStep => currentStep with
+        {
+            Status = StepStatus.Failed,
+            Note = reason
+        }) with { Status = deferPlanBlock ? PlanStatus.Running : PlanStatus.Blocked });
+        if (!deferPlanBlock) AddBlockedEvent(plan.Id, step, reason);
+    }
+
     private static bool HasUnsyncedInterruptedWorkspace(PlanRecord plan, PlanStep step)
     {
         PlanRunEvent? latestWorkerAttempt = (plan.Events ?? [])
@@ -1849,7 +2021,7 @@ internal sealed partial class PlanRunner
             if (!attempt.ShouldVerify)
             {
                 FailureClass failureClass = (await RecordRoundClassifiedAsync(plan, step, 1, attempt, attempt.Failure ?? string.Empty,
-                    passed: false, await ChangedFilesSinceAsync(plan, attempt.WorkBefore, cancellationToken), RepairLadder.RequestedTierRung)).Class;
+                    passed: false, (await ChangedFilesSinceAsync(plan, attempt.WorkBefore, cancellationToken)).Files, RepairLadder.RequestedTierRung)).Class;
                 if (attempt.WorkspaceFailure is { } workspaceFailure)
                 {
                     if (!attempt.ReroutableWorkspaceFailure)
@@ -1938,7 +2110,7 @@ internal sealed partial class PlanRunner
                 plan.Id, step.Id, Summarize(attempt.Summary), cancellationToken, FilesToCreate(plan, step));
             long? verification = RecordCheck(plan, step, 1, check, ViaNode(attempt.Summary));
             await RecordRoundClassifiedAsync(plan, step, 1, attempt, check.Output ?? check.Message, check.Done,
-                await ChangedFilesSinceAsync(plan, attempt.WorkBefore, cancellationToken), RepairLadder.RequestedTierRung, round: 1);
+                (await ChangedFilesSinceAsync(plan, attempt.WorkBefore, cancellationToken)).Files, RepairLadder.RequestedTierRung, round: 1);
             if (check.Done)
             {
                 _store.AddEvent(plan.Id, step.Id, 1, RunEventKind.CheckPassed, step.Tier,
@@ -2002,7 +2174,8 @@ internal sealed partial class PlanRunner
         CancellationToken cancellationToken,
         string? workspaceOverride = null,
         string? modelMachineOverride = null,
-        RoundContext? round = null)
+        RoundContext? round = null,
+        CallLimit? limit = null)
     {
         // A model call belongs to a conversation. The first attempt of a parallel group opens its own.
         RoundContext conversation = round ?? new RoundContext(_agent.OpenSession(), RepairLadder.RequestedTierRung, 1);
@@ -2077,7 +2250,7 @@ internal sealed partial class PlanRunner
 
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         using var attemptCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        attemptCancellation.CancelAfter(_attemptTimeout);
+        attemptCancellation.CancelAfter(limit?.Duration ?? _attemptTimeout);
         PlanTools.WorkSnapshot? work = null;
         IWorkerWorkspaceSession? worker = null;
         bool stagingWorkerWorkspace = false;
@@ -2150,7 +2323,9 @@ internal sealed partial class PlanRunner
         {
             // Whatever the model managed to change is still worth checking below.
             _logger.LogWarning("Plan {PlanId} step {StepId} attempt {Attempt} timed out.", plan.Id, step.Id, attempt);
-            string failure = $"The attempt ran out of time after {_attemptTimeout.TotalMinutes:0} minutes.";
+            string failure = limit is null
+                ? $"The attempt ran out of time after {_attemptTimeout.TotalMinutes:0} minutes."
+                : $"The attempt was stopped after {Duration(limit.Duration)} because {limit.Reason}.";
             _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.TimedOut, tier, modelMachine ?? _journal?.ActualNode, failure,
                 modelNode: modelMachine, workspaceNode: machine, rung: conversation.Rung, round: conversation.Round);
             result = new ModelAttemptResult(step.Id, string.Empty, failure, ShouldVerify: true, Workspace: worker, Machine: machine,

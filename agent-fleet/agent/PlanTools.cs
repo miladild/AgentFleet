@@ -503,11 +503,29 @@ internal sealed partial class PlanTools
         }
     }
 
-    /// <summary>What the plan had changed or created in a git project before an attempt, so the attempt cannot throw it away.</summary>
-    internal sealed record WorkSnapshot(string Head, IReadOnlyDictionary<string, byte[]> Files);
+    /// <summary>
+    /// What the plan had changed or created in a git project at one moment: the files git sees as changed or new (not
+    /// ignored) with their contents, and what else it takes to put the project back exactly so: which of them git did not
+    /// track, which tracked files were deleted, and which changed files were too big to keep (those cannot be put back).
+    /// Taken before an attempt, so the attempt cannot throw earlier work away, and after a round, as a checkpoint.
+    /// </summary>
+    internal sealed record WorkSnapshot(
+        string Head,
+        IReadOnlyDictionary<string, byte[]> Files,
+        IReadOnlySet<string> Untracked,
+        IReadOnlySet<string> Deleted,
+        IReadOnlySet<string> Uncaptured);
+
+    /// <summary>What putting the project back to a snapshot did.</summary>
+    /// <param name="Restored">The files written back, removed or checked out again, as paths inside the project.</param>
+    /// <param name="Left">Changed files it could not put back (too big to keep, or behind a link).</param>
+    /// <param name="Refusal">Why nothing was done, when the project is not in a state it can reason about.</param>
+    internal sealed record WorkRestore(IReadOnlyList<string> Restored, IReadOnlyList<string> Left, string? Refusal = null);
 
     private const long MaxSnapshotFileBytes = 2_000_000;
     private const long MaxSnapshotBytes = 50_000_000;
+
+    private static StringComparer PathComparer => OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
 
     /// <summary>
     /// The files git sees as changed or new (not ignored) before an attempt, with their contents. Measured: a model on
@@ -529,19 +547,42 @@ internal sealed partial class PlanTools
                 return null;
             }
 
-            var files = new Dictionary<string, byte[]>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+            var files = new Dictionary<string, byte[]>(PathComparer);
+            var untracked = new HashSet<string>(PathComparer);
+            var deleted = new HashSet<string>(PathComparer);
+            var uncaptured = new HashSet<string>(PathComparer);
             long total = 0;
-            foreach (string path in state.Changed)
+            foreach (GitEntry entry in state.Entries)
             {
-                var info = new FileInfo(path);
-                if (info.Exists && info.Length <= MaxSnapshotFileBytes && total + info.Length <= MaxSnapshotBytes)
+                if (entry.Deleted)
                 {
-                    files[path] = await File.ReadAllBytesAsync(path, cancellationToken);
+                    deleted.Add(entry.FullPath);
+                    continue;
+                }
+
+                if (entry.Untracked)
+                {
+                    untracked.Add(entry.FullPath);
+                }
+
+                var info = new FileInfo(entry.FullPath);
+                if (!info.Exists)
+                {
+                    continue;
+                }
+
+                if (info.Length <= MaxSnapshotFileBytes && total + info.Length <= MaxSnapshotBytes)
+                {
+                    files[entry.FullPath] = await File.ReadAllBytesAsync(entry.FullPath, cancellationToken);
                     total += info.Length;
+                }
+                else
+                {
+                    uncaptured.Add(entry.FullPath);
                 }
             }
 
-            return new WorkSnapshot(state.Head, files);
+            return new WorkSnapshot(state.Head, files, untracked, deleted, uncaptured);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -573,7 +614,7 @@ internal sealed partial class PlanTools
                 .Where(step => step.Status != StepStatus.Done)
                 .SelectMany(step => FleetPlanContext.DeclaredPaths(plan, step))
                 .ToArray();
-            var changedNow = new HashSet<string>(state.Changed, OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+            var changedNow = new HashSet<string>(state.Changed, PathComparer);
             bool committed = !string.Equals(state.Head, snapshot.Head, StringComparison.Ordinal);
 
             var restored = new List<string>();
@@ -599,8 +640,124 @@ internal sealed partial class PlanTools
         }
     }
 
-    // HEAD and the full paths of the files git sees as changed or new, or null outside a git working tree.
-    private async Task<(string Head, List<string> Changed)?> GitStateAsync(string workingDirectory, CancellationToken cancellationToken)
+    /// <summary>
+    /// Puts the project's changed and new files back to a snapshot taken earlier in the same run: every file the snapshot
+    /// held gets its contents again, a file that is changed or new now but was not then goes back to what git has committed
+    /// (or is removed when git does not track it), and a tracked file deleted since comes back. Used to undo a round that
+    /// left the step worse than its best round, so it does not touch HEAD, the index of anything git was not already
+    /// tracking, or a path behind a link. Refuses (and changes nothing) when git cannot say what the project looks like or
+    /// HEAD moved since the snapshot.
+    /// </summary>
+    internal async Task<WorkRestore> RestoreToSnapshotAsync(PlanRecord plan, WorkSnapshot target, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(plan.WorkingDirectory) || !Directory.Exists(plan.WorkingDirectory))
+        {
+            return new WorkRestore([], [], "the project folder is not there");
+        }
+
+        try
+        {
+            if (await GitStateAsync(plan.WorkingDirectory, cancellationToken) is not { } state)
+            {
+                return new WorkRestore([], [], "git could not say what the project looks like now");
+            }
+
+            if (!string.Equals(state.Head, target.Head, StringComparison.Ordinal))
+            {
+                return new WorkRestore([], [], "the repository was committed to since the checkpoint");
+            }
+
+            var restored = new List<string>();
+            var left = new List<string>();
+            string Shown(string path) => RelativeTo(plan.WorkingDirectory, path).Replace('\\', '/');
+
+            // What the snapshot held, as it held it.
+            foreach ((string path, byte[] contents) in target.Files)
+            {
+                if (PlanRunner.HasLinkedPathComponent(state.Root, path))
+                {
+                    left.Add(Shown(path));
+                    continue;
+                }
+
+                if (File.Exists(path) && new FileInfo(path).Length == contents.Length &&
+                    (await File.ReadAllBytesAsync(path, cancellationToken)).AsSpan().SequenceEqual(contents))
+                {
+                    continue;
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                await File.WriteAllBytesAsync(path, contents, cancellationToken);
+                restored.Add(Shown(path));
+            }
+
+            // What is changed, new or gone now and was not then.
+            foreach (GitEntry entry in state.Entries)
+            {
+                if (target.Files.ContainsKey(entry.FullPath) || target.Deleted.Contains(entry.FullPath))
+                {
+                    continue;
+                }
+
+                if (target.Uncaptured.Contains(entry.FullPath) || PlanRunner.HasLinkedPathComponent(state.Root, entry.FullPath))
+                {
+                    left.Add(Shown(entry.FullPath));
+                    continue;
+                }
+
+                if (entry.Untracked)
+                {
+                    // Created after the snapshot, so it did not exist then.
+                    if (File.Exists(entry.FullPath))
+                    {
+                        File.Delete(entry.FullPath);
+                        restored.Add(Shown(entry.FullPath));
+                    }
+
+                    continue;
+                }
+
+                // A tracked file, modified or deleted since: at the snapshot it was as committed.
+                string result = await _runCommand($"git checkout HEAD -- \"{entry.Relative}\"", state.Root, cancellationToken);
+                if (result.StartsWith("Exit code: 0", StringComparison.Ordinal))
+                {
+                    restored.Add(Shown(entry.FullPath));
+                }
+                else
+                {
+                    left.Add(Shown(entry.FullPath));
+                }
+            }
+
+            // A tracked file the snapshot had deleted and that is back since.
+            foreach (string path in target.Deleted)
+            {
+                if (File.Exists(path) && !PlanRunner.HasLinkedPathComponent(state.Root, path))
+                {
+                    File.Delete(path);
+                    restored.Add(Shown(path));
+                }
+            }
+
+            return new WorkRestore(restored.Order(StringComparer.OrdinalIgnoreCase).ToArray(), left.Order(StringComparer.OrdinalIgnoreCase).ToArray());
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return new WorkRestore([], [], $"{exception.GetType().Name}: {exception.Message}");
+        }
+    }
+
+    /// <summary>One line of git's status: the file, whether git does not track it, and whether it is deleted.</summary>
+    private sealed record GitEntry(string FullPath, string Relative, bool Untracked, bool Deleted);
+
+    private sealed record GitState(string Root, string Head, IReadOnlyList<GitEntry> Entries)
+    {
+        /// <summary>The full paths of the files that are changed or new (a deleted file is not one: it is not there).</summary>
+        public IEnumerable<string> Changed => Entries.Where(entry => !entry.Deleted).Select(entry => entry.FullPath);
+    }
+
+    // The repository root, HEAD and every changed, new or deleted file, or null outside a git working tree.
+    private async Task<GitState?> GitStateAsync(string workingDirectory, CancellationToken cancellationToken)
     {
         string? root = Stdout(await _runCommand("git rev-parse --show-toplevel", workingDirectory, cancellationToken))?.Trim();
         string? head = Stdout(await _runCommand("git rev-parse HEAD", workingDirectory, cancellationToken))?.Trim();
@@ -610,11 +767,11 @@ internal sealed partial class PlanTools
             return null;
         }
 
-        var changed = new List<string>();
+        var entries = new List<GitEntry>();
         foreach (string line in status.Split('\n', StringSplitOptions.RemoveEmptyEntries))
         {
             string entry = line.TrimEnd('\r');
-            if (entry.Length < 4 || entry[0] == 'D' || entry[1] == 'D')
+            if (entry.Length < 4)
             {
                 continue;
             }
@@ -623,10 +780,14 @@ internal sealed partial class PlanTools
             string relative = entry[3..];
             int arrow = relative.IndexOf(" -> ", StringComparison.Ordinal);
             relative = (arrow >= 0 ? relative[(arrow + 4)..] : relative).Trim().Trim('"');
-            changed.Add(Path.GetFullPath(Path.Combine(root, relative)));
+            entries.Add(new GitEntry(
+                Path.GetFullPath(Path.Combine(root, relative)),
+                relative,
+                Untracked: entry[0] == '?',
+                Deleted: entry[0] == 'D' || entry[1] == 'D'));
         }
 
-        return (head, changed);
+        return new GitState(root, head, entries);
     }
 
     // The stdout part of a command result, or null when the command did not succeed.
