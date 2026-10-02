@@ -27,6 +27,14 @@ export function explain(detail: string | null | undefined, step: PlanStep | null
         "Fleet stopped retries because the selected worker cannot run or verify this step. Check that its limited SSH workspace account, pinned host key, platform and project toolchain are configured in Config > Machines, then retry the step.",
     };
   }
+  if (/of working time \(\d+ minutes of model calls and checks\)/i.test(text)) {
+    return {
+      short: "ran out of its working time",
+      hint:
+        "The step used all of its working time (model calls and checks, not waiting for a machine) without passing, so it was stopped " +
+        "with its files at the best state it reached. Retrying gives it a fresh clock and a fresh repair ladder; or skip the step.",
+    };
+  }
   if (/plan reached its run deadline/i.test(text)) {
     return { short: "run deadline reached", hint: "The plan stopped with its changes preserved. Review the run log, then approve it to continue with a fresh eight-hour window." };
   }
@@ -91,7 +99,7 @@ export function stepFailures(plan: LivePlan): Map<number, Why> {
     if (event.stepId === null) continue;
     const step = plan.steps.find((candidate) => candidate.id === event.stepId) ?? null;
     if (event.kind === "check-failed" || event.kind === "final-validation-failed" || event.kind === "run-deadline-exceeded" ||
-        (event.kind === "plan-blocked" && /does not exit/.test(event.detail))) {
+        event.kind === "step-time-limit" || (event.kind === "plan-blocked" && /does not exit/.test(event.detail))) {
       byStep.set(event.stepId, explain(event.detail, step, ladderOf(plan, event.stepId)));
     }
   }
@@ -155,7 +163,7 @@ export function blockOf(plan: LivePlan): Block | null {
   }
   const ladder = ladderOf(plan, step?.id);
   const failure = [...events].reverse().find((event) => event.stepId === step?.id &&
-    (event.kind === "check-failed" || event.kind === "final-validation-failed" || event.kind === "run-deadline-exceeded"));
+    (event.kind === "check-failed" || event.kind === "final-validation-failed" || event.kind === "run-deadline-exceeded" || event.kind === "step-time-limit"));
   const endless = last && /does not exit on its own/.test(last.detail) ? last.detail : null;
   return { step, stopped, why: explain(endless ?? failure?.detail ?? last?.detail, step, ladder), machines, ladder };
 }

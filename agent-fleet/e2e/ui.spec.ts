@@ -209,6 +209,7 @@ test.beforeEach(async ({ page }) => {
             { atUtc: at(3), stepId: 1, attempt: 1, kind: "rung-changed", tier: "standard", node: "hub", modelNode: "hub", rung: 2, detail: "Climbing from rung 1 (the requested tier) to rung 2 (the hub model, same conversation) on hub: the last round made no edit and changed no file." },
             { atUtc: at(4), stepId: 1, attempt: 1, kind: "attempt-started", tier: "standard", node: "hub", modelNode: "hub", rung: 2, round: 1, detail: "Round 1: the output of the failed check goes back into the same conversation." },
             { atUtc: at(5), stepId: 1, attempt: 1, kind: "round-classified", tier: "standard", node: "hub", modelNode: "hub", failureClass: "CodeProgress", filesChanged: 1, changedFiles: ["src/widget.ts"], rung: 2, round: 1, detail: "Round classified: CodeProgress." },
+            { atUtc: at(5), stepId: 1, attempt: 1, kind: "round-rolled-back", tier: "standard", node: "hub", modelNode: "hub", failureClass: "RolledBack", rung: 2, round: 1, changedFiles: ["src/widget.ts"], detail: "Round 1 (rung 2) left 9 failing where round 2 had 6 failing, so it was undone: src/widget.ts, as they were after round 2." },
             { atUtc: at(6), stepId: 1, attempt: 1, kind: "attempt-started", tier: "standard", node: "hub", modelNode: "hub", rung: 2, round: 2, detail: "Round 2: the output of the failed check goes back into the same conversation." },
           ],
           steps: [
@@ -353,6 +354,7 @@ test("shows where a step is on the repair ladder and says each climb in plain wo
   await expect(log).toContainText("round 1 (rung 1): nothing changed · changed no file");
   await expect(log).toContainText("round 1 (rung 2): failed, but the failures changed · changed src/widget.ts");
   await expect(log).toContainText("Climbing from rung 1 (the requested tier) to rung 2 (the hub model, same conversation) on hub");
+  await expect(log).toContainText("so it was undone: src/widget.ts, as they were after round 2");
 });
 
 test("shows an error and its successful cross-agent handoff in Context", async ({ page }) => {
