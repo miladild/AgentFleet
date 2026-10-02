@@ -80,6 +80,7 @@ const contextFixture = {
 
 const reroutePlanId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const ladderPlanId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const parkedPlanId = "cccccccccccccccccccccccccccccccc";
 
 test.beforeEach(async ({ page }) => {
   let config = JSON.parse(JSON.stringify(baseConfig)) as typeof baseConfig;
@@ -225,6 +226,46 @@ test.beforeEach(async ({ page }) => {
         ],
       });
     }
+    if (pathname === `/api/live/${parkedPlanId}`) {
+      const at = (second: number) => `2026-09-27T00:01:${String(second).padStart(2, "0")}.000Z`;
+      const step = (id: number, title: string, status: string, dependsOn: number[], note: string | null = null) => ({
+        id, title, detail: "", files: [], verify: "npm test", tier: "standard", machine: "worker-a", status, note, attempts: status === "pending" ? 0 : 3, dependsOn,
+      });
+      return json({
+        plan: {
+          id: parkedPlanId,
+          title: "Two features",
+          goal: "One step gets stuck; the independent one goes on.",
+          status: "running",
+          workingDirectory: "C:/workspace/demo",
+          assumptions: [],
+          openQuestions: [],
+          risks: [],
+          diagram: null,
+          diagramNote: null,
+          updatedUtc: at(30),
+          events: [
+            { atUtc: at(0), stepId: 2, attempt: 3, kind: "attempt-started", tier: "standard", node: "worker-a", modelNode: "worker-a", rung: 3, round: 3, detail: "" },
+            { atUtc: at(10), stepId: 2, attempt: 3, kind: "step-parked", tier: "standard", node: null, failureClass: "Parked", failureSignature: "check-kept-failing", detail: "Step 2 (Feature A) did not pass its check after 6 rounds over 3 attempts: every rung of the repair ladder had its rounds." },
+            { atUtc: at(20), stepId: 3, attempt: 1, kind: "attempt-started", tier: "standard", node: "worker-a", modelNode: "worker-a", rung: 1, round: 1, detail: "" },
+          ],
+          steps: [
+            step(1, "Base", "done", []),
+            step(2, "Feature A", "parked", [1], "Did not pass its check after 6 rounds over 3 attempts."),
+            step(3, "Feature B", "running", [1]),
+            step(4, "Integration", "pending", [1, 2, 3]),
+          ],
+        },
+        events: [],
+        nodes: [
+          { name: "hub", model: "qwen3-coder:30b", ready: true, vision: false },
+          { name: "worker-a", model: "ornith:9b", tier: "standard", ready: true, vision: false, workspace: true },
+        ],
+      });
+    }
+    if (pathname === `/api/plans/${parkedPlanId}/retry` && request.method() === "POST") {
+      return json({ id: parkedPlanId });
+    }
     if (pathname === `/api/plans/${reroutePlanId}/machine` && request.method() === "POST") {
       machineChoice = request.postDataJSON().machine ?? null;
       return json({ machine: machineChoice });
@@ -361,6 +402,35 @@ test("shows where a step is on the repair ladder and says each climb in plain wo
   // A check the fleet changed says what it was and what it is, and a repair of the machine is a line of its own.
   await expect(log).toContainText("the check was changed: npm run build && npm test → npm run build; if ($?) { npm test }");
   await expect(log).toContainText("`npm ci` succeeded: added 120 packages");
+});
+
+test("shows a parked step, what waits for it and what goes on, and retries just that step", async ({ page }) => {
+  await page.goto(`/live/${parkedPlanId}`);
+
+  // The plan is still running: the parked step is set aside, the independent one is working, the last waits.
+  await expect(page.locator(".live-status")).toContainText("running");
+  await expect(page.locator(".live-node.parked")).toHaveCount(1);
+  await expect(page.locator(".live-node.parked")).toContainText("Feature A");
+  await expect(page.locator(".live-node.running")).toContainText("Feature B");
+  const waiting = page.locator(".live-node.pending.held");
+  await expect(waiting).toHaveCount(1);
+  await expect(waiting).toContainText("waiting on #2");
+  await expect(page.locator(".parked-count")).toContainText("1");
+
+  // Features A and B stand side by side: independent steps share a stage, and nothing says they run "with" each other.
+  await expect(page.locator(".live-node .with")).toHaveCount(0);
+  await expect(page.locator(".live-bar .live-ws i")).toHaveCount(3);
+  await expect(page.locator(".live-bar .live-ws i.parked")).toHaveCount(1);
+
+  const banner = page.locator(".live-banner.parked-list");
+  await expect(banner).toContainText("PARKED");
+  await expect(banner).toContainText("the rest of the plan goes on");
+  await expect(banner).toContainText("waiting on it: #4");
+  await expect(banner).toContainText("#2 Feature A");
+
+  const retryRequest = page.waitForRequest((request) => request.url().includes(`/api/plans/${parkedPlanId}/retry`) && request.method() === "POST");
+  await banner.getByRole("button", { name: /retry step 2/ }).click();
+  expect(new URL((await retryRequest).url()).searchParams.get("step")).toBe("2");
 });
 
 test("shows an error and its successful cross-agent handoff in Context", async ({ page }) => {

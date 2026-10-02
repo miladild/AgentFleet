@@ -116,7 +116,7 @@ export function stepFailures(plan: LivePlan): Map<number, Why> {
     if (event.stepId === null) continue;
     const step = plan.steps.find((candidate) => candidate.id === event.stepId) ?? null;
     if (event.kind === "check-failed" || event.kind === "final-validation-failed" || event.kind === "run-deadline-exceeded" ||
-        event.kind === "step-time-limit" || (event.kind === "plan-blocked" && /does not exit/.test(event.detail))) {
+        event.kind === "step-time-limit" || event.kind === "step-parked" || (event.kind === "plan-blocked" && /does not exit/.test(event.detail))) {
       byStep.set(event.stepId, explain(event.detail, step, ladderOf(plan, event.stepId)));
     }
   }
@@ -158,7 +158,7 @@ export function blockOf(plan: LivePlan): Block | null {
   const last = [...events].reverse().find((event) => event.kind === "plan-blocked" || event.kind === "stopped");
   const stopped = last?.kind === "stopped";
   const step =
-    plan.steps.find((candidate) => candidate.status === "failed") ??
+    plan.steps.find((candidate) => candidate.status === "failed" || candidate.status === "parked") ??
     (last?.stepId != null ? plan.steps.find((candidate) => candidate.id === last.stepId) : undefined) ??
     plan.steps.find((candidate) => candidate.status !== "done") ??
     null;

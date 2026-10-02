@@ -1,7 +1,7 @@
 const BACKEND_URL = (process.env.AGENT_URL || "http://localhost:8000/").replace(/\/$/, "");
 
-// approve, reject, stop, skip, and machine selection are POSTs; only these actions are forwarded.
-const POST_ACTIONS = new Set(["approve", "reject", "stop", "skip", "machine"]);
+// approve, reject, stop, skip, retry (one step) and machine selection are POSTs; only these actions are forwarded.
+const POST_ACTIONS = new Set(["approve", "reject", "stop", "skip", "retry", "machine"]);
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string; action: string }> }) {
   const { id, action } = await params;

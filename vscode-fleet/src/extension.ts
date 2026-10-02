@@ -12,6 +12,7 @@ import {
   workspaceContext,
   type WireMessage,
 } from "./fleetLink";
+import { parkedNotice } from "./planNotices";
 
 // Talks directly to the .NET AG-UI backend - no CopilotKit, no Next.js proxy,
 // no Copilot model or tokens involved at any point. The address is the
@@ -215,6 +216,8 @@ interface PlanSummaryWire {
   status: string;
   stepsDone: number;
   stepsTotal: number;
+  /** Steps that are stuck and set aside while the rest of the plan goes on (absent from an older backend). */
+  stepsParked?: number;
   updatedUtc: string;
 }
 
@@ -453,7 +456,21 @@ async function planReport(planId?: string): Promise<{ plan?: PlanSummaryWire; re
 
 const monitoredPlans = new Set<string>();
 const PLAN_WATCHES_KEY = "agentFleet.planWatches";
+// How many parked steps of each plan the user was already told about, so a reload of VS Code does not tell them again.
+const PARKED_TOLD_KEY = "agentFleet.parkedTold";
 let planWatchState: vscode.Memento | undefined;
+
+function parkedTold(planId: string): number {
+  return planWatchState?.get<Record<string, number>>(PARKED_TOLD_KEY, {})[planId] ?? 0;
+}
+
+function rememberParkedTold(planId: string, count: number): void {
+  if (!planWatchState) return;
+  const told = { ...planWatchState.get<Record<string, number>>(PARKED_TOLD_KEY, {}) };
+  if (count > 0) told[planId] = count;
+  else delete told[planId];
+  void planWatchState.update(PARKED_TOLD_KEY, told).then(undefined, () => undefined);
+}
 
 function monitorPlan(planId: string): void {
   if (monitoredPlans.has(planId)) return;
@@ -462,6 +479,7 @@ function monitorPlan(planId: string): void {
   void vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: "Agent Fleet is working", cancellable: false },
     async (progress) => {
+      let told = parkedTold(planId);
       try {
         while (true) {
           let plan: PlanSummaryWire | undefined;
@@ -481,7 +499,21 @@ function monitorPlan(planId: string): void {
             return;
           }
 
-          progress.report({ message: `${plan.title}: ${plan.status.replace(/-/g, " ")} · ${plan.stepsDone}/${plan.stepsTotal} steps` });
+          progress.report({
+            message: `${plan.title}: ${plan.status.replace(/-/g, " ")} · ${plan.stepsDone}/${plan.stepsTotal} steps${plan.stepsParked ? ` · ${plan.stepsParked} parked` : ""}`,
+          });
+
+          // A step that gets stuck is parked and the plan goes on: that is one message of its own, shown without holding up the watch.
+          const parked = parkedNotice(told, plan);
+          if (parked.announced !== told) rememberParkedTold(planId, parked.announced);
+          told = parked.announced;
+          if (parked.text && plan.status !== "blocked") {
+            void vscode.window.showWarningMessage(parked.text, "Open report", "Watch it live").then(async (choice) => {
+              if (choice === "Open report") await showPlanStatus(planId);
+              if (choice === "Watch it live") await watchPlanLive(planId);
+            });
+          }
+
           if (!["blocked", "done", "rejected"].includes(plan.status)) {
             await new Promise((resolve) => setTimeout(resolve, 2500));
             continue;
@@ -497,7 +529,7 @@ function monitorPlan(planId: string): void {
           }
           const blockedReason = blockedSection?.replace(/[\r\n`*_#]/g, " ").replace(/\s+/g, " ").trim();
           const message = plan.status === "blocked"
-            ? `Agent Fleet blocked "${plan.title}" at ${plan.stepsDone}/${plan.stepsTotal} steps${blockedReason ? `: ${clip(blockedReason, 180)}` : "."}`
+            ? `Agent Fleet blocked "${plan.title}" at ${plan.stepsDone}/${plan.stepsTotal} steps${plan.stepsParked ? ` (${plan.stepsParked} parked)` : ""}${blockedReason ? `: ${clip(blockedReason, 180)}` : "."}`
             : plan.status === "done"
               ? `Agent Fleet finished "${plan.title}" (${plan.stepsDone}/${plan.stepsTotal} steps).`
               : `Agent Fleet rejected "${plan.title}".`;
@@ -511,6 +543,7 @@ function monitorPlan(planId: string): void {
       } catch (error) {
         void vscode.window.showErrorMessage(`Could not monitor Agent Fleet plan: ${clip(errorText(error), 300)}`);
       } finally {
+        rememberParkedTold(planId, 0);
         monitoredPlans.delete(planId);
         if (planWatchState) {
           void planWatchState.update(
