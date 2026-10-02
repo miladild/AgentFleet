@@ -816,6 +816,12 @@ internal sealed partial class PlanRunner
         string? modelOverride = initialModelOverride;
         PlanRunEvent[] earlierEvents = StepEventsSinceRetry(plan.Id, step.Id);
         int waits = earlierEvents.Count(runEvent => runEvent.Kind == RunEventKind.Waiting);
+
+        // Machines that failed since the step last waited or got an answer. A failed call may move to another machine at
+        // once, but never to one that failed a moment ago: with the worker and the hub both down that would bounce between
+        // them as fast as the refusals come back, instead of waiting.
+        var failedModels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var failedWorkspaces = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         RepairPosition position = RepairLadder.PositionFrom(earlierEvents);
         int rung = position.Rung;
         int roundsInRung = position.RoundsInRung;
@@ -915,7 +921,14 @@ internal sealed partial class PlanRunner
                     {
                         if (model.ReroutableWorkspaceFailure)
                         {
+                            failedWorkspaces.Add(model.Machine ?? string.Empty);
                             (string? alternate, string detail) = await SelectRetryMachineAsync(plan, step, tier, cancellationToken);
+                            if (alternate is not null && failedWorkspaces.Contains(alternate))
+                            {
+                                detail = $"{alternate} failed a moment ago too, so Fleet waits instead of moving between machines that are both down.";
+                                alternate = null;
+                            }
+
                             if (alternate is not null)
                             {
                                 workspaceOverride = alternate;
@@ -943,6 +956,7 @@ internal sealed partial class PlanRunner
                                 detail: $"Worker staging failed before model tools or edits ({Summarize(workspaceFailure)}). {detail} Waiting {Duration(delay)} (wait {waitNumber}) before retrying; this does not count as a model attempt.",
                                 modelNode: null, workspaceNode: model.Machine, rung: rung, round: round);
                             await DelayBeforeRetryAsync(delay, cancellationToken);
+                            failedWorkspaces.Clear();
                             continue;
                         }
 
@@ -976,8 +990,9 @@ internal sealed partial class PlanRunner
 
                         if (roundClass == FailureClass.Infra)
                         {
+                            failedModels.Add(model.ModelNode ?? string.Empty);
                             string? route = await RouteFailedModelAsync(plan, step, tier, model.ModelNode, model.Machine,
-                                attempt, cancellationToken);
+                                attempt, cancellationToken, recentlyFailed: failedModels);
                             if (route is not null)
                             {
                                 modelOverride = route;
@@ -994,9 +1009,11 @@ internal sealed partial class PlanRunner
                                 detail: $"Unknown failure on {failedNode}: {Summarize(model.Failure ?? "unknown failure")}. Waiting at least {Duration(delay)} (unknown failure {unknownFailures} of 5) before retrying; this does not count as an attempt.",
                                 modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round);
                             await DelayBeforeRetryAsync(delay, cancellationToken);
+                            failedModels.Clear();
                             continue;
                         }
 
+                        failedModels.Clear();
                         (modelOverride, waits) = await WaitForInfrastructureRecoveryAsync(plan, step, tier,
                             model.ModelNode, model.Machine, attempt, model.Failure, waits, cancellationToken);
                         continue;
@@ -1022,6 +1039,8 @@ internal sealed partial class PlanRunner
                     continue;
                 }
 
+                failedModels.Clear();
+                failedWorkspaces.Clear();
                 StepCompletion result;
                 string? checkNote = null;
                 string? parkReason = null;
@@ -1771,10 +1790,16 @@ internal sealed partial class PlanRunner
         string? failedModel,
         string? workspace,
         int attempt,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IReadOnlySet<string>? recentlyFailed = null)
     {
         (string? alternate, string detail) = await SelectRetryMachineAsync(
             plan, step, tier, cancellationToken, modelRoute: true);
+        if (alternate is not null && recentlyFailed?.Contains(alternate) == true)
+        {
+            alternate = null;
+        }
+
         if (alternate is not null)
         {
             RecordModelRecoveryRoute(plan, step, tier, attempt, alternate, workspace,
@@ -1788,7 +1813,7 @@ internal sealed partial class PlanRunner
         }
 
         FleetNodeDefinition? hub = _fleetOptions.Nodes.SingleOrDefault(node => node.Fallback);
-        if (hub is null || string.Equals(hub.Name, failedModel, StringComparison.OrdinalIgnoreCase)) return null;
+        if (hub is null || string.Equals(hub.Name, failedModel, StringComparison.OrdinalIgnoreCase) || recentlyFailed?.Contains(hub.Name) == true) return null;
         try
         {
             NodeHealthSnapshot health = await _healthMonitor.GetNodeAsync(hub.Name, cancellationToken,

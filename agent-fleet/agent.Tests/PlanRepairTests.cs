@@ -46,10 +46,11 @@ public sealed partial class PlanRunnerTests
 
     private PlanRunner RepairRunner(FakeStepAgent agent, Func<string, string> verify, FleetOptions? options = null,
         FleetHealthMonitor? health = null, int roundsPerRung = RepairLadder.DefaultRoundsPerRung,
-        Func<DateTimeOffset>? utcNow = null, TimeSpan? stepClock = null, TimeSpan? attemptTimeout = null) =>
+        Func<DateTimeOffset>? utcNow = null, TimeSpan? stepClock = null, TimeSpan? attemptTimeout = null, IPlanNotifier? notifier = null,
+        Func<int, TimeSpan>? transientDelay = null, Func<TimeSpan, CancellationToken, Task>? delayAsync = null) =>
         new(Store, RepairTools(verify), agent, NullLogger.Instance, attemptTimeout: attemptTimeout, fleetOptions: options, healthMonitor: health,
-            transientDelay: _ => TimeSpan.Zero, delayAsync: (_, _) => Task.CompletedTask, utcNow: utcNow, roundsPerRung: roundsPerRung,
-            stepClock: stepClock);
+            transientDelay: transientDelay ?? (_ => TimeSpan.Zero), delayAsync: delayAsync ?? ((_, _) => Task.CompletedTask), utcNow: utcNow,
+            roundsPerRung: roundsPerRung, stepClock: stepClock, notifier: notifier);
 
     private PlanRecord RepairPlan(string? machine, string scope)
     {
