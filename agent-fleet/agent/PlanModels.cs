@@ -29,6 +29,19 @@ internal static class PlanRecoveryScope
         string.Equals(scope, AllowHubRescue, StringComparison.OrdinalIgnoreCase);
 }
 
+/// <summary>
+/// What the runner does when a step's check is broken (it never finishes, does not parse in the worker's shell, names a
+/// program that is not there) rather than failing on its merits: fix it by itself, or park the step with the proposal.
+/// </summary>
+internal static class PlanHealChecks
+{
+    public const string Auto = "auto";
+    public const string Ask = "ask";
+
+    // A plan saved before the setting existed heals by itself, like a new one: nobody is there to ask at night.
+    public static bool IsAuto(string? mode) => !string.Equals(mode, Ask, StringComparison.OrdinalIgnoreCase);
+}
+
 internal sealed record PlanStep(
     int Id,
     string Title,
@@ -43,7 +56,8 @@ internal sealed record PlanStep(
     DateTimeOffset? CompletedUtc,
     string? ParallelGroup = null,
     string? Machine = null,
-    bool RetrySafe = false);
+    bool RetrySafe = false,
+    string? OriginalVerify = null);
 
 internal static class RunEventKind
 {
@@ -82,6 +96,10 @@ internal static class RunEventKind
     public const string RungChanged = "rung-changed";
     public const string RoundRolledBack = "round-rolled-back";
     public const string StepTimeLimit = "step-time-limit";
+    public const string CheckHealed = "check-healed";
+    public const string CheckAudit = "check-audit";
+    public const string EnvironmentRepaired = "environment-repaired";
+    public const string BlockerReported = "blocker-reported";
 }
 
 /// <summary>
@@ -97,6 +115,8 @@ internal static class RunEventKind
 /// </param>
 /// <param name="ChangedFiles">The project files the round changed (the first few), where git could tell.</param>
 /// <param name="DurationSeconds">On a round-classified event: the working time of the round, its model call and its check.</param>
+/// <param name="CheckBefore">On a check-healed event: the check as it was.</param>
+/// <param name="CheckAfter">On a check-healed event: the check the step has from now on.</param>
 internal sealed record PlanRunEvent(
     DateTimeOffset AtUtc,
     int? StepId,
@@ -116,7 +136,9 @@ internal sealed record PlanRunEvent(
     int? Rung = null,
     int? Round = null,
     IReadOnlyList<string>? ChangedFiles = null,
-    int? DurationSeconds = null);
+    int? DurationSeconds = null,
+    string? CheckBefore = null,
+    string? CheckAfter = null);
 
 /// <summary>
 /// A plan is a durable artifact, not chat text: it is saved as a file, shown to the user
@@ -142,7 +164,8 @@ internal sealed record PlanRecord(
     string? ExportedPlanPath = null,
     string? ContextId = null,
     string? RecoveryScope = null,
-    DateTimeOffset? RunDeadlineUtc = null);
+    DateTimeOffset? RunDeadlineUtc = null,
+    string? HealChecks = null);
 
 internal sealed record PlanSummary(
     string Id,
@@ -167,4 +190,5 @@ internal sealed record StepMachineRequest(int StepId, string? Machine);
 
 internal sealed record PlanApprovalRequest(
     bool ExportToProject = false,
-    string? RecoveryScope = null);
+    string? RecoveryScope = null,
+    string? HealChecks = null);

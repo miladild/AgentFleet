@@ -28,6 +28,33 @@ internal sealed class FakeStepAgent(
     /// <summary>What a call reports about the model's tool use: tool calls made, and whether one edited a file.</summary>
     public Func<FakeStepCall, (int ToolCalls, bool EditToolCalled)>? ToolsOf { get; init; }
 
+    /// <summary>The tools a step's model is seen calling in a reply (report_blocker).</summary>
+    public Func<FakeStepCall, IReadOnlyList<AgentToolCall>>? CallsOf { get; init; }
+
+    /// <summary>
+    /// How the auditor of a check answers (a conversation opened with the check-audit role). By default it answers in words
+    /// and proposes nothing, which is what a model does when it finds the check sound.
+    /// </summary>
+    public Func<FakeAuditCall, StepAgentReply>? Auditor { get; init; }
+
+    /// <summary>Every message that went to an auditor, oldest first.</summary>
+    public List<FakeAuditCall> Audits { get; } = [];
+
+    public IStepSession OpenSession(string? role) => role is null ? OpenSession() : new FakeAuditSession(this, role);
+
+    internal StepAgentReply Audit(FakeAuditCall call)
+    {
+        lock (_gate)
+        {
+            Audits.Add(call);
+        }
+
+        return Auditor?.Invoke(call) ?? new StepAgentReply("The check is sound.", 0, false);
+    }
+
+    internal static StepAgentReply Proposes(string check, string why = "the check could not run") =>
+        new(string.Empty, 1, false, [new AgentToolCall("propose_check", new Dictionary<string, string?> { ["check"] = check, ["why"] = why })]);
+
     public Task<StepAgentReply> RunStepAsync(string prompt, string tier, CancellationToken cancellationToken)
         => RunStepAsync(prompt, tier, null, cancellationToken);
 
@@ -56,7 +83,24 @@ internal sealed class FakeStepAgent(
 
         string text = await run(message, tier, cancellationToken);
         (int tools, bool edited) = ToolsOf?.Invoke(call) ?? (toolCalls, editToolCalled);
-        return new StepAgentReply(text, tools, edited);
+        return new StepAgentReply(text, tools, edited, CallsOf?.Invoke(call));
+    }
+}
+
+/// <summary>One message to a check auditor: the role of its conversation, the model it was sent to and its text.</summary>
+internal sealed record FakeAuditCall(string Role, int Number, string Tier, string Message, string? Machine);
+
+internal sealed class FakeAuditSession(FakeStepAgent owner, string role) : IStepSession
+{
+    private int _messages;
+
+    public bool HasHistory { get; private set; }
+
+    public Task<StepAgentReply> SendAsync(string message, string tier, string? machine, CancellationToken cancellationToken)
+    {
+        StepAgentReply reply = owner.Audit(new FakeAuditCall(role, ++_messages, tier, message, machine));
+        HasHistory = true;
+        return Task.FromResult(reply);
     }
 }
 

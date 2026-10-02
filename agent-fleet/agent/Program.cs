@@ -239,6 +239,12 @@ Dictionary<string, string> toolDescriptions = new(StringComparer.Ordinal)
         "Use it for choices later work must follow (a library, a file layout, a naming rule, an interface, something the user decided). category is decision or constraint. Keep it to one clear sentence. " +
         "Do not pin what a system message already lists as pinned, and do not pin routine facts or guesses. " +
         "Never call it for a greeting, small talk or a question that decides nothing.",
+    ["report_blocker"] = "For a model carrying out a plan step: tells the fleet that the step's approved check cannot pass whatever you do, or that the machine, not your code, is what stops the work. " +
+        "kind is check_cannot_pass (the check never exits, the shell cannot parse it, it names a program or file that does not exist), environment, missing_dependency or other. " +
+        "evidence is the exact line of output, or the name of the file, that shows it, copied as it is. It is only a hint: the fleet reads the check's own output and decides, and never takes your word alone. " +
+        "Do not call it because tests fail or the work is hard; a failing test or a compiler error is your work to fix. At most once per turn.",
+    ["propose_check"] = "For the auditor of a step's check only: proposes the command that replaces a broken check. check is one line that finishes by itself; why is one sentence. " +
+        "The fleet tests the proposal against its own rules and may refuse it.",
     ["search_context"] = "Searches this conversation's durable record (messages, tool calls and results, decisions, checks) for a word or phrase and returns matching entries with their event ids. Use it to recover something said or done earlier instead of guessing.",
     ["validate_diagram"] = "Checks Mermaid source with the real Mermaid parser, applies safe formatting fixes, and returns the corrected source with a valid, invalid, or unchecked result.",
     ["web_search"] = "Searches the public internet and returns a numbered list of results (title, URL, snippet). " +
@@ -390,6 +396,22 @@ AITool proposePlanTool = AIFunctionFactory.Create(
     name: "propose_plan",
     description: toolDescriptions["propose_plan"]);
 
+// Offered to plan step models (report_blocker) and to the check auditor (propose_check) only, by PlanRunnerToolPolicy.Offers.
+// Neither does anything itself: the runner reads the call from the model's reply and decides.
+AITool reportBlockerTool = AIFunctionFactory.Create(
+    ([Description("check_cannot_pass, environment, missing_dependency or other")] string kind,
+        [Description("The exact output line or file name that shows it, copied as it is")] string evidence) =>
+        "Noted. The fleet reads the check's own output after your turn and decides what it means; carry on with the step.",
+    name: "report_blocker",
+    description: toolDescriptions["report_blocker"]);
+
+AITool proposeCheckTool = AIFunctionFactory.Create(
+    ([Description("One line: the command that replaces the broken check")] string check,
+        [Description("One sentence: what was wrong with the old check")] string why) =>
+        "Received. The fleet tests the proposal against its own rules; there is nothing more to do.",
+    name: "propose_check",
+    description: toolDescriptions["propose_check"]);
+
 AITool getPlanTool = AIFunctionFactory.Create(
     (string? planId = null) => planTools.GetPlan(planId),
     name: "get_plan",
@@ -423,6 +445,8 @@ AITool validateDiagramTool = AIFunctionFactory.Create(
     ("http_request", httpRequestTool),
     ("propose_plan", proposePlanTool),
     ("get_plan", getPlanTool),
+    ("report_blocker", reportBlockerTool),
+    ("propose_check", proposeCheckTool),
     ("validate_diagram", validateDiagramTool),
     ("record_decision", recordDecisionTool),
     ("search_context", searchContextTool)
@@ -559,6 +583,10 @@ int planRoundsPerRung = int.TryParse(builder.Configuration["FLEET_PLAN_ROUNDS_PE
 IChatClient agentClient = new ChatClientBuilder(fleetClient)
     // Outermost: the current tool list goes onto the request before anything looks for a tool by name.
     .Use(inner => new DynamicToolsChatClient(inner, toolRegistry, (messages, options, toolName) =>
+        PlanRunnerToolPolicy.Offers(
+            toolName,
+            fromRunner: options?.AdditionalProperties?.ContainsKey(FleetRoutingChatClient.RunnerTierKey) == true,
+            role: FleetRoutingChatClient.RunnerRole(options)) &&
         ContextTools.ShouldOffer(
             toolName,
             hasContext: contextJournal.Current is not null,
@@ -582,7 +610,7 @@ IChatClient agentClient = new ChatClientBuilder(fleetClient)
                     command = commandValue?.ToString();
                 else if (toolName == "run_git_command" && context.Arguments.TryGetValue("arguments", out object? gitArguments))
                     command = gitArguments?.ToString();
-                if (PlanRunnerToolPolicy.Refusal(toolName, command) is { } refusal)
+                if (PlanRunnerToolPolicy.Refusal(toolName, command, FleetRoutingChatClient.RunnerRole(context.Options)) is { } refusal)
                 {
                     context.Terminate = true;
                     RecordToolCall(context, toolName, refusal, isError: true);
@@ -634,6 +662,12 @@ IChatClient agentClient = new ChatClientBuilder(fleetClient)
                 // again in one reply, and each proposal replaces the last, so a later, worse version won (measured: six
                 // proposals in one turn, the last a one-step plan). The plan itself is the answer the user sees.
                 if (toolName == "propose_plan" && result?.ToString()?.StartsWith("Plan saved", StringComparison.Ordinal) == true)
+                {
+                    context.Terminate = true;
+                }
+
+                // A proposal is the auditor's whole answer: the runner reads it from the reply, so the turn ends here.
+                if (fromRunner && toolName == "propose_check")
                 {
                     context.Terminate = true;
                 }
@@ -1095,7 +1129,7 @@ app.MapPost("/api/plans/{id}/approve", (string id, PlanApprovalRequest request) 
 
     try
     {
-        PlanRecord? approved = planStore.Approve(id, request.ExportToProject, request.RecoveryScope);
+        PlanRecord? approved = planStore.Approve(id, request.ExportToProject, request.RecoveryScope, request.HealChecks);
         return approved is null
             ? Results.NotFound()
             : Results.Json(approved);

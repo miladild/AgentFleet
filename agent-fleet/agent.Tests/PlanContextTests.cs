@@ -519,7 +519,7 @@ public sealed class PlanContextTests : ContextTestBase
     }
 
     [Fact]
-    public async Task A_check_that_never_finishes_blocks_the_plan_before_any_attempt_and_says_why()
+    public async Task A_check_that_never_finishes_and_cannot_be_healed_blocks_the_plan_before_any_attempt_and_says_why()
     {
         File.WriteAllText(Path.Combine(_project, "package.json"), """{ "scripts": { "dev": "tsx watch src/index.ts" } }""");
         PlanRecord plan = Plans.Approve(Plans.Create("Run it", "Run the project", _project, [], [], [], null, null,
@@ -534,7 +534,8 @@ public sealed class PlanContextTests : ContextTestBase
         Assert.Equal(0, after.Steps[0].Attempts);
         PlanRunEvent blocked = Assert.Single(after.Events!, e => e.Kind == RunEventKind.PlanBlocked);
         Assert.Contains("does not exit on its own", blocked.Detail);
-        Assert.Contains("Skip the step", blocked.Detail);
+        Assert.Contains("skip the step", blocked.Detail);
+        Assert.Contains("proposed no replacement", blocked.Detail);
     }
 
     [Fact]

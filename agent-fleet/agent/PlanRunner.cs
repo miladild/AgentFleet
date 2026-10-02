@@ -22,6 +22,13 @@ internal interface IStepAgent
     /// back into the same conversation, so the model still has the task and everything it did.
     /// </summary>
     IStepSession OpenSession();
+
+    /// <summary>
+    /// A conversation for one job that is not carrying out a step: <see cref="PlanRunnerToolPolicy.CheckAuditRole"/> is
+    /// a model asked whether a step's check is broken, with read-only tools and propose_check and nothing else. Doubles
+    /// without a notion of roles open an ordinary conversation.
+    /// </summary>
+    IStepSession OpenSession(string? role) => OpenSession();
 }
 
 /// <summary>
@@ -39,7 +46,10 @@ internal interface IStepSession
     Task<StepAgentReply> SendAsync(string message, string tier, string? machine, CancellationToken cancellationToken);
 }
 
-internal sealed record StepAgentReply(string Text, int ToolCalls, bool EditToolCalled);
+/// <summary>A tool the model called during a turn, with its arguments as text.</summary>
+internal sealed record AgentToolCall(string Name, IReadOnlyDictionary<string, string?> Arguments);
+
+internal sealed record StepAgentReply(string Text, int ToolCalls, bool EditToolCalled, IReadOnlyList<AgentToolCall>? Calls = null);
 
 /// <summary>
 /// Drives the real agent. Each conversation is its own session, so a step never inherits another step's
@@ -58,9 +68,11 @@ internal sealed class FleetStepAgent(AIAgent agent) : IStepAgent
         OpenSession().SendAsync(prompt, tier, machine, cancellationToken);
 
     public IStepSession OpenSession() => new FleetStepSession(agent);
+
+    public IStepSession OpenSession(string? role) => new FleetStepSession(agent, role);
 }
 
-internal sealed class FleetStepSession(AIAgent agent) : IStepSession
+internal sealed class FleetStepSession(AIAgent agent, string? role = null) : IStepSession
 {
     private AgentSession? _session;
 
@@ -73,6 +85,11 @@ internal sealed class FleetStepSession(AIAgent agent) : IStepSession
         if (!string.IsNullOrWhiteSpace(machine))
         {
             properties[FleetRoutingChatClient.RunnerMachineKey] = machine;
+        }
+
+        if (!string.IsNullOrWhiteSpace(role))
+        {
+            properties[FleetRoutingChatClient.RunnerRoleKey] = role;
         }
 
         var options = new ChatClientAgentRunOptions(new ChatOptions
@@ -92,7 +109,9 @@ internal sealed class FleetStepSession(AIAgent agent) : IStepSession
         bool editToolCalled = calls.Any(IsEditTool);
         bool readOnlyOnly = calls.Length > 0 && calls.All(call => call.Name is
             "read_file" or "list_directory" or "find_files" or "search_files" or "project_overview" or "get_plan" or "search_context");
-        if ((string.IsNullOrWhiteSpace(response.Text) && calls.Length == 0) || readOnlyOnly)
+        var seen = calls.ToList();
+        // A conversation with a role is not a step: it has no change to make, and an answer in words is a valid result.
+        if (role is null && ((string.IsNullOrWhiteSpace(response.Text) && calls.Length == 0) || readOnlyOnly))
         {
             response = await agent.RunAsync(FleetStepAgent.Nudge, _session, options, cancellationToken);
             FunctionCallContent[] nudgedCalls = response.Messages.SelectMany(reply => reply.Contents)
@@ -100,10 +119,25 @@ internal sealed class FleetStepSession(AIAgent agent) : IStepSession
                 .ToArray();
             toolCalls += nudgedCalls.Length;
             editToolCalled |= nudgedCalls.Any(IsEditTool);
+            seen.AddRange(nudgedCalls);
         }
 
-        return new StepAgentReply(response.Text, toolCalls, editToolCalled);
+        return new StepAgentReply(response.Text, toolCalls, editToolCalled, seen.Select(AsToolCall).ToList());
     }
+
+    private static AgentToolCall AsToolCall(FunctionCallContent call) => new(
+        call.Name,
+        (call.Arguments ?? new Dictionary<string, object?>()).ToDictionary(
+            argument => argument.Key,
+            argument => argument.Value switch
+            {
+                null => null,
+                string text => text,
+                System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.String } element => element.GetString(),
+                System.Text.Json.JsonElement element => element.GetRawText(),
+                var other => other.ToString()
+            },
+            StringComparer.Ordinal));
 
     private static bool IsEditTool(FunctionCallContent call) => call.Name is "write_file" or "edit_file" or "move_file" or "delete_file";
 }
@@ -377,11 +411,19 @@ internal sealed partial class PlanRunner
                         .Where(candidate => candidate.Status != StepStatus.Done)
                         .ToList();
 
-                    if (BlockedByEndlessCheck(current, remainingGroupSteps))
+                    if (!await PreflightChecksAsync(planId, remainingGroupSteps.Select(candidate => candidate.Id).ToList(), runCancellation.Token))
                     {
                         await RecordChangedFilesAsync(planId);
                         return;
                     }
+
+                    current = _store.Get(planId)!;
+                    step = current.Steps[position];
+                    remainingGroupSteps = current.Steps
+                        .Skip(position)
+                        .Take(groupEnd - position)
+                        .Where(candidate => candidate.Status != StepStatus.Done)
+                        .ToList();
 
                     if (remainingGroupSteps.Count > 1)
                     {
@@ -429,8 +471,15 @@ internal sealed partial class PlanRunner
                     await RecordChangedFilesAsync(planId);
                     return;
                 }
-                if (BlockedByEndlessCheck(current, [step]) ||
-                    !await RunStepAsync(current, step, runCancellation.Token, firstAttempt: step.Attempts + 1,
+                if (!await PreflightChecksAsync(planId, [step.Id], runCancellation.Token))
+                {
+                    await RecordChangedFilesAsync(planId);
+                    return;
+                }
+
+                current = _store.Get(planId)!;
+                step = current.Steps[position];
+                if (!await RunStepAsync(current, step, runCancellation.Token, firstAttempt: step.Attempts + 1,
                         previousFailure: LastFailure(planId, step.Id)))
                 {
                     await RecordChangedFilesAsync(planId);
@@ -946,6 +995,8 @@ internal sealed partial class PlanRunner
                 }
 
                 StepCompletion result;
+                string? checkNote = null;
+                string? parkReason = null;
                 bool isFinalValidation = step.Id == plan.Steps.Max(candidate => candidate.Id);
                 try
                 {
@@ -958,8 +1009,18 @@ internal sealed partial class PlanRunner
                             modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round);
                     }
 
-                    result = await _tools.TryCompleteStepAsync(
-                        plan.Id, step.Id, Summarize(model.Summary), cancellationToken, FilesToCreate(plan, step), deferCommit: true);
+                    // A check that cannot run or finish, or a machine without the project's own dependencies, is repaired here and
+                    // the check runs again in the same workspace, so it costs no round.
+                    CheckRun run = await RunCheckWithRepairsAsync(plan, step, attempt, tier, rung, round, model, cancellationToken);
+                    result = run.Result;
+                    checkNote = run.Note;
+                    parkReason = run.ParkReason;
+                    if (!ReferenceEquals(run.Step, step))
+                    {
+                        step = run.Step;
+                        plan = _store.Get(plan.Id) ?? plan;
+                    }
+
                     if (model.Workspace is not null)
                     {
                         await model.Workspace.SyncToHubAsync(cancellationToken);
@@ -978,6 +1039,13 @@ internal sealed partial class PlanRunner
                 {
                     model.Workspace?.Dispose();
                 }
+
+                if (parkReason is not null)
+                {
+                    BlockForCheck(plan, step, attempt, parkReason, deferPlanBlock);
+                    return false;
+                }
+
                 long? verification = RecordCheck(plan, step, attempt, result, model.ModelNode);
                 WorkChange change = await ChangedFilesSinceAsync(plan, model.WorkBefore, cancellationToken);
                 TimeSpan roundTime = _utcNow() - roundStarted;
@@ -1003,6 +1071,11 @@ internal sealed partial class PlanRunner
                 }
 
                 lastFailure = WithStrayNote(plan, step, result.Output ?? result.Message);
+                if (checkNote is not null)
+                {
+                    lastFailure = $"{lastFailure}\n\n{checkNote}";
+                }
+
                 if (EnvironmentBlockReason(lastFailure) is { } environmentReason)
                 {
                     if (IsToolchainEnvironmentIssue(environmentReason))
@@ -1972,7 +2045,7 @@ internal sealed partial class PlanRunner
         return null;
     }
 
-    private static bool IsRuntimeProgram(string program) =>
+    internal static bool IsRuntimeProgram(string program) =>
         program.Equals("dotnet", StringComparison.OrdinalIgnoreCase) ||
         program.Equals("node", StringComparison.OrdinalIgnoreCase) ||
         program.Equals("npm", StringComparison.OrdinalIgnoreCase) ||
@@ -2317,7 +2390,7 @@ internal sealed partial class PlanRunner
                 modelNode: modelMachine ?? ViaNode(summary), workspaceNode: machine, rung: conversation.Rung, round: conversation.Round);
             result = new ModelAttemptResult(step.Id, summary, null, ShouldVerify: true, Workspace: worker, Machine: machine,
                 ModelNode: modelMachine ?? ViaNode(summary) ?? _journal?.ActualNode, ToolCalls: reply.ToolCalls,
-                EditToolCalled: reply.EditToolCalled, WorkBefore: work);
+                EditToolCalled: reply.EditToolCalled, WorkBefore: work, Blocker: CheckAudit.BlockerFrom(reply));
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -2504,34 +2577,6 @@ internal sealed partial class PlanRunner
         _logger.LogWarning("Plan {PlanId} is blocked at step {StepId} ({Title}).", planId, step.Id, step.Title);
     }
 
-    // A check that never exits (a dev server, a watcher) fails every attempt at its time limit, however good the work.
-    // Measured: a plan checked "Start the development server" with `npm run dev`. The plan stops there before any
-    // attempt, saying why, so the user can skip the step or change its check. Plans saved since PlanReview refuses
-    // such checks do not get here.
-    private bool BlockedByEndlessCheck(PlanRecord plan, IEnumerable<PlanStep> steps)
-    {
-        foreach (PlanStep step in steps)
-        {
-            if (step.Status == StepStatus.Done || string.IsNullOrWhiteSpace(step.Verify) ||
-                PlanReview.NeverFinishes(step.Verify, plan.WorkingDirectory) is not { } what)
-            {
-                continue;
-            }
-
-            _store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, step.Id, s => s with
-            {
-                Status = StepStatus.Failed,
-                Note = "Its check never finishes, so it was not run."
-            }) with { Status = PlanStatus.Blocked });
-            AddBlockedEvent(plan.Id, step,
-                $"Step {step.Id} ({step.Title}): its check `{step.Verify}` runs {what}, which does not exit on its own, so it could never pass. " +
-                "Skip the step, or change its check to one that finishes (its tests, the build) and approve the plan again.");
-            return true;
-        }
-
-        return false;
-    }
-
     private sealed record ModelAttemptResult(
         int StepId,
         string Summary,
@@ -2547,7 +2592,8 @@ internal sealed partial class PlanRunner
         bool EditToolCalled = false,
         PlanTools.WorkSnapshot? WorkBefore = null,
         Exception? FailureException = null,
-        IStepSession? Session = null);
+        IStepSession? Session = null,
+        ModelBlocker? Blocker = null);
 
     /// <summary>
     /// What is worth saying again to a model whose step failed, from the step and the failure: used by the first prompt of
