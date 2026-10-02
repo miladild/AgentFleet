@@ -283,8 +283,10 @@ What keeps a plan going when something happens in the night:
   fails a call, is replaced by the fallback machine. A machine that times out rests for ten minutes, so the rest of the
   step does not wait for it again. If no machine can answer at all (the network is down, the fallback is rebooting), the
   step waits and tries again, with a pause that doubles from 30 seconds to 15 minutes (plus a little jitter), and sends a
-  small real test request to the machine each time it wakes. It keeps waiting until the machine answers or the plan's run
-  deadline passes. Those waits do not count as attempts or rounds; the run log shows each one.
+  small real test request to the machine each time it wakes. While a pause is longer than a minute and the machine is down,
+  it also asks the machine every minute (a cheap request while it is down) and ends the pause as soon as the machine answers,
+  so a machine that comes back after a minute does not leave the step idle for fifteen. It keeps waiting until the machine
+  answers or the plan's run deadline passes. Those waits do not count as attempts or rounds; the run log shows each one.
 - **The hub goes to sleep.** While a plan runs, the backend asks the operating system to stay awake (Windows, macOS and
   Linux with systemd). It cannot stop someone closing a laptop's lid or choosing Sleep, and it does nothing for the other
   machines: set those to stay awake (the worker setup's `-KeepAwake`).

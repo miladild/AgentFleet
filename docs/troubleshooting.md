@@ -129,8 +129,8 @@ this.
   (a fresh repair ladder for that one step) or **skip step** (it counts as done without its check). **Approve and resume**
   retries every parked step. Steps that did not depend on the parked one have already run.
 - **"Waiting ... before retrying" in the run log.** No machine could answer, or a worker could not be reached. The step waits,
-  asks the machine for a small real answer each time it wakes, and carries on by itself; waiting costs no attempt. It keeps
-  going until the run deadline, so a night-long outage is survived and nothing needs doing unless it outlasts the deadline.
+  asks the machine for a small real answer each time it wakes (and every minute during a long pause, ending the pause as soon as
+  the machine answers), and carries on by itself; waiting costs no attempt. It keeps going until the run deadline, so a night-long outage is survived and nothing needs doing unless it outlasts the deadline.
 - **"The check was changed" (check healed) in the run log.** The step's saved check could not run or never finished, and Fleet
   replaced it by one that still tests the work. The report lists the old and the new check under "Checks changed by Fleet". If
   you would rather be asked first, approve the plan with **Broken checks: Ask me first**.
