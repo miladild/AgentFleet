@@ -289,6 +289,40 @@ What keeps a plan going when something happens in the night:
   Linux with systemd). It cannot stop someone closing a laptop's lid or choosing Sleep, and it does nothing for the other
   machines: set those to stay awake (the worker setup's `-KeepAwake`).
 
+## When something goes wrong
+
+A plan that runs while you sleep meets errors. Fleet sorts them into four kinds and deals with each in its own way. All of
+it stays inside the plan's run deadline (eight hours by default), and everything it does shows in the run log and the
+report.
+
+| What went wrong | What Fleet does by itself | What stops it |
+|---|---|---|
+| **A machine cannot answer** (off, rebooting, overloaded, the network is down) | Waits with growing pauses, asks the machine for a small real answer each time, and carries on when it can. Moves to another ready machine of the same tier, or to the hub when the plan allows it, but never to a machine that just failed without waiting first. No attempt is spent. | The run deadline. The plan stops as blocked and says so once. |
+| **The model's work is wrong** (the check ran and failed) | Sends the real output back into the same conversation. Climbs the repair ladder: more rounds on the step's machine, then the hub model in the same conversation, then a fresh conversation with a brief of what was tried. Undoes a round that made things worse. Stops a model that repeats one failing call. | The ladder is spent or the step's working time (45 minutes) is used: the step is **parked**. |
+| **The check itself is broken** (it never exits, the shell cannot run it, a program or file it names is not there, it timed out twice the same way) | Asks a model to audit it and applies a replacement only if fixed rules allow it. Keeps the original and logs both. Costs no round. | Two changes to one step, a refused replacement, or **Ask me first**: the step is parked with the reason. |
+| **The machine lacks what the project declares** (no `node_modules`, no restored packages) | Installs it once with the project's own command, as the limited worker account, and runs the check again. | Anything the project does not declare, another package manager, no virtual environment: the step's model is told exactly what is missing. |
+
+A **parked** step is set aside with its reason. Only the steps that depend on it wait; the rest of the plan goes on. When
+nothing more can run, the plan is blocked and the report says what is done, what is parked, what waited for it, and what to
+do next. You retry or skip one step, or approve the plan again to retry them all. You are told once when a step is parked,
+when the run ends with steps waiting, when the plan is done, and when the run deadline passes.
+
+**What Fleet never does**, however stuck a step is:
+
+- Edit, weaken or skip a check that ran and failed on its merits. A failing test is the model's to fix.
+- Change a check to one that passes whatever the code does (`echo ok`, `exit 0`, `|| true`), or to one that runs less than the
+  original did.
+- Change a security setting or the configuration of a machine: the execution policy, the firewall, Defender, the registry,
+  services, scheduled tasks, accounts, permissions, environment variables, or a global package. A command that tries is
+  refused before it runs, and so is a check that contains one.
+- Install anything outside the project, or use elevated rights.
+- Go outside the approved machines, reach a remote service, change repository history, or touch a path above the project.
+- Hide what it did. Every wait, climb, undone round, changed check and repair is a line in the run log and a section of the
+  report.
+
+Some stops are never healed, because a person has to look first: the run deadline, a backend restart in the middle of a step
+that is not safe to repeat, a worker whose files conflict with the hub's, and a permission or security failure.
+
 ## Reading what happened overnight
 
 Every plan keeps a **run log**: when the run started, each round with its rung, the tier and the machine that answered,
