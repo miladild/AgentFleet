@@ -347,6 +347,11 @@ internal sealed class FleetConfigStore
             CustomToolRunner.Validate(toolName, tool);
         }
 
+        if (WebhookPlanNotifier.Problem(config.NotifyUrl) is { } notifyProblem)
+        {
+            throw new InvalidOperationException(notifyProblem);
+        }
+
         if (config.History?.DeleteAfterDays is < 0 or > FleetConfig.MaxHistoryDays)
         {
             throw new InvalidOperationException(

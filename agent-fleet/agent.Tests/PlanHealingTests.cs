@@ -122,7 +122,7 @@ public sealed partial class PlanRunnerTests
 
         PlanRecord after = Store.Get(plan.Id)!;
         Assert.Equal(PlanStatus.Blocked, after.Status);
-        Assert.Equal(StepStatus.Failed, after.Steps[0].Status);
+        Assert.Equal(StepStatus.Parked, after.Steps[0].Status);
         Assert.Equal("npm run dev", after.Steps[0].Verify);
         Assert.Null(after.Steps[0].OriginalVerify);
         Assert.Empty(agent.Calls);

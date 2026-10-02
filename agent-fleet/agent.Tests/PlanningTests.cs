@@ -310,7 +310,7 @@ public sealed class PlanToolsTests : PlanTestBase
         string reply = await Tools(Pass).CompleteStepAsync(plan.Id, 2, null, default);
 
         Assert.Contains("step 1", reply);
-        Assert.Contains("in order", reply);
+        Assert.Contains("depends on it", reply);
         Assert.Equal(StepStatus.Pending, Store.Get(plan.Id)!.Steps[1].Status);
     }
 

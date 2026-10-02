@@ -130,7 +130,8 @@ internal sealed record FleetConfig(
     IReadOnlyDictionary<string, FleetMcpServerConfig>? McpServers = null,
     FleetSandboxConfig? Sandbox = null,
     FleetHistoryConfig? History = null,
-    IReadOnlyDictionary<string, FleetCustomToolConfig>? CustomTools = null)
+    IReadOnlyDictionary<string, FleetCustomToolConfig>? CustomTools = null,
+    string? NotifyUrl = null)
 {
     public const int MaxHistoryDays = 3650;
 

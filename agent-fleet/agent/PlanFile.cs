@@ -28,6 +28,7 @@ internal sealed record PlanFileContent(
 /// ## Step 1: Title
 /// - Tier: heavy | standard | light
 /// - Parallel group: name                   (optional)
+/// - Depends: 1, 3                          (optional: steps that must finish first; else the one before)
 /// - Files: `a.ts`, `b.ts`
 /// - Check: `npm test`
 /// Everything after those lines is the step's instructions.
@@ -252,6 +253,7 @@ internal static partial class PlanFile
     {
         string? tier = null, group = null, check = null;
         string[] files = [];
+        int[]? dependsOn = null;
         int line = 0;
         while (line < body.Length && string.IsNullOrWhiteSpace(body[line]))
         {
@@ -276,6 +278,10 @@ internal static partial class PlanFile
                 case "parallelgroup":
                     group = NoneToNull(Unquote(value));
                     break;
+                case "depends" or "dependson":
+                    int[] numbers = Regex.Matches(value, @"\d+").Select(match => int.Parse(match.Value)).Distinct().ToArray();
+                    dependsOn = numbers.Length > 0 ? numbers : null;
+                    break;
                 case "files":
                     files = value.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
                         .Select(Unquote).Where(file => NoneToNull(file) is not null).ToArray();
@@ -287,7 +293,7 @@ internal static partial class PlanFile
         }
 
         string detail = string.Join('\n', body[line..]).Trim();
-        return new PlanStepInput(title, detail.Length > 0 ? detail : title, files, check, tier, group);
+        return new PlanStepInput(title, detail.Length > 0 ? detail : title, files, check, tier, group, DependsOn: dependsOn);
     }
 
     // The text after "Goal:" up to the next blank line.
@@ -369,7 +375,7 @@ internal static partial class PlanFile
     [GeneratedRegex(@"^\s*(?:\*\*)?Working directory(?:\*\*)?\s*:\s*(?:\*\*)?\s*`?([^`]+?)`?\s*$", RegexOptions.IgnoreCase)]
     private static partial Regex WorkingDirectoryLine();
 
-    [GeneratedRegex(@"^\s*[-*]\s*(?:\*\*)?(Tier|Parallel group|Files|Check|Verify)(?:\*\*)?\s*:\s*(.*)$", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"^\s*[-*]\s*(?:\*\*)?(Tier|Parallel group|Depends(?: on)?|Files|Check|Verify)(?:\*\*)?\s*:\s*(.*)$", RegexOptions.IgnoreCase)]
     private static partial Regex FieldLine();
 
     [GeneratedRegex(@"^\s*[-*]\s+(.+)$")]

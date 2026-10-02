@@ -230,6 +230,8 @@ Dictionary<string, string> toolDescriptions = new(StringComparer.Ordinal)
         "risks (array of strings), diagram (optional Mermaid source with every node label in double quotes), and steps: an array of objects, each with title, detail (specific enough for a smaller model to do without the rest of the conversation), " +
         "files (array of the files it touches), verify (a shell command that fails if the step did not work, such as \"dotnet build\" or \"node --test\"), tier (heavy, standard or light), and optional parallelGroup. " +
         "Only label consecutive steps with the same parallelGroup when they are independent and touch disjoint files; otherwise omit it. " +
+        "A step may also list dependsOn, the numbers of the earlier steps it needs finished first (for example [1,3]); leave it out for the usual chain, where each step needs the one before it, and the last step always needs all of them. " +
+        "Use it only for steps that are truly independent of their neighbours, so that one step that gets stuck holds back only the steps that need it. " +
         "Example: {\"title\":\"Add two helpers\",\"goal\":\"...\",\"workingDirectory\":\"C:\\\\proj\",\"assumptions\":[\"...\"],\"openQuestions\":[],\"risks\":[\"...\"],\"steps\":[" +
         "{\"title\":\"Add slugify and its test\",\"detail\":\"...\",\"files\":[\"src/slug.js\",\"test/slug.test.js\"],\"verify\":\"node --test test/slug.test.js\",\"tier\":\"standard\",\"parallelGroup\":\"helpers\"}," +
         "{\"title\":\"Add titleCase and its test\",\"detail\":\"...\",\"files\":[\"src/title.js\",\"test/title.test.js\"],\"verify\":\"node --test test/title.test.js\",\"tier\":\"light\",\"parallelGroup\":\"helpers\"}," +
@@ -763,6 +765,24 @@ var fleetAgent = new ChatClientAgent(
     description: "Local coding assistant routed across the available fleet",
     tools: agentTools);
 
+// Optional: a message to a LAN address when a plan needs the user (a step parked, the run ended with steps waiting, done,
+// the run deadline). Off unless "notifyUrl" is set in the fleet config.
+IPlanNotifier? planNotifier = null;
+if (!string.IsNullOrWhiteSpace(fleetConfigStore.Current.NotifyUrl))
+{
+    if (WebhookPlanNotifier.Problem(fleetConfigStore.Current.NotifyUrl) is { } notifyProblem)
+    {
+        loggerFactory.CreateLogger("AgentFleet.PlanNotices").LogWarning("Plan notices are off: {Problem}", notifyProblem);
+    }
+    else
+    {
+        planNotifier = new WebhookPlanNotifier(
+            new HttpClient(new HttpClientHandler { AllowAutoRedirect = false, UseProxy = false }) { Timeout = WebhookPlanNotifier.Timeout },
+            fleetConfigStore.Current.NotifyUrl.Trim(),
+            loggerFactory.CreateLogger("AgentFleet.PlanNotices"));
+    }
+}
+
 // Executes approved plans in the background, one verified step or explicitly grouped parallel set at a time. Approving a plan (the
 // button, the API, or typing the approval word) raises the store's event, which starts it; plans
 // that were mid-run when the backend last stopped resume on startup.
@@ -779,7 +799,8 @@ var planRunner = new PlanRunner(
     journal: contextJournal,
     sleepGuard: new SystemSleepGuard(loggerFactory.CreateLogger("AgentFleet.Power")),
     roundsPerRung: planRoundsPerRung,
-    stepClock: TimeSpan.FromMinutes(planStepMinutes));
+    stepClock: TimeSpan.FromMinutes(planStepMinutes),
+    notifier: planNotifier);
 planStore.Approved += planRunner.Enqueue;
 app.Lifetime.ApplicationStarted.Register(() => planRunner.Start(app.Lifetime.ApplicationStopping));
 
@@ -1140,8 +1161,9 @@ app.MapPost("/api/plans/{id}/approve", (string id, PlanApprovalRequest request) 
     }
 });
 
-// A blocked plan the user carries past one step: the step counts as done without its check, and with resume the
-// plan is approved again at once and goes on with the next step.
+// A plan the user carries past one step: the step counts as done without its check. A blocked plan, with resume, is
+// approved again at once and goes on with what was waiting; a plan that is still running just goes on, because only the
+// steps that depended on the skipped one were waiting. The other parked steps stay parked.
 app.MapPost("/api/plans/{id}/skip", (string id, int step, bool resume = false) =>
 {
     PlanRecord? plan = planStore.Get(id);
@@ -1150,18 +1172,48 @@ app.MapPost("/api/plans/{id}/skip", (string id, int step, bool resume = false) =
         return Results.NotFound();
     }
 
-    if (plan.Status != PlanStatus.Blocked)
+    bool parkedInRunningPlan = plan.Status == PlanStatus.Running && plan.Steps.First(candidate => candidate.Id == step).Status == StepStatus.Parked;
+    if (plan.Status != PlanStatus.Blocked && !parkedInRunningPlan)
     {
-        return Results.BadRequest(new { error = $"This plan is {plan.Status.Replace('-', ' ')}; only a stopped or blocked plan can skip a step." });
+        return Results.BadRequest(new { error = $"This plan is {plan.Status.Replace('-', ' ')}; only a stopped or blocked plan, or a parked step of a running one, can be skipped." });
     }
 
     PlanRecord? skipped = planRunner.SkipStep(id, step);
     if (resume && skipped?.Status == PlanStatus.Blocked)
     {
-        skipped = planStore.Approve(id) ?? skipped;
+        skipped = planStore.Approve(id, retryStopped: false) ?? skipped;
     }
 
     return skipped is null ? Results.NotFound() : Results.Json(skipped);
+});
+
+// One parked or stopped step tried again with a fresh repair ladder, the rest of the plan left alone. A plan that is still
+// running picks the step up by itself; a blocked plan is approved again to go on with it (the other parked steps stay parked).
+app.MapPost("/api/plans/{id}/retry", (string id, int step) =>
+{
+    PlanRecord? plan = planStore.Get(id);
+    if (plan is null || plan.Steps.All(candidate => candidate.Id != step))
+    {
+        return Results.NotFound();
+    }
+
+    PlanRecord? retried = planStore.RetryStep(id, step);
+    if (retried is null)
+    {
+        return Results.NotFound();
+    }
+
+    if (retried.Steps.First(candidate => candidate.Id == step).Status != StepStatus.Pending)
+    {
+        return Results.BadRequest(new { error = "Only a parked or stopped step of a running or blocked plan can be tried again." });
+    }
+
+    if (retried.Status == PlanStatus.Blocked)
+    {
+        retried = planStore.Approve(id, retryStopped: false) ?? retried;
+    }
+
+    return Results.Json(retried);
 });
 
 app.MapPost("/api/plans/{id}/reject", (string id) =>

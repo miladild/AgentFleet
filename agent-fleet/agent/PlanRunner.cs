@@ -198,6 +198,7 @@ internal sealed partial class PlanRunner
     private readonly ISleepGuard _sleepGuard;
     private readonly int _roundsPerRung;
     private readonly TimeSpan _stepClock;
+    private readonly IPlanNotifier? _notifier;
 
     public PlanRunner(
         FleetPlanStore store,
@@ -216,8 +217,10 @@ internal sealed partial class PlanRunner
         Func<TimeSpan, CancellationToken, Task>? delayAsync = null,
         Func<DateTimeOffset>? utcNow = null,
         int roundsPerRung = RepairLadder.DefaultRoundsPerRung,
-        TimeSpan? stepClock = null)
+        TimeSpan? stepClock = null,
+        IPlanNotifier? notifier = null)
     {
+        _notifier = notifier;
         _roundsPerRung = Math.Max(1, roundsPerRung);
         _stepClock = stepClock is { } clock && clock > TimeSpan.Zero ? clock : DefaultStepClock;
         _transientDelay = transientDelay ?? DefaultTransientDelay;
@@ -372,7 +375,7 @@ internal sealed partial class PlanRunner
                 return;
             }
 
-            bool continuing = plan.Steps.Any(step => step.Status is StepStatus.Running or StepStatus.Failed or StepStatus.Done);
+            bool continuing = plan.Steps.Any(step => step.Status is StepStatus.Running or StepStatus.Failed or StepStatus.Parked or StepStatus.Done);
             _lastFailures[planId] = LastFailures(plan);
             _store.Update(planId, current => current with
             {
@@ -397,100 +400,122 @@ internal sealed partial class PlanRunner
                 _recorder.RunStarted(contextId, _store.Get(planId) ?? plan, continuing);
             }
 
-            int position = 0;
-            while (position < plan.Steps.Count)
+            // The plan is a graph, not a queue: the next step is the first one whose dependencies are done. A step that gets
+            // stuck is parked, and only the steps that depend on it wait; everything else goes on.
+            while (true)
             {
+                runCancellation.Token.ThrowIfCancellationRequested();
                 PlanRecord current = _store.Get(planId)!;
-                PlanStep step = current.Steps[position];
-                int groupEnd = ParallelGroupEnd(current.Steps, position);
-                if (groupEnd - position > 1)
+                List<PlanStep> ready = current.Steps
+                    .Where(candidate => candidate.Status == StepStatus.Pending && PlanGraph.IsReady(current, candidate))
+                    .ToList();
+                if (ready.Count == 0)
                 {
-                    IReadOnlyList<PlanStep> remainingGroupSteps = current.Steps
-                        .Skip(position)
-                        .Take(groupEnd - position)
-                        .Where(candidate => candidate.Status != StepStatus.Done)
-                        .ToList();
-
-                    if (!await PreflightChecksAsync(planId, remainingGroupSteps.Select(candidate => candidate.Id).ToList(), runCancellation.Token))
+                    // Nothing can run now. The run is closed in one update, so a step the user retried a moment ago is not missed.
+                    bool nothingElse = false;
+                    _store.Update(planId, latest =>
                     {
-                        await RecordChangedFilesAsync(planId);
-                        return;
+                        nothingElse = !latest.Steps.Any(candidate => candidate.Status == StepStatus.Pending && PlanGraph.IsReady(latest, candidate));
+                        return nothingElse && latest.Steps.Any(candidate => candidate.Status != StepStatus.Done)
+                            ? latest with { Status = PlanStatus.Blocked }
+                            : latest;
+                    });
+                    if (nothingElse)
+                    {
+                        break;
                     }
 
-                    current = _store.Get(planId)!;
-                    step = current.Steps[position];
-                    remainingGroupSteps = current.Steps
-                        .Skip(position)
-                        .Take(groupEnd - position)
-                        .Where(candidate => candidate.Status != StepStatus.Done)
-                        .ToList();
-
-                    if (remainingGroupSteps.Count > 1)
-                    {
-                        string? fallbackReason = await ParallelFallbackReasonAsync(current, remainingGroupSteps, runCancellation.Token);
-                        if (fallbackReason is null)
-                        {
-                            _store.AddEvent(planId, null, null, RunEventKind.ParallelStarted,
-                                detail: $"Steps {string.Join(", ", remainingGroupSteps.Select(candidate => candidate.Id))} are starting concurrently on distinct ready tiers.");
-                            bool groupDone = await RunParallelGroupAsync(current, remainingGroupSteps, runCancellation.Token);
-                            if (!groupDone)
-                            {
-                                await RecordChangedFilesAsync(planId);
-                                return;
-                            }
-
-                            position = groupEnd;
-                            continue;
-                        }
-
-                        bool firstInGroup = position == 0 || current.Steps[position - 1].ParallelGroup != step.ParallelGroup;
-                        if (firstInGroup)
-                        {
-                            _store.AddEvent(planId, null, null, RunEventKind.ParallelFallback,
-                                detail: $"Parallel group '{step.ParallelGroup}' will run in order because {fallbackReason}.");
-                        }
-                    }
-
-                    if (step.Status == StepStatus.Done)
-                    {
-                        position++;
-                        continue;
-                    }
-                }
-
-                if (step.Status == StepStatus.Done)
-                {
-                    position++;
                     continue;
                 }
 
-                runCancellation.Token.ThrowIfCancellationRequested();
-                if (plan.RunDeadlineUtc is { } runDeadline && _utcNow() >= runDeadline)
+                PlanStep step = ready[0];
+                if (current.RunDeadlineUtc is { } runDeadline && _utcNow() >= runDeadline)
                 {
                     BlockForDeadline(current, step, step.Attempts + 1, deferPlanBlock: false);
                     await RecordChangedFilesAsync(planId);
                     return;
                 }
-                if (!await PreflightChecksAsync(planId, [step.Id], runCancellation.Token))
+
+                int position = current.Steps.ToList().FindIndex(candidate => candidate.Id == step.Id);
+                if (step.ParallelGroup is not null)
                 {
-                    await RecordChangedFilesAsync(planId);
-                    return;
+                    int groupEnd = ParallelGroupEnd(current.Steps, position);
+                    List<PlanStep> group = current.Steps
+                        .Skip(position)
+                        .Take(groupEnd - position)
+                        .Where(candidate => ready.Any(waiting => waiting.Id == candidate.Id))
+                        .ToList();
+                    if (group.Count > 1)
+                    {
+                        await PreflightChecksAsync(planId, group.Select(candidate => candidate.Id).ToList(), runCancellation.Token);
+                        current = _store.Get(planId)!;
+                        group = group
+                            .Select(member => current.Steps.First(candidate => candidate.Id == member.Id))
+                            .Where(member => member.Status == StepStatus.Pending)
+                            .ToList();
+                        if (group.Count == 0)
+                        {
+                            continue;
+                        }
+
+                        if (group.Count > 1)
+                        {
+                            string? fallbackReason = await ParallelFallbackReasonAsync(current, group, runCancellation.Token);
+                            if (fallbackReason is null)
+                            {
+                                _store.AddEvent(planId, null, null, RunEventKind.ParallelStarted,
+                                    detail: $"Steps {string.Join(", ", group.Select(candidate => candidate.Id))} are starting concurrently on distinct ready tiers.");
+                                if (!await RunParallelGroupAsync(current, group, runCancellation.Token))
+                                {
+                                    await RecordChangedFilesAsync(planId);
+                                    return;
+                                }
+
+                                continue;
+                            }
+
+                            bool firstInGroup = position == 0 || current.Steps[position - 1].ParallelGroup != step.ParallelGroup;
+                            if (firstInGroup)
+                            {
+                                _store.AddEvent(planId, null, null, RunEventKind.ParallelFallback,
+                                    detail: $"Parallel group '{step.ParallelGroup}' will run in order because {fallbackReason}.");
+                            }
+                        }
+
+                        step = group[0];
+                    }
                 }
 
+                await PreflightChecksAsync(planId, [step.Id], runCancellation.Token);
                 current = _store.Get(planId)!;
-                step = current.Steps[position];
+                step = current.Steps.First(candidate => candidate.Id == step.Id);
+                if (step.Status != StepStatus.Pending)
+                {
+                    continue;
+                }
+
+                runCancellation.Token.ThrowIfCancellationRequested();
                 if (!await RunStepAsync(current, step, runCancellation.Token, firstAttempt: step.Attempts + 1,
-                        previousFailure: LastFailure(planId, step.Id)))
+                        previousFailure: LastFailure(planId, step.Id)) &&
+                    _store.Get(planId)!.Status == PlanStatus.Blocked)
                 {
                     await RecordChangedFilesAsync(planId);
                     return;
                 }
-
-                position++;
             }
 
-            _store.AddEvent(planId, null, null, RunEventKind.PlanDone, detail: "Every step passed its check.");
-            FinishInContext(planId, PlanStatus.Done, "Every step passed its check.");
+            PlanRecord finished = _store.Get(planId)!;
+            if (finished.Steps.All(candidate => candidate.Status == StepStatus.Done))
+            {
+                _store.AddEvent(planId, null, null, RunEventKind.PlanDone, detail: "Every step passed its check.");
+                FinishInContext(planId, PlanStatus.Done, "Every step passed its check.");
+                Notify(finished, "plan-done");
+            }
+            else
+            {
+                EndWithStoppedSteps(finished);
+            }
+
             await RecordChangedFilesAsync(planId);
         }
         catch (OperationCanceledException) when (_stopRequested.TryRemove(planId, out bool userStop) && userStop)
@@ -847,7 +872,7 @@ internal sealed partial class PlanRunner
 
                 if (worked >= _stepClock)
                 {
-                    BlockForStepClock(plan, step, attempt, worked, deferPlanBlock, best);
+                    ParkForStepClock(plan, step, attempt, worked, best);
                     return false;
                 }
 
@@ -918,15 +943,15 @@ internal sealed partial class PlanRunner
                             continue;
                         }
 
-                        BlockForEnvironment(plan, step, attempt, tier, model.Machine, workspaceFailure,
-                            "the selected worker workspace is not configured or could not be staged", deferPlanBlock);
+                        ParkForEnvironment(plan, step, attempt, tier, model.Machine, workspaceFailure,
+                            "the selected worker workspace is not configured or could not be staged");
                         return false;
                     }
 
                     if (roundClass == FailureClass.Environment)
                     {
-                        BlockForEnvironment(plan, step, attempt, tier, model.ModelNode, model.Failure ?? "The model route failed with an environment error.",
-                            "the selected model machine has a permission, security, or runtime problem", deferPlanBlock);
+                        ParkForEnvironment(plan, step, attempt, tier, model.ModelNode, model.Failure ?? "The model route failed with an environment error.",
+                            "the selected model machine has a permission, security, or runtime problem");
                         return false;
                     }
 
@@ -942,7 +967,7 @@ internal sealed partial class PlanRunner
                         int unknownFailures = CountClassifiedRounds(plan.Id, step.Id, FailureClass.Unknown);
                         if (roundClass == FailureClass.Unknown && unknownFailures >= 5)
                         {
-                            BlockForUnknown(plan, step, attempt, model.FailureException, model.Failure, deferPlanBlock);
+                            ParkForUnknown(plan, step, attempt, model.FailureException, model.Failure);
                             return false;
                         }
 
@@ -1042,7 +1067,7 @@ internal sealed partial class PlanRunner
 
                 if (parkReason is not null)
                 {
-                    BlockForCheck(plan, step, attempt, parkReason, deferPlanBlock);
+                    ParkForCheck(plan, step, parkReason);
                     return false;
                 }
 
@@ -1106,7 +1131,7 @@ internal sealed partial class PlanRunner
                         }
                     }
 
-                    BlockForEnvironment(plan, step, attempt, tier, model.ModelNode, lastFailure, environmentReason, deferPlanBlock);
+                    ParkForEnvironment(plan, step, attempt, tier, model.ModelNode, lastFailure, environmentReason);
                     return false;
                 }
 
@@ -1162,17 +1187,8 @@ internal sealed partial class PlanRunner
         string kept = best is null
             ? string.Empty
             : $" The project is left as it was after its best round (round {best.Round}, {best.Score.Describe()}).";
-        _store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, step.Id, s => s with
-        {
-            Status = StepStatus.Failed,
-            Note = $"Did not pass its check after {rounds}.{kept}"
-        }) with { Status = deferPlanBlock ? PlanStatus.Running : PlanStatus.Blocked });
-        if (!deferPlanBlock)
-        {
-            AddBlockedEvent(plan.Id, step,
-                $"Step {step.Id} ({step.Title}) did not pass its check after {rounds}: every rung of the repair ladder had its rounds.{kept}");
-        }
-
+        ParkStep(plan, step, $"Did not pass its check after {rounds}.{kept}", "check-kept-failing",
+            reason: $"Step {step.Id} ({step.Title}) did not pass its check after {rounds}: every rung of the repair ladder had its rounds.{kept}");
         return false;
     }
 
@@ -1194,8 +1210,7 @@ internal sealed partial class PlanRunner
     private PlanRunEvent[] StepEventsSinceRetry(string planId, int stepId)
     {
         PlanRunEvent[] events = (_store.Get(planId)?.Events ?? []).ToArray();
-        int retryBoundary = Array.FindLastIndex(events, runEvent => runEvent.Kind == RunEventKind.RetryApproved);
-        return events.Skip(retryBoundary + 1).Where(runEvent => runEvent.StepId == stepId).ToArray();
+        return events.Skip(RetryBoundary(events, stepId) + 1).Where(runEvent => runEvent.StepId == stepId).ToArray();
     }
 
     // The hub rung needs a plan that allows the hub, a hub that is not already the model, and a conversation to continue.
@@ -1662,8 +1677,7 @@ internal sealed partial class PlanRunner
     private int CountClassifiedRounds(string planId, int stepId, FailureClass failureClass)
     {
         PlanRunEvent[] events = (_store.Get(planId)?.Events ?? []).ToArray();
-        int retryBoundary = Array.FindLastIndex(events, runEvent => runEvent.Kind == RunEventKind.RetryApproved);
-        return events.Skip(retryBoundary + 1).Count(runEvent => runEvent.StepId == stepId &&
+        return events.Skip(RetryBoundary(events, stepId) + 1).Count(runEvent => runEvent.StepId == stepId &&
             runEvent.Kind == RunEventKind.RoundClassified &&
             string.Equals(runEvent.FailureClass, failureClass.ToString(), StringComparison.Ordinal));
     }
@@ -1671,8 +1685,7 @@ internal sealed partial class PlanRunner
     private int CountWaitingEvents(string planId, int stepId)
     {
         PlanRunEvent[] events = (_store.Get(planId)?.Events ?? []).ToArray();
-        int retryBoundary = Array.FindLastIndex(events, runEvent => runEvent.Kind == RunEventKind.RetryApproved);
-        return events.Skip(retryBoundary + 1).Count(runEvent => runEvent.StepId == stepId && runEvent.Kind == RunEventKind.Waiting);
+        return events.Skip(RetryBoundary(events, stepId) + 1).Count(runEvent => runEvent.StepId == stepId && runEvent.Kind == RunEventKind.Waiting);
     }
 
     private TimeSpan DelayWithinRunDeadline(PlanRecord plan, TimeSpan requested)
@@ -1799,19 +1812,14 @@ internal sealed partial class PlanRunner
         _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.RecoveryRouted, tier,
             node: model, detail: detail, modelNode: model, workspaceNode: workspace);
 
-    private void BlockForUnknown(PlanRecord plan, PlanStep step, int attempt, Exception? exception, string? failure, bool deferPlanBlock)
+    private void ParkForUnknown(PlanRecord plan, PlanStep step, int attempt, Exception? exception, string? failure)
     {
         string exceptionName = exception?.GetType().Name ?? "unclassified failure";
         string message = string.IsNullOrWhiteSpace(exception?.Message) ? failure ?? "No failure message was recorded." : exception.Message;
         string reason = $"Automatic retries stopped after five unknown failures ({exceptionName}: {Summarize(message)}). Review the run log before approving another attempt.";
         _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.ModelFailed, step.Tier,
             detail: reason);
-        _store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, step.Id, currentStep => currentStep with
-        {
-            Status = StepStatus.Failed,
-            Note = reason
-        }) with { Status = deferPlanBlock ? PlanStatus.Running : PlanStatus.Blocked });
-        if (!deferPlanBlock) AddBlockedEvent(plan.Id, step, reason);
+        ParkStep(plan, step, reason, "unknown-failure");
     }
 
     private bool HasPriorAttempt(string planId, int stepId) =>
@@ -1930,28 +1938,19 @@ internal sealed partial class PlanRunner
         throw new InvalidOperationException($"Worker workspace unavailable: {reason} for step {step.Id} ({step.Title}).");
     }
 
-    private void BlockForEnvironment(
+    private void ParkForEnvironment(
         PlanRecord plan,
         PlanStep step,
         int attempt,
         string tier,
         string? node,
         string output,
-        string cause,
-        bool deferPlanBlock)
+        string cause)
     {
         string reason = $"Environment issue: {cause} Automatic retries stopped because the selected worker workspace cannot execute or verify this step. Configure or repair that worker, then retry the step.\n\nCheck output:\n{output}";
         _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.CheckFailed, tier, node, reason);
-        _store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, step.Id, s => s with
-        {
-            Status = StepStatus.Failed,
-            Note = reason
-        }) with { Status = deferPlanBlock ? PlanStatus.Running : PlanStatus.Blocked });
         _logger.LogWarning("Plan {PlanId} step {StepId} stopped early because its check needs unavailable tooling: {Cause}", plan.Id, step.Id, cause);
-        if (!deferPlanBlock)
-        {
-            AddBlockedEvent(plan.Id, step, reason);
-        }
+        ParkStep(plan, step, reason, "environment");
     }
 
     private void BlockForDeadline(PlanRecord plan, PlanStep step, int attempt, bool deferPlanBlock)
@@ -1966,9 +1965,10 @@ internal sealed partial class PlanRunner
             Note = reason
         }) with { Status = deferPlanBlock ? PlanStatus.Running : PlanStatus.Blocked });
         if (!deferPlanBlock) AddBlockedEvent(plan.Id, step, reason);
+        Notify(plan, "plan-deadline", step, "run-deadline");
     }
 
-    private void BlockForStepClock(PlanRecord plan, PlanStep step, int attempt, TimeSpan worked, bool deferPlanBlock, StepCheckpoint? best)
+    private void ParkForStepClock(PlanRecord plan, PlanStep step, int attempt, TimeSpan worked, StepCheckpoint? best)
     {
         string kept = best is null
             ? string.Empty
@@ -1977,12 +1977,7 @@ internal sealed partial class PlanRunner
                         $"without passing its check, so it was not started again.{kept} Review the run log; retrying the step gives it a fresh clock.";
         _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.StepTimeLimit, step.Tier,
             detail: reason, modelNode: null, workspaceNode: step.Machine);
-        _store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, step.Id, currentStep => currentStep with
-        {
-            Status = StepStatus.Failed,
-            Note = reason
-        }) with { Status = deferPlanBlock ? PlanStatus.Running : PlanStatus.Blocked });
-        if (!deferPlanBlock) AddBlockedEvent(plan.Id, step, reason);
+        ParkStep(plan, step, reason, "working-time");
     }
 
     private static bool HasUnsyncedInterruptedWorkspace(PlanRecord plan, PlanStep step)
@@ -2099,8 +2094,8 @@ internal sealed partial class PlanRunner
                 {
                     if (!attempt.ReroutableWorkspaceFailure)
                     {
-                        BlockForEnvironment(plan, step, 1, step.Tier, attempt.Machine, workspaceFailure,
-                            "the selected worker workspace is not configured or could not be staged", deferPlanBlock: true);
+                        ParkForEnvironment(plan, step, 1, step.Tier, attempt.Machine, workspaceFailure,
+                            "the selected worker workspace is not configured or could not be staged");
                         failedSteps.Add(step);
                         continue;
                     }
@@ -2135,8 +2130,8 @@ internal sealed partial class PlanRunner
 
                 if (failureClass == FailureClass.Environment)
                 {
-                    BlockForEnvironment(plan, step, 1, step.Tier, attempt.ModelNode, attempt.Failure ?? "The model route failed with an environment error.",
-                        "the selected model machine has a permission, security, or runtime problem", deferPlanBlock: true);
+                    ParkForEnvironment(plan, step, 1, step.Tier, attempt.ModelNode, attempt.Failure ?? "The model route failed with an environment error.",
+                        "the selected model machine has a permission, security, or runtime problem");
                     failedSteps.Add(step);
                     continue;
                 }
@@ -2152,7 +2147,7 @@ internal sealed partial class PlanRunner
                         int unknownFailures = CountClassifiedRounds(plan.Id, step.Id, FailureClass.Unknown);
                         if (unknownFailures >= 5)
                         {
-                            BlockForUnknown(plan, step, 1, attempt.FailureException, attempt.Failure, deferPlanBlock: true);
+                            ParkForUnknown(plan, step, 1, attempt.FailureException, attempt.Failure);
                             failedSteps.Add(step);
                             continue;
                         }
@@ -2196,7 +2191,7 @@ internal sealed partial class PlanRunner
                 string failure = WithStrayNote(plan, step, check.Output ?? check.Message);
                 if (EnvironmentBlockReason(failure) is { } environmentReason)
                 {
-                    BlockForEnvironment(plan, step, 1, step.Tier, ViaNode(attempt.Summary), failure, environmentReason, deferPlanBlock: true);
+                    ParkForEnvironment(plan, step, 1, step.Tier, ViaNode(attempt.Summary), failure, environmentReason);
                     failedSteps.Add(step);
                 }
                 else
@@ -2222,16 +2217,21 @@ internal sealed partial class PlanRunner
             }
         }
 
-        if (failedSteps.Count == 0)
+        // A parked step is not the end of the plan: the rest goes on. Only a harder stop (the run deadline) ends it here.
+        PlanRecord afterGroup = _store.Get(plan.Id)!;
+        PlanStep[] hardStops = failedSteps
+            .Select(failed => afterGroup.Steps.First(step => step.Id == failed.Id))
+            .Where(failed => failed.Status == StepStatus.Failed)
+            .ToArray();
+        if (hardStops.Length == 0)
         {
             return true;
         }
 
         _store.Update(plan.Id, current => current with { Status = PlanStatus.Blocked });
-        foreach (PlanStep failed in failedSteps)
+        foreach (PlanStep failed in hardStops)
         {
-            string? note = _store.Get(plan.Id)?.Steps.FirstOrDefault(step => step.Id == failed.Id)?.Note;
-            AddBlockedEvent(plan.Id, failed, note?.StartsWith("Environment issue:", StringComparison.Ordinal) == true ? note : null);
+            AddBlockedEvent(plan.Id, failed, failed.Note);
         }
 
         return false;
