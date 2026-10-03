@@ -50,10 +50,11 @@ Start-Sleep -Seconds 1
 
 $source = Find-FleetConfig $Config $InstallRoot
 if (-not $source) { throw 'No fleet.config.json found. Pass -Config <path>.' }
-$config = Read-FleetConfig $source
-if ($config.PSObject.Properties.Name -contains 'notifyUrl') { $config.PSObject.Properties.Remove('notifyUrl') }
+# (not $config: PowerShell variable names are case-insensitive and that is the typed -Config parameter)
+$fleetConfig = Read-FleetConfig $source
+if ($fleetConfig.PSObject.Properties.Name -contains 'notifyUrl') { $fleetConfig.PSObject.Properties.Remove('notifyUrl') }
 $configCopy = Join-Path $WorkRoot 'fleet.config.json'
-Write-FleetConfig $configCopy $config
+Write-FleetConfig $configCopy $fleetConfig
 Write-Ok "Configuration copied from $source"
 
 Write-Step 'Publishing the current source'
