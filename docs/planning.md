@@ -146,8 +146,14 @@ steps, and checks each step with a real command instead of trusting itself.
      that were not run, and what is done; the steps that did finish stay done and your files stay as they are. In **Live**, a
      parked step is dashed and amber, the steps waiting for it say `waiting on #2`, and a banner lists each parked step with
      **retry step** (a fresh repair ladder for that step alone, nothing else restarts) and **skip step and go on** (it counts
-     as done without its check, so what waited for it can start). Approving a blocked plan again, as before, tries every parked
-     step again. A plan proposed with a dependency on an unknown step, on itself or on a later step (that includes every
+     as done without its check, so what waited for it can start). Before a step is parked, it is retried automatically first: the
+     runner gives the step a fresh repair ladder starting from the project as the best round left it, and tells the model what
+     went wrong. Each plan has a default budget of 2 automatic retries per step (settable 0 to 5 when approving); the run log
+     shows each one as a "step retried" line with the count. Nobody is notified while retries remain and the step is not stopped.
+     Once the budget is used, the step is parked as before and you are notified once. A retry you press manually starts the
+     step's budget again. Steps with environment problems (a missing runtime), broken checks, or unknown failures are not
+     retried automatically, and nothing is retried after the run deadline. Approving a blocked plan again, as before, tries
+     every parked step again. A plan proposed with a dependency on an unknown step, on itself or on a later step (that includes every
      cycle), or between two steps of one parallel group, is sent back to the planner. In a plan file, a step can say
      `- Depends: 1, 3`.
    - **The user is told once** when a step is parked, when the run ends with steps that need you, when the plan is done and
@@ -312,10 +318,14 @@ nothing more can run, the plan is blocked and the report says what is done, what
 do next. A step that names files to change is not accepted when its approved check passes but nothing was changed: the round
 counts as failed, the step climbs the repair ladder, and if it still changes nothing it is parked with cause `no-change`,
 because a check that already passes cannot show that the work is done. An edit by the model's file tools, or any project file
-git sees changed (lock files and build caches excepted), counts as a change, in this round or an earlier one. A step that
-names no files is not held to this, nor is the last step of a plan with more than one step, which is the whole-project check.
-Retry gives the model another go; Skip is for work that is already in place. If it happens often, the plan's check is too
-weak: use one that fails until the work is done, such as a test the step adds.
+git sees changed (lock files and build caches excepted), counts as a change, in this round or an earlier one. If a step names
+test files (test/ or tests/ folders, `__tests__`, `foo.test.ts`, `foo.spec.ts`, `foo_test.go`, `FooTests.cs`, `test_foo.py`),
+at least one of those must also have changed before the check's pass is accepted, because a check that only runs existing tests
+says nothing about the new work. The model is told to add or extend a test that fails without its change. A step that names no
+files is not held to this, nor is the last step of a plan with more than one step, which is the whole-project check. Where git
+cannot say what changed the model is given the benefit of the doubt. Retry gives the model another go; Skip is for work that is
+already in place. If it happens often, the plan's check is too weak: use one that fails until the work is done, such as a test
+the step adds.
 You retry or skip one step, or approve the plan again to retry them all. You are told once when a step is parked,
 when the run ends with steps waiting, when the plan is done, and when the run deadline passes.
 

@@ -52,6 +52,22 @@ internal static class PlanHealChecks
     public static bool IsAuto(string? mode) => !string.Equals(mode, Ask, StringComparison.OrdinalIgnoreCase);
 }
 
+/// <summary>
+/// How many times the runner gives a parked step a fresh repair ladder by itself before it is left for the user. A plan left
+/// to run unattended is not stopped by a step that a second pass, from the best state the first one left, can finish.
+/// </summary>
+internal static class PlanAutoRetry
+{
+    public const int Default = 2;
+    public const int Max = 5;
+
+    public static int For(PlanRecord plan) => Math.Clamp(plan.AutoRetries ?? Default, 0, Max);
+
+    // The causes a pass from the best state may fix: the ladder was spent, nothing changed, the step ran out of time. An
+    // environment, a broken check or an unknown failure is not made better by trying again.
+    public static bool Retryable(string cause) => cause is "check-kept-failing" or "no-change" or "working-time";
+}
+
 internal sealed record PlanStep(
     int Id,
     string Title,
@@ -179,7 +195,8 @@ internal sealed record PlanRecord(
     string? ContextId = null,
     string? RecoveryScope = null,
     DateTimeOffset? RunDeadlineUtc = null,
-    string? HealChecks = null);
+    string? HealChecks = null,
+    int? AutoRetries = null);
 
 internal sealed record PlanSummary(
     string Id,
@@ -207,4 +224,5 @@ internal sealed record StepMachineRequest(int StepId, string? Machine);
 internal sealed record PlanApprovalRequest(
     bool ExportToProject = false,
     string? RecoveryScope = null,
-    string? HealChecks = null);
+    string? HealChecks = null,
+    int? AutoRetries = null);

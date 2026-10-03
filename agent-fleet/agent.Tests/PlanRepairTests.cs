@@ -62,7 +62,7 @@ public sealed partial class PlanRunnerTests
             Assert.Null(error);
         }
 
-        return Store.Approve(plan.Id, recoveryScope: scope)!;
+        return Store.Approve(plan.Id, recoveryScope: scope, autoRetries: 0)!;
     }
 
     private (FleetOptions Options, FleetHealthMonitor Health) HubFleet()
@@ -194,19 +194,19 @@ public sealed partial class PlanRunnerTests
         // A plan created with no scope and approved with no scope argument gets AllowHubRescue.
         PlanRecord plan = Store.Create("Plan", "goal", ProjectDirectory, ["a"], ["q?"], ["r"], null, null,
             [Step("one", "dotnet build", "standard")]);
-        PlanRecord approved = Store.Approve(plan.Id)!;
+        PlanRecord approved = Store.Approve(plan.Id, autoRetries: 0)!;
         Assert.Equal(PlanRecoveryScope.AllowHubRescue, approved.RecoveryScope);
 
         // A plan approved with an explicit WorkerOnly scope gets WorkerOnly.
         PlanRecord plan2 = Store.Create("Plan2", "goal", ProjectDirectory, ["a"], ["q?"], ["r"], null, null,
             [Step("one", "dotnet build", "standard")]);
-        PlanRecord approved2 = Store.Approve(plan2.Id, recoveryScope: PlanRecoveryScope.WorkerOnly)!;
+        PlanRecord approved2 = Store.Approve(plan2.Id, recoveryScope: PlanRecoveryScope.WorkerOnly, autoRetries: 0)!;
         Assert.Equal(PlanRecoveryScope.WorkerOnly, approved2.RecoveryScope);
 
         // A plan created with a stored scope keeps it when approved without a scope argument.
         PlanRecord plan3 = Store.Create("Plan3", "goal", ProjectDirectory, ["a"], ["q?"], ["r"], null, null,
             [Step("one", "dotnet build", "standard")], recoveryScope: PlanRecoveryScope.WorkerOnly);
-        PlanRecord approved3 = Store.Approve(plan3.Id)!;
+        PlanRecord approved3 = Store.Approve(plan3.Id, autoRetries: 0)!;
         Assert.Equal(PlanRecoveryScope.WorkerOnly, approved3.RecoveryScope);
     }
 
@@ -505,7 +505,7 @@ public sealed partial class PlanRunnerTests
             new PlanStepInput("write the first file", "detail", ["one.txt"], "check one", "standard", ParallelGroup: "pair"),
             new PlanStepInput("write the second file", "detail", ["two.txt"], "check two", "light", ParallelGroup: "pair"),
             new PlanStepInput("validate everything", "detail", ["a.cs"], "check all", "standard")
-        ]).Id, recoveryScope: PlanRecoveryScope.WorkerOnly)!;
+        ]).Id, recoveryScope: PlanRecoveryScope.WorkerOnly, autoRetries: 0)!;
         int firstChecks = 0;
         var agent = new FakeStepAgent((prompt, _, _) =>
         {

@@ -34,7 +34,7 @@ public sealed partial class PlanRunnerTests
             Assert.Null(error);
         }
 
-        return Store.Approve(plan.Id, recoveryScope: scope, healChecks: healChecks)!;
+        return Store.Approve(plan.Id, recoveryScope: scope, healChecks: healChecks, autoRetries: 0)!;
     }
 
     private static FakeStepAgent Healer(Func<FakeAuditCall, StepAgentReply> auditor) =>
@@ -203,7 +203,7 @@ public sealed partial class PlanRunnerTests
         Assert.DoesNotContain(parked.Events!, e => e.Kind == RunEventKind.CheckHealed);
 
         // The user answers by approving again with the fix-automatically setting.
-        Store.Approve(plan.Id, healChecks: PlanHealChecks.Auto);
+        Store.Approve(plan.Id, healChecks: PlanHealChecks.Auto, autoRetries: 0);
         await RepairRunner(agent, verify, options, health).RunPlanAsync(plan.Id, default);
 
         PlanRecord done = Store.Get(plan.Id)!;
@@ -497,7 +497,7 @@ public sealed partial class PlanRunnerTests
     public async Task A_step_without_a_check_whose_file_was_never_created_fails_normally_and_is_not_audited()
     {
         PlanRecord plan = Store.Approve(Store.Create("No check", "goal", ProjectDirectory, ["a"], ["q?"], ["r"], null, null,
-            [new PlanStepInput("Write a.cs", "Write it", ["a.cs"], null, "standard")]).Id)!;
+            [new PlanStepInput("Write a.cs", "Write it", ["a.cs"], null, "standard")]).Id, autoRetries: 0)!;
         FakeStepAgent agent = Healer(_ => throw new InvalidOperationException("no audit is needed"));
         agent = new FakeStepAgent((_, _, _) => Task.FromResult("I did nothing.")) { Auditor = agent.Auditor };
 

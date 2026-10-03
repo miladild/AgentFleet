@@ -11,12 +11,18 @@ namespace AgentFleet;
 internal sealed partial class PlanRunner
 {
     /// <summary>
-    /// Parks the step: it keeps its reason, the plan goes on, and the user is told once. The step is the user's to retry or
-    /// skip; nothing here retries it. Cause is a few fixed words for the notice, never output.
+    /// Parks the step: it keeps its reason, the plan goes on, and the user is told once. Unless the plan's automatic retries
+    /// (see TryRetryAutomatically) give it another go first, the step is then the user's to retry or skip. Cause is a few
+    /// fixed words for the notice, never output.
     /// </summary>
     private void ParkStep(PlanRecord plan, PlanStep step, string note, string cause, string? reason = null)
     {
         reason ??= note;
+        if (TryRetryAutomatically(plan, step, cause, reason))
+        {
+            return;
+        }
+
         PlanRecord? parked = _store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, step.Id, s => s with
         {
             Status = StepStatus.Parked,
@@ -34,6 +40,60 @@ internal sealed partial class PlanRunner
         {
             Notify(parked, "step-parked", step, cause);
         }
+    }
+
+    /// <summary>
+    /// A plan left to run unattended should not wait for a person over a step that a second pass can finish. Instead of
+    /// parking, the step gets a fresh repair ladder (the user's own Retry, done by the runner), starting from the project as
+    /// the best round left it and with what went wrong in front of the model. It is bounded: the plan's budget of automatic
+    /// retries for this step (a retry by the user starts it afresh), the causes a second pass can mend, and the run deadline.
+    /// Nobody is told: the step is not stopped.
+    /// </summary>
+    private bool TryRetryAutomatically(PlanRecord plan, PlanStep step, string cause, string reason)
+    {
+        if (!PlanAutoRetry.Retryable(cause))
+        {
+            return false;
+        }
+
+        PlanRecord latest = _store.Get(plan.Id) ?? plan;
+        int budget = PlanAutoRetry.For(latest);
+        int used = AutomaticRetriesUsed(latest, step.Id);
+        if (used >= budget || (latest.RunDeadlineUtc is { } deadline && _utcNow() >= deadline))
+        {
+            return false;
+        }
+
+        string detail = $"{reason} Trying it again automatically (retry {used + 1} of {budget}) with a fresh repair ladder, from the project as the best round left it.";
+        _store.RetryStepAutomatically(plan.Id, step.Id, detail);
+        _logger.LogWarning("Plan {PlanId} step {StepId} ({Title}) is retried automatically ({Used} of {Budget}): {Cause}.",
+            plan.Id, step.Id, step.Title, used + 1, budget, cause);
+        return true;
+    }
+
+    // The automatic retries a step has had since the user last gave it a fresh start (their own retry, or approving the plan again).
+    private static int AutomaticRetriesUsed(PlanRecord plan, int stepId)
+    {
+        int used = 0;
+        foreach (PlanRunEvent runEvent in (plan.Events ?? []).Reverse())
+        {
+            if (runEvent.Kind == RunEventKind.RetryApproved && (runEvent.StepId is null || runEvent.StepId == stepId))
+            {
+                break;
+            }
+
+            if (runEvent.Kind == RunEventKind.StepRetried && runEvent.StepId == stepId)
+            {
+                if (!string.Equals(runEvent.FailureClass, FleetPlanStore.AutoRetryClass, StringComparison.Ordinal))
+                {
+                    break;
+                }
+
+                used++;
+            }
+        }
+
+        return used;
     }
 
     /// <summary>

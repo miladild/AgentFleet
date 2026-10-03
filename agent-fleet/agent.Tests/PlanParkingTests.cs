@@ -27,7 +27,7 @@ public sealed partial class PlanRunnerTests
     private static PlanStepInput Node(string name, params int[] dependsOn) =>
         new(name, "do " + name, [], "check " + name, "standard", DependsOn: dependsOn.Length > 0 ? dependsOn : null);
 
-    private PlanRecord Graph(params PlanStepInput[] steps) => Store.Approve(Store.Create("Graph", "goal", ProjectDirectory, ["a"], ["q?"], ["r"], null, null, steps).Id)!;
+    private PlanRecord Graph(params PlanStepInput[] steps) => Store.Approve(Store.Create("Graph", "goal", ProjectDirectory, ["a"], ["q?"], ["r"], null, null, steps).Id, autoRetries: 0)!;
 
     private static Func<string, string> PassingExcept(params string[] failing) =>
         command => failing.Contains(command, StringComparer.Ordinal) ? Fail(command) : Pass(command);
@@ -124,7 +124,7 @@ public sealed partial class PlanRunnerTests
         Assert.Equal(StepStatus.Pending, retried.Steps[1].Status);
         Assert.Equal(0, retried.Steps[1].Attempts);
         Assert.Single(retried.Events!, e => e.Kind == RunEventKind.StepRetried && e.StepId == 2);
-        Store.Approve(plan.Id, retryStopped: false);
+        Store.Approve(plan.Id, retryStopped: false, autoRetries: 0);
         await Runner(agent, verify).RunPlanAsync(plan.Id, default);
 
         PlanRecord done = Store.Get(plan.Id)!;
@@ -144,11 +144,11 @@ public sealed partial class PlanRunnerTests
             Steps = current.Steps.Select(step => step.Id is 2 or 3 ? step with { Status = StepStatus.Parked, Attempts = 3 } : step).ToList()
         });
 
-        PlanRecord goingOn = Store.Approve(plan.Id, retryStopped: false)!;
+        PlanRecord goingOn = Store.Approve(plan.Id, retryStopped: false, autoRetries: 0)!;
         Assert.Equal([StepStatus.Pending, StepStatus.Parked, StepStatus.Parked, StepStatus.Pending], goingOn.Steps.Select(step => step.Status));
 
         Store.Update(plan.Id, current => current with { Status = PlanStatus.Blocked });
-        PlanRecord all = Store.Approve(plan.Id)!;
+        PlanRecord all = Store.Approve(plan.Id, autoRetries: 0)!;
         Assert.Equal([StepStatus.Pending, StepStatus.Pending, StepStatus.Pending, StepStatus.Pending], all.Steps.Select(step => step.Status));
         Assert.Equal([0, 0, 0, 0], all.Steps.Select(step => step.Attempts));
     }
@@ -201,7 +201,7 @@ public sealed partial class PlanRunnerTests
         // Retried and finished: one more notice, the plan is done; nothing is told twice.
         twoWorks = true;
         Store.RetryStep(plan.Id, 2);
-        Store.Approve(plan.Id, retryStopped: false);
+        Store.Approve(plan.Id, retryStopped: false, autoRetries: 0);
         await Runner(Agent(), verify, notifier: notifier).RunPlanAsync(plan.Id, default);
 
         Assert.Equal(["step-parked", "plan-needs-attention", "plan-done"], notifier.Notices.Select(notice => notice.Kind));
@@ -234,7 +234,7 @@ public sealed partial class PlanRunnerTests
             new PlanStepInput("build", "build it", [], "check build", "standard", DependsOn: [1]),
             new PlanStepInput("other", "unrelated", [], "check other", "standard", DependsOn: [1]),
             new PlanStepInput("final", "everything", [], "check final", "standard", DependsOn: [1, 2, 3])
-        ]).Id)!;
+        ]).Id, autoRetries: 0)!;
         // Step 2 is the one whose check never ends; steps 3 does not depend on it.
         Store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, 1, step => step with { Verify = "check one" }));
         Store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, 2, step => step with { Verify = "npm run dev" }));

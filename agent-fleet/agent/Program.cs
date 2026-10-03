@@ -1150,7 +1150,7 @@ app.MapPost("/api/plans/{id}/approve", (string id, PlanApprovalRequest request) 
 
     try
     {
-        PlanRecord? approved = planStore.Approve(id, request.ExportToProject, request.RecoveryScope, request.HealChecks);
+        PlanRecord? approved = planStore.Approve(id, request.ExportToProject, request.RecoveryScope, request.HealChecks, autoRetries: request.AutoRetries);
         return approved is null
             ? Results.NotFound()
             : Results.Json(approved);

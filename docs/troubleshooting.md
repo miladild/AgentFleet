@@ -124,10 +124,13 @@ this.
 
 ## Plans
 
-- **Blocked, with a parked step.** The plan stopped because nothing more could run. Open it (or `@fleet /status` in VS Code):
-  the report says which step is parked and why, which steps waited for it, and what to do. Fix the cause, then **retry step**
-  (a fresh repair ladder for that one step) or **skip step** (it counts as done without its check). **Approve and resume**
-  retries every parked step. Steps that did not depend on the parked one have already run.
+- **Blocked, with a parked step.** The plan stopped because nothing more could run. A parked step is retried automatically
+  first with a fresh repair ladder before you are notified; each plan has a default budget of 2 automatic retries per step
+  (settable 0 to 5 when approving), shown in the run log as "step retried" lines. Once the budget is used the step is parked
+  and you are notified. Open it (or `@fleet /status` in VS Code): the report says which step is parked and why, which steps
+  waited for it, and what to do. Fix the cause, then **retry step** (a fresh repair ladder with a new budget) or **skip step**
+  (it counts as done without its check). **Approve and resume** retries every parked step. Steps that did not depend on the
+  parked one have already run.
 - **"Waiting ... before retrying" in the run log.** No machine could answer, or a worker could not be reached. The step waits,
   asks the machine for a small real answer each time it wakes (and every minute during a long pause, ending the pause as soon as
   the machine answers), and carries on by itself; waiting costs no attempt. It keeps going until the run deadline, so a night-long outage is survived and nothing needs doing unless it outlasts the deadline.
@@ -138,9 +141,10 @@ this.
   (it would have passed without the work, or tested less). Change the step's check to one that finishes and tests the result,
   or skip the step, then approve again.
 - **A step is parked with cause `no-change`.** The step names files to change, but nothing was changed and its check passes
-  anyway, so the check cannot show that the work was done. Retry the step to give the model another go, or skip it if the work
-  is already in place. If it happens often, the plan's check is too weak: it should fail until the work is done (for example a
-  test the step adds).
+  anyway, so the check cannot show that the work was done. If the step names test files, at least one of them must also have
+  changed. The step is automatically retried first (with a fresh repair ladder and budget); once retries are spent you are
+  notified. Retry the step again to give the model another go with a new budget, or skip it if the work is already in place.
+  If it happens often, the plan's check is too weak: it should fail until the work is done (for example a test the step adds).
 - **"Blocked by unattended plan policy".** A step tried a command that only a person may run: git, a remote service, a delete of
   folders, a change to a security setting or to the machine's configuration. The command did not run. If the project really
   needs it, do it yourself and retry the step.

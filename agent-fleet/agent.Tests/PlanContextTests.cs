@@ -21,10 +21,23 @@ public sealed class PlanContextTests : ContextTestBase
 
     private string File1 => Path.Combine(_project, "a.txt");
 
-    private PlanRunner Runner(FakeStepAgent agent, FleetPlanStore? plans = null, TimeSpan? timeout = null)
+    private PlanRunner Runner(FakeStepAgent agent, FleetPlanStore? plans = null, TimeSpan? timeout = null, bool gitSeesFiles = false)
     {
         plans ??= Plans;
-        var tools = new PlanTools(plans, Valid, (command, _, _) => Task.FromResult("Exit code: 0\n--- stdout ---\nok"), Journal);
+        // By default git sees nothing here. With gitSeesFiles it is git as the runner sees it over the real project folder:
+        // every file in it is "changed or new", so a file the model writes shows up in the runner's before and after snapshots
+        // (see PlanRepairTests.RepairTools).
+        var tools = new PlanTools(plans, Valid, (command, _, _) => Task.FromResult(command switch
+        {
+            _ when !gitSeesFiles => "Exit code: 0\n--- stdout ---\nok",
+            "git rev-parse --show-toplevel" => $"Exit code: 0\n--- stdout ---\n{_project}",
+            "git rev-parse HEAD" => "Exit code: 0\n--- stdout ---\nabc123",
+            _ when command.Contains("--untracked-files=all", StringComparison.Ordinal) =>
+                "Exit code: 0\n--- stdout ---\n" + string.Join("\n",
+                    Directory.GetFiles(_project, "*", SearchOption.AllDirectories)
+                        .Select(file => "?? " + Path.GetRelativePath(_project, file).Replace('\\', '/'))),
+            _ => "Exit code: 0\n--- stdout ---\nok"
+        }), Journal);
         return new PlanRunner(
             plans, tools, agent, NullLogger.Instance, timeout,
             recorder: new PlanContextRecorder(Store, plans, NullLogger.Instance), journal: Journal);
@@ -33,7 +46,7 @@ public sealed class PlanContextTests : ContextTestBase
     private PlanRecord Approved(FleetPlanStore plans, params PlanStepInput[] steps)
     {
         PlanRecord plan = plans.Create("Rate limiting", "Limit login attempts", _project, ["requests are keyed by address"], [], ["shared NAT"], null, null, steps);
-        return plans.Approve(plan.Id)!;
+        return plans.Approve(plan.Id, autoRetries: 0)!;
     }
 
     private static PlanStepInput Step(string title, string file, string? tier = "standard", bool retrySafe = false) =>
@@ -195,7 +208,7 @@ public sealed class PlanContextTests : ContextTestBase
 
         PlanRecord plan = Plans.List().Select(s => Plans.Get(s.Id)!).Single();
         Assert.Equal(chat, plan.ContextId);
-        Plans.Approve(plan.Id);
+        Plans.Approve(plan.Id, autoRetries: 0);
         string? injected = null;
         var agent = new FakeStepAgent((_, _, _) =>
         {
@@ -314,7 +327,7 @@ public sealed class PlanContextTests : ContextTestBase
         Assert.Contains(paused.Events!, e => e.Kind == RunEventKind.PlanBlocked && e.StepId == 2);
 
         // The user has looked and approves another run: the step goes again and the plan finishes.
-        Plans.Approve(plan.Id);
+        Plans.Approve(plan.Id, autoRetries: 0);
         await Runner(secondRun, Plans).RunPlanAsync(plan.Id, default);
 
         Assert.Equal(PlanStatus.Done, Plans.Get(plan.Id)!.Status);
@@ -455,7 +468,8 @@ public sealed class PlanContextTests : ContextTestBase
             return Task.FromResult("Done.");
         });
 
-        await Runner(agent).RunPlanAsync(plan.Id, default);
+        // Git sees the test the model wrote: a step that names test files is only done when one of them changed.
+        await Runner(agent, gitSeesFiles: true).RunPlanAsync(plan.Id, default);
 
         PlanRecord after = Plans.Get(plan.Id)!;
         Assert.Equal(PlanStatus.Done, after.Status);
@@ -470,13 +484,23 @@ public sealed class PlanContextTests : ContextTestBase
         // passed all 22 tests failed three times and blocked the plan.
         Directory.CreateDirectory(Path.Combine(_project, "test"));
         File.WriteAllText(Path.Combine(_project, "test", "app.test.ts"), "test");
-        PlanRecord plan = Approved(Plans, Step("Run all tests", "test/*.test.ts"));
-        var agent = new FakeStepAgent((_, _, _) => Task.FromResult("All 22 tests passed."));
+        // The step that runs the suite is the last step of a plan with another before it: a step that only runs the tests is
+        // not asked to change them.
+        PlanRecord plan = Approved(Plans, Step("Prepare", "a.txt"), Step("Run all tests", "test/*.test.ts"));
+        var agent = new FakeStepAgent((prompt, _, _) =>
+        {
+            if (prompt.Contains("(1 of 2)"))
+            {
+                File.WriteAllText(File1, "prepared");
+            }
+
+            return Task.FromResult("All 22 tests passed.");
+        });
 
         await Runner(agent).RunPlanAsync(plan.Id, default);
 
         Assert.Equal(PlanStatus.Done, Plans.Get(plan.Id)!.Status);
-        Assert.Single(agent.Calls);
+        Assert.Equal(2, agent.Calls.Count);
     }
 
     [Fact]
@@ -496,7 +520,7 @@ public sealed class PlanContextTests : ContextTestBase
             return Task.FromResult("Done.");
         });
 
-        await Runner(agent).RunPlanAsync(plan.Id, default);
+        await Runner(agent, gitSeesFiles: true).RunPlanAsync(plan.Id, default);
 
         PlanRecord after = Plans.Get(plan.Id)!;
         Assert.Equal(PlanStatus.Done, after.Status);
@@ -523,7 +547,7 @@ public sealed class PlanContextTests : ContextTestBase
     {
         File.WriteAllText(Path.Combine(_project, "package.json"), """{ "scripts": { "dev": "tsx watch src/index.ts" } }""");
         PlanRecord plan = Plans.Approve(Plans.Create("Run it", "Run the project", _project, [], [], [], null, null,
-            [new PlanStepInput("Start the development server", "npm run dev", ["src/index.ts"], "npm run dev", "standard")]).Id)!;
+            [new PlanStepInput("Start the development server", "npm run dev", ["src/index.ts"], "npm run dev", "standard")]).Id, autoRetries: 0)!;
         var agent = new FakeStepAgent((_, _, _) => Task.FromResult("Started."));
 
         await Runner(agent).RunPlanAsync(plan.Id, default);
@@ -545,7 +569,7 @@ public sealed class PlanContextTests : ContextTestBase
         Plans.Update(plan.Id, current => current with { Status = PlanStatus.Blocked });
 
         Assert.Equal(PlanStatus.Blocked, Plans.SkipStep(plan.Id, 1)!.Status);
-        PlanRecord resumed = Plans.Approve(plan.Id)!;
+        PlanRecord resumed = Plans.Approve(plan.Id, autoRetries: 0)!;
         var agent = new FakeStepAgent((_, _, _) =>
         {
             File.WriteAllText(Path.Combine(_project, "b.txt"), "b");
@@ -587,7 +611,7 @@ public sealed class PlanContextTests : ContextTestBase
         Assert.Equal(3, agent.Calls.Count);
 
         fixedNow = true;
-        Plans.Approve(plan.Id);
+        Plans.Approve(plan.Id, autoRetries: 0);
         await Runner().RunPlanAsync(plan.Id, default);
 
         string resumed = agent.Calls[3].Prompt;
