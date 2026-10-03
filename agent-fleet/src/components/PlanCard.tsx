@@ -71,6 +71,7 @@ export type Plan = {
   /** What the runner does with a check that is broken, not failing: "auto" fixes it, "ask" parks the step with the proposal. */
   healChecks?: string | null;
   autoRetries?: number | null;
+  review?: string | null;
   runDeadlineUtc?: string | null;
 };
 
@@ -192,6 +193,7 @@ const EVENT_STYLE: Record<string, string> = {
   "plan-needs-attention": "text-amber-400",
   "check-healed": "text-emerald-300",
   "check-audit": "text-amber-300",
+  "step-review": "text-sky-300",
   "environment-repaired": "text-emerald-300",
   "blocker-reported": "text-amber-300",
   "inference-probe-passed": "text-emerald-300",
@@ -254,6 +256,7 @@ export function PlanCard({ planId }: { planId: string }) {
   const [recoveryChoice, setRecoveryChoice] = useState<string | null>(null);
   const [healChoice, setHealChoice] = useState<string | null>(null);
   const [retryChoice, setRetryChoice] = useState<number | null>(null);
+  const [reviewChoice, setReviewChoice] = useState<string | null>(null);
 
   async function approve() {
     setBusy(true);
@@ -267,6 +270,7 @@ export function PlanCard({ planId }: { planId: string }) {
           recoveryScope: recoveryChoice ?? plan?.recoveryScope ?? "allow-hub-rescue",
           healChecks: healChoice ?? plan?.healChecks ?? "auto",
           autoRetries: retryChoice ?? plan?.autoRetries ?? 2,
+          review: reviewChoice ?? plan?.review ?? "auto",
         }),
       });
       if (!res.ok) {
@@ -492,6 +496,22 @@ export function PlanCard({ planId }: { planId: string }) {
                 <option value={1}>Retry once by itself</option>
                 <option value={2}>Retry up to 2 times by itself</option>
                 <option value={3}>Retry up to 3 times by itself</option>
+              </select>
+            </label>
+          )}
+          {canApprove && (
+            <label className="flex items-center gap-1.5 text-[11px] text-neutral-400">
+              <span>Second opinion</span>
+              <select
+                aria-label="Second opinion on each step"
+                value={reviewChoice ?? plan.review ?? "auto"}
+                onChange={(event) => setReviewChoice(event.target.value)}
+                disabled={busy}
+                title="A passing check only shows that the code and the tests the same model wrote agree. With this on, a model that did not write the code reads it against the step's text before the step is accepted, and sends it back if a requirement is unmet."
+                className="rounded border border-neutral-700 bg-neutral-900 px-1.5 py-1 text-[11px] text-neutral-200"
+              >
+                <option value="auto">A second model reads each step</option>
+                <option value="off">Off</option>
               </select>
             </label>
           )}

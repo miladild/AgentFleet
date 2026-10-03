@@ -34,7 +34,7 @@ public sealed partial class PlanRunnerTests
             Assert.Null(error);
         }
 
-        return Store.Approve(plan.Id, recoveryScope: scope, healChecks: healChecks, autoRetries: 0)!;
+        return Store.Approve(plan.Id, recoveryScope: scope, healChecks: healChecks, autoRetries: 0, review: PlanSecondOpinion.Off)!;
     }
 
     private static FakeStepAgent Healer(Func<FakeAuditCall, StepAgentReply> auditor) =>

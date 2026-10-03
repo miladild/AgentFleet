@@ -107,6 +107,7 @@ const RUN_TONE: Record<string, LogLine["tone"]> = {
   "plan-needs-attention": "warn",
   "check-healed": "good",
   "check-audit": "warn",
+  "step-review": "accent",
   "environment-repaired": "good",
   "blocker-reported": "warn",
 };
@@ -144,6 +145,7 @@ function runText(event: PlanRunEvent): string {
     case "check-healed":
       return `the check was changed${event.checkBefore != null && event.checkAfter != null ? `: ${event.checkBefore} → ${event.checkAfter}` : ""}${tail(firstLine)}`;
     case "check-audit":
+    case "step-review":
     case "environment-repaired":
     case "blocker-reported":
       return firstLine || event.kind.replace(/-/g, " ");

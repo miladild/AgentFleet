@@ -21,6 +21,15 @@ internal static partial class PlanRunnerToolPolicy
         "read_file", "list_directory", "find_files", "search_files", "project_overview", "propose_check"
     };
 
+    /// <summary>The role of a model that did not write a step's code and is asked whether the step's requirements are met.</summary>
+    public const string StepReviewRole = "step-review";
+
+    // The reviewer reads. It cannot run a command, write a file or call anything else.
+    private static readonly HashSet<string> ReviewTools = new(StringComparer.Ordinal)
+    {
+        "read_file", "list_directory", "find_files", "search_files", "project_overview"
+    };
+
     /// <summary>
     /// Whether a tool is offered on a plan runner request. report_blocker is for a model carrying out a step and
     /// propose_check for the auditor; neither is offered in chat, and the auditor gets nothing that changes anything.
@@ -29,7 +38,13 @@ internal static partial class PlanRunnerToolPolicy
     {
         if (toolName is "report_blocker" or "propose_check")
         {
-            return fromRunner && (role == CheckAuditRole ? toolName == "propose_check" : toolName == "report_blocker");
+            // The reviewer is offered neither: it answers in words.
+            return fromRunner && role != StepReviewRole && (role == CheckAuditRole ? toolName == "propose_check" : toolName == "report_blocker");
+        }
+
+        if (fromRunner && role == StepReviewRole)
+        {
+            return ReviewTools.Contains(toolName);
         }
 
         return !(fromRunner && role == CheckAuditRole) || AuditTools.Contains(toolName);
@@ -69,6 +84,13 @@ internal static partial class PlanRunnerToolPolicy
 
     public static string? Refusal(string toolName, string? command = null, string? role = null)
     {
+        if (role == StepReviewRole)
+        {
+            return ReviewTools.Contains(toolName)
+                ? null
+                : $"Blocked: `{toolName}` is not available while a step is being reviewed. You can read files and answer in words.";
+        }
+
         if (role == CheckAuditRole)
         {
             return AuditTools.Contains(toolName)

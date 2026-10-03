@@ -841,6 +841,7 @@ internal sealed partial class PlanRunner
         string? conversationWorkspace = null;
         RoundOutcome? lastRound = null;
         string? lastUnverified = null;
+        bool lastReviewFailed = false;
         string? handover = null;
         bool gaveUp = false;
         StepCheckpoint? best = null;
@@ -1103,6 +1104,17 @@ internal sealed partial class PlanRunner
                     result = new StepCompletion(false, unverified, unverified, result.Restored);
                 }
 
+                // A check that passes is not yet a step that is done: a model that did not write the code reads it against the step.
+                string? findings = result.Done
+                    ? await ReviewAcceptedStepAsync(plan, step, attempt, tier, model, change.Files, rung, round, cancellationToken)
+                    : null;
+                lastReviewFailed = findings is not null;
+                if (findings is not null)
+                {
+                    string rejected = StepReview.RejectionMessage(findings);
+                    result = new StepCompletion(false, rejected, rejected, result.Restored);
+                }
+
                 long? verification = RecordCheck(plan, step, attempt, result, model.ModelNode);
                 TimeSpan roundTime = _utcNow() - roundStarted;
                 worked += roundTime;
@@ -1228,6 +1240,14 @@ internal sealed partial class PlanRunner
             ParkStep(plan, step, $"Did not do its work after {rounds}: {(testsOnly ? "no test file it names changed" : "nothing it names changed")}.", "no-change",
                 reason: $"Step {step.Id} ({step.Title}) was not done: after {rounds} it still changed {(testsOnly ? "none of the test files it names" : "none of the files it names")}, " +
                         "and its check passes without that, so the check cannot show that the work is done. Retry it, or skip it if the work is already in place.");
+            return false;
+        }
+
+        if (lastReviewFailed)
+        {
+            ParkStep(plan, step, $"Its reviewer was not satisfied after {rounds}.{kept}", "review",
+                reason: $"Step {step.Id} ({step.Title}) passed its check but a reviewer that did not write the code still found its requirements unmet after {rounds}: " +
+                        $"every rung of the repair ladder had its rounds.{kept} The reviewer's findings are in the run log. Retry it, or skip it if the reviewer is wrong.");
             return false;
         }
 
