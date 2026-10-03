@@ -262,7 +262,7 @@ export function PlanCard({ planId }: { planId: string }) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           exportToProject,
-          recoveryScope: recoveryChoice ?? plan?.recoveryScope ?? "worker-only",
+          recoveryScope: recoveryChoice ?? plan?.recoveryScope ?? "allow-hub-rescue",
           healChecks: healChoice ?? plan?.healChecks ?? "auto",
         }),
       });
@@ -448,7 +448,7 @@ export function PlanCard({ planId }: { planId: string }) {
               <span>Recovery</span>
               <select
                 aria-label="Plan recovery scope"
-                value={recoveryChoice ?? plan.recoveryScope ?? "worker-only"}
+                value={recoveryChoice ?? plan.recoveryScope ?? "allow-hub-rescue"}
                 onChange={(event) => setRecoveryChoice(event.target.value)}
                 disabled={busy}
                 className="rounded border border-neutral-700 bg-neutral-900 px-1.5 py-1 text-[11px] text-neutral-200"

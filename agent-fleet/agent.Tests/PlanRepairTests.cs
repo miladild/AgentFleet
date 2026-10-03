@@ -189,6 +189,96 @@ public sealed partial class PlanRunnerTests
     }
 
     [Fact]
+    public void A_plan_with_no_recorded_scope_is_approved_with_hub_rescue_allowed()
+    {
+        // A plan created with no scope and approved with no scope argument gets AllowHubRescue.
+        PlanRecord plan = Store.Create("Plan", "goal", ProjectDirectory, ["a"], ["q?"], ["r"], null, null,
+            [Step("one", "dotnet build", "standard")]);
+        PlanRecord approved = Store.Approve(plan.Id)!;
+        Assert.Equal(PlanRecoveryScope.AllowHubRescue, approved.RecoveryScope);
+
+        // A plan approved with an explicit WorkerOnly scope gets WorkerOnly.
+        PlanRecord plan2 = Store.Create("Plan2", "goal", ProjectDirectory, ["a"], ["q?"], ["r"], null, null,
+            [Step("one", "dotnet build", "standard")]);
+        PlanRecord approved2 = Store.Approve(plan2.Id, recoveryScope: PlanRecoveryScope.WorkerOnly)!;
+        Assert.Equal(PlanRecoveryScope.WorkerOnly, approved2.RecoveryScope);
+
+        // A plan created with a stored scope keeps it when approved without a scope argument.
+        PlanRecord plan3 = Store.Create("Plan3", "goal", ProjectDirectory, ["a"], ["q?"], ["r"], null, null,
+            [Step("one", "dotnet build", "standard")], recoveryScope: PlanRecoveryScope.WorkerOnly);
+        PlanRecord approved3 = Store.Approve(plan3.Id)!;
+        Assert.Equal(PlanRecoveryScope.WorkerOnly, approved3.RecoveryScope);
+    }
+
+    [Fact]
+    public async Task A_worker_that_times_out_with_edits_hands_the_step_to_the_hub_at_once_when_rescue_is_allowed()
+    {
+        (FleetOptions options, FleetHealthMonitor health) = HubFleet();
+        PlanRecord plan = RepairPlan("worker-a", PlanRecoveryScope.AllowHubRescue);
+        FakeStepAgent agent = null!;
+        agent = new FakeStepAgent(async (_, _, ct) =>
+        {
+            if (agent.Calls[^1].Machine == "worker-a")
+            {
+                File.WriteAllText(SourceFile, "partial");
+                await Task.Delay(Timeout.Infinite, ct);
+            }
+            else if (agent.Calls[^1].Machine == "hub")
+            {
+                File.WriteAllText(SourceFile, "fixed");
+            }
+
+            return "Worked on it.";
+        });
+
+        await RepairRunner(agent, _ => File.ReadAllText(SourceFile).Contains("fixed", StringComparison.Ordinal)
+            ? Pass("check")
+            : FailWith("widget::renders"), options, health, attemptTimeout: TimeSpan.FromMilliseconds(300))
+            .RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.Equal(["worker-a", "hub"], agent.Calls.Select(c => c.Machine));
+        PlanRunEvent climb = Assert.Single(after.Events!, runEvent => runEvent.Kind == RunEventKind.RungChanged);
+        Assert.Equal(2, climb.Rung);
+        Assert.Contains("ran out of time", climb.Detail);
+    }
+
+    [Fact]
+    public async Task A_worker_only_plan_whose_worker_times_out_keeps_its_worker_for_the_next_round()
+    {
+        (FleetOptions options, FleetHealthMonitor health) = HubFleet();
+        PlanRecord plan = RepairPlan("worker-a", PlanRecoveryScope.WorkerOnly);
+        int calls = 0;
+        FakeStepAgent agent = null!;
+        agent = new FakeStepAgent(async (_, _, ct) =>
+        {
+            int callNumber = ++calls;
+            if (callNumber == 1)
+            {
+                File.WriteAllText(SourceFile, "partial");
+                await Task.Delay(Timeout.Infinite, ct);
+            }
+            else
+            {
+                File.WriteAllText(SourceFile, "fixed");
+            }
+
+            return "Worked on it.";
+        });
+
+        await RepairRunner(agent, _ => File.ReadAllText(SourceFile).Contains("fixed", StringComparison.Ordinal)
+            ? Pass("check")
+            : FailWith("widget::renders"), options, health, attemptTimeout: TimeSpan.FromMilliseconds(300))
+            .RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.All(agent.Calls, call => Assert.Equal("worker-a", call.Machine));
+        Assert.DoesNotContain(after.Events!, runEvent => runEvent.Kind == RunEventKind.RungChanged);
+    }
+
+    [Fact]
     public async Task The_same_failure_with_no_file_changed_is_a_stall_and_climbs_a_rung()
     {
         (FleetOptions options, FleetHealthMonitor health) = HubFleet();
