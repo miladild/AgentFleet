@@ -1,0 +1,26 @@
+{
+  "id": "slugify",
+  "title": "Slugify text",
+  "goal": "Make slugify(text, options) in src/slugify.js correct and add comprehensive tests.",
+  "steps": [
+    {
+      "title": "Implement slugify function",
+      "detail": "src/slugify.js exports slugify(text, options). Rules: (1) Convert text to lowercase; (2) Replace accented Latin letters by their ASCII base letter (é becomes e, è becomes e, ê becomes e, ü becomes u, ö becomes o, ñ becomes n, ç becomes c, å becomes a, ï becomes i); (3) The character & becomes the word 'and' surrounded by separators; (4) Every run of characters that are not a-z or 0-9 becomes one hyphen; (5) Remove leading and trailing hyphens; (6) options.maxLength (a positive integer, default no limit): cut the result to at most that many characters, then remove a trailing hyphen the cut left; (7) A non-string input returns the empty string. Examples: 'Hello, World!' becomes 'hello-world'; '  Crème Brûlée & Café  ' becomes 'creme-brulee-and-cafe'; 'a---b' becomes 'a-b'; 'Ünïcödé' becomes 'unicode'; ('Hello World', {maxLength: 7}) becomes 'hello-w'; ('Hello World', {maxLength: 6}) becomes 'hello'; null becomes ''; 123 becomes ''; '!!!' becomes ''; 'Rock & Roll' becomes 'rock-and-roll'. Export with module.exports = { slugify } (CommonJS). Add tests in test/slugify.test.js (node:test) that cover every rule, every example, and relevant edge cases.",
+      "files": [
+        "src/slugify.js",
+        "test/slugify.test.js"
+      ],
+      "verify": "node --test test/slugify.test.js",
+      "tier": "standard",
+      "retrySafe": true
+    },
+    {
+      "title": "Run the whole test suite",
+      "detail": "Run npm test. Change nothing unless it fails; fix only failures that this plan's change caused.",
+      "files": [],
+      "verify": "npm test",
+      "tier": "standard",
+      "retrySafe": true
+    }
+  ]
+}

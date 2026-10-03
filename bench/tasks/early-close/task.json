@@ -1,0 +1,23 @@
+{
+  "id": "early-close",
+  "title": "NYSE early closes",
+  "goal": "Make marketSession(date) in src/marketHours.js correct on the days the New York Stock Exchange closes early at 1:00 PM New York time, and add isEarlyClose(date).",
+  "steps": [
+    {
+      "title": "Handle NYSE early-close days",
+      "detail": "src/marketHours.js exports marketSession(date), which returns 'pre', 'open', 'post' or 'closed' for an instant, using New York time. It already knows weekends, the full-day holidays of 2026 to 2028 and the regular hours (pre 04:00 to 09:30, open 09:30 to 16:00, post 16:00 to 20:00, otherwise closed); keep all of that working. Add the early-close days. An early-close day is a normal trading day (not a weekend, not a holiday) that is: (1) the Friday after Thanksgiving (Thanksgiving is the fourth Thursday of November); (2) July 3, when July 3 is a Monday, Tuesday, Wednesday or Thursday; (3) December 24, when December 24 is a Monday, Tuesday, Wednesday or Thursday. On an early-close day the market is open from 09:30 until 13:00 New York time (pre-market is unchanged) and is 'post' from 13:00 until 20:00, then closed. Export a second function isEarlyClose(date) that returns true when the New York calendar day of the instant is an early-close day and false otherwise (false on weekends and holidays). Examples: 2026-11-27 and 2026-12-24 and 2028-07-03 are early-close days; 2026-07-03 (a holiday), 2027-12-24 (a holiday) and 2027-07-02 (an ordinary Friday) are not. Do not add dependencies. Add tests in test/marketHours.test.js (node:test) that cover these rules, including the minute before and the minute of 13:00.",
+      "files": ["src/marketHours.js", "test/marketHours.test.js"],
+      "verify": "node --test test/marketHours.test.js",
+      "tier": "standard",
+      "retrySafe": true
+    },
+    {
+      "title": "Run the whole test suite",
+      "detail": "Run npm test. Change nothing unless it fails; fix only failures that this plan's change caused.",
+      "files": [],
+      "verify": "npm test",
+      "tier": "standard",
+      "retrySafe": true
+    }
+  ]
+}

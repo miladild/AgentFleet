@@ -1,0 +1,26 @@
+{
+  "id": "lru-cache",
+  "title": "LRU cache with optional TTL",
+  "goal": "Implement the LruCache class in src/lru.js with maxSize, TTL support, and least-recently-used eviction.",
+  "steps": [
+    {
+      "title": "Implement LruCache class",
+      "detail": "src/lru.js exports the class LruCache. Constructor: new LruCache({ maxSize, ttlMs, now }): maxSize is a required positive integer (anything else throws a RangeError); ttlMs is optional (no expiry when missing); now is an optional function returning the current time in milliseconds (default Date.now) so that time can be controlled. Methods: set(key, value) stores the value, makes the key the most recently used, restarts that key's lifetime, and when the cache holds more than maxSize live entries removes the least recently used one; set returns the cache itself. get(key) returns the value or undefined and makes the key the most recently used (it does NOT restart the lifetime). has(key) says whether a live entry exists and does NOT change the recency. delete(key) removes the entry and returns true when there was one, false otherwise. keys() returns the live keys as an array from least recently used to most recently used. The size getter counts the live entries. An entry is expired, and behaves as absent (and is removed when seen), once now() - timeItWasSet >= ttlMs. Examples: maxSize 2: set a, set b, get a, set c leaves keys ['a','c'] (b was the least recently used); maxSize 2: set a, set b, has('a') (no recency change), set c leaves keys ['b','c']; ttlMs 100 with a controlled clock: set a at time 0, get('a') at time 99 returns the value, at time 100 returns undefined and size is 0; set at time 0, set again at time 50, still alive at time 120 and gone at time 150; get at time 90 does not extend the life: gone at 100; delete('x') is false for a missing key; new LruCache({maxSize: 0}) throws RangeError; keys() of an empty cache is []. Export with module.exports = { LruCache } (CommonJS). Add tests in test/lru.test.js (node:test) covering every rule and example.",
+      "files": [
+        "src/lru.js",
+        "test/lru.test.js"
+      ],
+      "verify": "node --test test/lru.test.js",
+      "tier": "standard",
+      "retrySafe": true
+    },
+    {
+      "title": "Run the whole test suite",
+      "detail": "Run npm test. Change nothing unless it fails; fix only failures that this plan's change caused.",
+      "files": [],
+      "verify": "npm test",
+      "tier": "standard",
+      "retrySafe": true
+    }
+  ]
+}

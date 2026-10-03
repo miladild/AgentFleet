@@ -1,0 +1,26 @@
+{
+  "id": "semver-compare",
+  "title": "Semantic version comparison",
+  "goal": "Make compare(a, b) and sort(versions) in src/semver.js correct and add comprehensive tests.",
+  "steps": [
+    {
+      "title": "Implement version comparison functions",
+      "detail": "src/semver.js exports compare(a, b) which returns -1, 0, or 1; and sort(versions) which returns a NEW array in ascending order without changing the input. Versions are strings 'MAJOR.MINOR.PATCH', optionally followed by '-prerelease' and '+build' (semantic versioning 2.0.0). Rules: (1) Major, minor, patch compare as numbers (1.2.10 is greater than 1.2.9); (2) A version with a prerelease is lower than the same version without; (3) Prerelease identifiers (dot separated) compare left to right: two numeric identifiers compare as numbers, two non-numeric identifiers compare as text in ASCII order, a numeric identifier is lower than a non-numeric one, and when all shared identifiers are equal the version with fewer identifiers is lower; (4) Build metadata is ignored (2.0.0+build.1 and 2.0.0+build.2 compare equal); (5) Invalid versions make compare and sort throw a TypeError whose message starts with 'Invalid version'. Invalid: '1.2', 'v1.2.3', '1.2.3.4', '01.2.3', empty string. Examples in ascending order: 1.0.0-alpha, 1.0.0-alpha.1, 1.0.0-alpha.beta, 1.0.0-beta, 1.0.0-beta.2, 1.0.0-beta.11, 1.0.0-rc.1, 1.0.0. compare('1.2.10','1.2.9') is 1; compare('2.0.0+build.1','2.0.0+build.2') is 0; compare('1.0.0','1.0.0') is 0; sort(['1.10.0','1.2.0','1.2.0-rc.1']) is ['1.2.0-rc.1','1.2.0','1.10.0']. Export with module.exports = { compare, sort } (CommonJS). Add tests in test/semver.test.js (node:test) that cover every rule and example.",
+      "files": [
+        "src/semver.js",
+        "test/semver.test.js"
+      ],
+      "verify": "node --test test/semver.test.js",
+      "tier": "standard",
+      "retrySafe": true
+    },
+    {
+      "title": "Run the whole test suite",
+      "detail": "Run npm test. Change nothing unless it fails; fix only failures that this plan's change caused.",
+      "files": [],
+      "verify": "npm test",
+      "tier": "standard",
+      "retrySafe": true
+    }
+  ]
+}

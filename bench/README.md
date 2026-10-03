@@ -1,0 +1,57 @@
+# Fleet benchmark
+
+A repeatable answer to "can I leave the fleet running on a task and trust what comes back?". Each task is a small
+project, a plan for the fleet to carry out, and **hidden acceptance tests that no model ever sees**. A run is judged by
+those tests, not by the plan saying "done".
+
+## Run it
+
+```powershell
+.\bench\Test-BenchTasks.ps1                      # no model involved: every task must be sound (see below)
+.\bench\Start-BenchBackend.ps1                   # a second backend on port 8010 with a copy of your configuration
+.\bench\Invoke-Bench.ps1 -Repeat 3               # every task three times; about 20 to 60 minutes per run
+.\bench\Start-BenchBackend.ps1 -Stop
+```
+
+The benchmark uses the machines in your fleet configuration, so they are busy while it runs. `Invoke-Bench.ps1` writes
+`results.json` and `summary.md` under `bench\results\<time>`. Useful options: `-Tasks early-close,slugify`,
+`-WorkerOnly` (never use the hub), `-Review off` (no second opinion), `-AutoRetries 0`, `-TimeoutMinutes`.
+
+## What the summary checks (the gate)
+
+1. **No false accept**: no plan ends `done` while the hidden tests fail.
+2. **Completion**: at least 80% of the runs end `done` with the hidden tests passing.
+3. **Nothing silent**: every other run ends blocked with a reason; none is stuck, times out or errors.
+4. **No environment parks**: no step is parked for an environment problem, which means the fleet and not the work was at fault.
+
+It cannot promise that the models solve every task. It shows, with numbers, how often they do, and whether a failure
+is honest.
+
+## A task
+
+```
+tasks/<id>/
+  task.json     id (the folder name), goal, steps[] (title, detail, files, verify, tier, retrySafe)
+  project/      the starting project: package.json, a stub, no tests
+  hidden/       *.test.js acceptance tests, run only after the plan has finished, never copied to a machine
+  solution/     files that overlay project/ to make a correct solution (used only to prove the task can be won)
+```
+
+Rules that keep a task fair:
+
+- Plain Node.js (CommonJS, no dependencies). The tests run with `node --test`, so any worker with Node can do the task.
+- `package.json` has `"test": "node --test"`. The last step of the plan runs `npm test` and names no files.
+- The step text states **every** rule and example the hidden tests depend on, with the exported function names. A model
+  that does what the text says must be able to pass; if a hidden test needs something the text does not say, the task is
+  unfair.
+- The first step names the source file and the test file the model is to write (`src/<x>.js`, `test/<x>.test.js`). The
+  starting project has the stub and no test file.
+- The hidden tests use fixed values (fixed instants, fixed inputs), never the clock or randomness.
+- `Test-BenchTasks.ps1` proves each task is sound: the hidden tests **fail** on `project/` (otherwise they prove
+  nothing) and **pass** on `project/` plus `solution/` (otherwise the task cannot be won). With `-BaseUrl` it also
+  asks a backend whether it would accept the plan.
+
+## Adding a task
+
+Copy `tasks/early-close` as the model of everything above, write the starting project, the text, the hidden tests and
+the solution, then run `.\bench\Test-BenchTasks.ps1 -Tasks <id>` until it says the task is sound.
