@@ -403,7 +403,7 @@ internal sealed partial class FleetPlanStore
     /// try again). False for a call that only goes on past one step the user skipped.
     /// </param>
     public PlanRecord? Approve(string id, bool exportToProject = false, string? recoveryScope = null, string? healChecks = null, bool retryStopped = true,
-        int? autoRetries = null)
+        int? autoRetries = null, string? review = null)
     {
         bool changed = false;
         bool retryingBlockedPlan = false;
@@ -433,6 +433,7 @@ internal sealed partial class FleetPlanStore
                 RecoveryScope = NormalizeRecoveryScope(recoveryScope) ?? NormalizeRecoveryScope(plan.RecoveryScope) ?? PlanRecoveryScope.AllowHubRescue,
                 HealChecks = NormalizeHealChecks(healChecks) ?? NormalizeHealChecks(plan.HealChecks) ?? PlanHealChecks.Auto,
                 AutoRetries = Math.Clamp(autoRetries ?? plan.AutoRetries ?? PlanAutoRetry.Default, 0, PlanAutoRetry.Max),
+                Review = PlanSecondOpinion.Normalize(review) ?? PlanSecondOpinion.Normalize(plan.Review) ?? PlanSecondOpinion.Auto,
                 Steps = steps
             };
             if (exportToProject)
@@ -559,6 +560,7 @@ internal sealed partial class FleetPlanStore
 
         text.AppendLine($"Recovery scope: {(PlanRecoveryScope.AllowsHubRescue(plan.RecoveryScope) ? "hub model rescue allowed after worker failure" : "worker only")}");
         text.AppendLine($"A parked step is retried automatically: {(PlanAutoRetry.For(plan) is var retries and > 0 ? $"up to {retries} time{(retries == 1 ? string.Empty : "s")}" : "never")}");
+        text.AppendLine($"Second opinion: {(PlanSecondOpinion.IsOn(plan) ? "a model that did not write the code reads each step before it is accepted" : "off")}");
         if (plan.RunDeadlineUtc is { } deadline)
         {
             text.AppendLine($"Run deadline: {Local(deadline)}.");
@@ -660,6 +662,7 @@ internal sealed partial class FleetPlanStore
         text.AppendLine($"Status: **{plan.Status.Replace('-', ' ')}**. {Marker(plan.Id)}");
         text.AppendLine($"Recovery scope: {(PlanRecoveryScope.AllowsHubRescue(plan.RecoveryScope) ? "hub model rescue allowed after worker failure" : "worker only")}");
         text.AppendLine($"A parked step is retried automatically: {(PlanAutoRetry.For(plan) is var retries and > 0 ? $"up to {retries} time{(retries == 1 ? string.Empty : "s")}" : "never")}");
+        text.AppendLine($"Second opinion: {(PlanSecondOpinion.IsOn(plan) ? "a model that did not write the code reads each step before it is accepted" : "off")}");
         text.AppendLine($"Broken checks: {(PlanHealChecks.IsAuto(plan.HealChecks) ? "fixed automatically" : "the fleet asks first")}");
         if (plan.WorkingDirectory is not null)
         {

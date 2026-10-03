@@ -32,7 +32,13 @@ steps, and checks each step with a real command instead of trusting itself.
    Hub rescue is on by default: when a step's worker cannot get a failing check to pass, the hub model takes over (see
    the repair ladder below). Choose **Worker only** to keep every model call on the step's workers. Existing plans keep
    their saved recovery scope. **Broken checks** decides what happens when a step's check is itself broken rather than
-   failing (see below): **Fix automatically**, the default, or **Ask me first**. Each step also says whether it
+   failing (see below): **Fix automatically**, the default, or **Ask me first**. **Second opinion** chooses whether a model
+   that did not write the code reads each step's changed files against the step's text, and answers pass or fail, before
+   the step is accepted: **A second model reads each step**, the default, or **Off**. The reviewer is the hub model when
+   hub rescue is allowed and the hub did not do the work, otherwise another machine; it can only read. It costs one extra
+   model call per step and is skipped when the step names no files, nothing it changed could be read, or no independent
+   machine is available. If the reviewer times out or cannot answer, the step is accepted on its check. On fail, the
+   reviewer's problems are sent back like a failing check and the step climbs the repair ladder. Each step also says whether it
    may resume automatically after a backend restart; steps not marked restart-safe stop for review if interrupted.
    In the web UI, you can optionally check **Save a Markdown copy** before approving; it writes the plan into the project
    folder shown on the card. The default is off.
@@ -161,7 +167,7 @@ steps, and checks each step with a real command instead of trusting itself.
      **run deadline exceeded**), one message in VS Code per new parked step (never repeated for the same count, not even after a
      reload), and, if `notifyUrl` is set in the fleet config ([configuration.md](configuration.md#notifyurl)), one small JSON message to
      that address. The message holds the event, the plan's and the step's titles, the counts of done and parked steps and a
-     cause word (`check-kept-failing`, `check`, `environment`, `working-time`, `no-change`, `unknown-failure`): never a file's contents or a
+     cause word (`check-kept-failing`, `check`, `environment`, `working-time`, `no-change`, `review`, `unknown-failure`): never a file's contents or a
      check's output.
 7. **Afterwards.** The **Plans** button lists every plan and how far it got; in VS Code, **`@fleet /status`** shows the
    current plan's report in the chat, with **Stop it**, or **Approve and resume** for a blocked plan. Close the browser and

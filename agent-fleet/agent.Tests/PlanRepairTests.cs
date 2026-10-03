@@ -62,7 +62,7 @@ public sealed partial class PlanRunnerTests
             Assert.Null(error);
         }
 
-        return Store.Approve(plan.Id, recoveryScope: scope, autoRetries: 0)!;
+        return Store.Approve(plan.Id, recoveryScope: scope, autoRetries: 0, review: PlanSecondOpinion.Off)!;
     }
 
     private (FleetOptions Options, FleetHealthMonitor Health) HubFleet()

@@ -145,6 +145,11 @@ this.
   changed. The step is automatically retried first (with a fresh repair ladder and budget); once retries are spent you are
   notified. Retry the step again to give the model another go with a new budget, or skip it if the work is already in place.
   If it happens often, the plan's check is too weak: it should fail until the work is done (for example a test the step adds).
+- **A step is parked with cause `review`.** The step's check passes, but a model that did not write the code read the changed
+  files against the step's text and found a requirement unmet. Its numbered problems went back to the step's model like a
+  failing check (each one is a "step review" line in the run log), the step climbed the repair ladder, and the plan's
+  automatic retries are used up. Read the problems: if they are right, retry the step; if the reviewer is wrong, skip the step.
+  Where the reviewer is more trouble than help, choose **Off** under **Second opinion** when approving.
 - **"Worker workspace unavailable: existing worker file ... differs from the hub checkout".** The worker's copy of the
   project holds a change that never reached the hub (the backend stopped in the middle of a step, or someone edited the
   folder on the worker), so Fleet will not overwrite it. A file Fleet itself put there and nobody touched since is replaced

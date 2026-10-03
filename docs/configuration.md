@@ -197,7 +197,7 @@ The backend answers these on port 8000. They are what the web UI and the VS Code
 | `GET /api/fleet-config/models?url=` | Models installed at an Ollama address |
 | `GET`, `POST /api/fleet-mode`, `/api/plan-mode` | The two switches |
 | `GET /api/plans`, `/api/plans/{id}`, `/api/plans/{id}/markdown`, `/api/plans/{id}/report` | Plans, a readable copy, and the run report |
-| `POST /api/plans/{id}/approve`, `/reject`, `/stop` | Act on a plan. Approve accepts `recoveryScope` (`allow-hub-rescue`, the default, or `worker-only`), `healChecks` (`auto`, the default, or `ask`) and `autoRetries` (0 to 5, default 2: how many times a parked step is retried by the fleet itself before it waits for you) |
+| `POST /api/plans/{id}/approve`, `/reject`, `/stop` | Act on a plan. Approve accepts `recoveryScope` (`allow-hub-rescue`, the default, or `worker-only`), `healChecks` (`auto`, the default, or `ask`), `autoRetries` (0 to 5, default 2: how many times a parked step is retried by the fleet itself before it waits for you), and `review` (`auto` or `off`, default `auto`: whether a second opinion reviewer reads each step's changed files) |
 | `POST /api/plans/{id}/retry?step=`, `/skip?step=` | Try one parked or stopped step again with a fresh repair ladder, or count it as done without its check; the rest of the plan is left alone |
 | `POST /api/plans` | Save a plan written elsewhere (the VS Code extension's Copilot tool uses it): `title`, `goal`, `workingDirectory` and `steps` as in `propose_plan`; `dryRun` only reviews it, `approve` starts it. A plan that would fail is refused with its `problems` |
 | `GET`, `PUT`, `DELETE /api/sessions[/{id}]` | Saved conversations (the visible chats of the durable record) |

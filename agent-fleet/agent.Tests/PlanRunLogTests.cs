@@ -23,7 +23,7 @@ public sealed class PlanRunLogTests : PlanTestBase
     private static string PassOutsideRepo(string command) =>
         command == GitStatus ? "Exit code: 128\n--- stderr ---\nfatal: not a git repository" : Pass(command);
 
-    private PlanRecord Approved(params PlanStepInput[] steps) => Store.Approve(NewPlan(steps).Id)!;
+    private PlanRecord Approved(params PlanStepInput[] steps) => Store.Approve(NewPlan(steps).Id, review: PlanSecondOpinion.Off)!;
 
     private static FakeStepAgent Agent(string reply = "Wrote it.\n\n_— via worker1_") => new((_, _, _) => Task.FromResult(reply));
 

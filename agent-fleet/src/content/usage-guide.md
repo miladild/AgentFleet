@@ -58,9 +58,10 @@ Turn it on when you would want to review the approach before anything changes.
    build, a test). The plan appears as a card in the chat.
 4. **Approve and run** (or Reject). In the web UI, you can optionally check
    **Save a Markdown copy** to put the approved plan under
-   `.agent-fleet/plans/` in the project folder. You can also reply `approve` in
-   chat; chat and VS Code approvals do not export a copy. If you want changes,
-   just say what to change and it proposes a revised plan.
+   `.agent-fleet/plans/` in the project folder, and choose whether a second
+   opinion reviewer reads each step's changed files before accepting it. You can
+   also reply `approve` in chat; chat and VS Code approvals do not export a copy.
+   If you want changes, just say what to change and it proposes a revised plan.
 5. After approval the plan runs **in the background**, in order. Each step needs
    a configured worker workspace and runs sequentially, so its changes sync back
    before the next worker stages the project. Parallel groups stay visible in
