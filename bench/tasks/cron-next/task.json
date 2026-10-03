@@ -1,0 +1,26 @@
+{
+  "id": "cron-next",
+  "title": "Cron scheduler",
+  "goal": "Implement nextRun(expression, after) in src/cron.js to find the next matching time in a cron expression.",
+  "steps": [
+    {
+      "title": "Parse cron expression and find next run",
+      "detail": "src/cron.js exports nextRun(expression, after). expression has five space-separated fields: minute (0-59), hour (0-23), day of month (1-31), month (1-12), day of week (0-6, where 0 is Sunday). All times are UTC. Each field is a comma-separated list of parts; a part is `*`, a number, a range `a-b`, or a step `*/n` or `a-b/n` (every n-th value of the range, starting at its first value). Anything else (wrong number of fields, a value out of range, a step of 0, a range with a greater than b, day-of-week 7, an empty list item) throws an Error whose message starts with 'Invalid cron'. `after` is a Date; the result is a new Date for the first minute that matches AFTER it (strictly later than `after`), with seconds and milliseconds 0. When both day-of-month and day-of-week are restricted (neither is `*`), a day matches if EITHER of them matches (the usual cron rule); when only one is restricted, that one decides. If nothing matches within 8 years after `after`, throw an Error starting 'No match'. Examples: nextRun('*/15 * * * *', 2026-01-01T10:07:30Z) is 2026-01-01T10:15:00Z; nextRun('*/15 * * * *', 2026-01-01T10:15:00Z) is 2026-01-01T10:30:00Z (strictly after); nextRun('0 0 1 * *', 2026-01-31T00:00:00Z) is 2026-02-01T00:00:00Z; nextRun('30 9 * * 1-5', 2026-01-02T10:00:00Z) is 2026-01-05T09:30:00Z (the Friday 2026-01-02 is past 09:30, so Monday); nextRun('0 0 29 2 *', 2026-01-01T00:00:00Z) is 2028-02-29T00:00:00Z; nextRun('0 12 13 * 5', 2026-02-01T00:00:00Z) is 2026-02-06T12:00:00Z (Friday matches although it is not the 13th); nextRun('0,30 8-9 * * *', 2026-03-03T09:30:00Z) is 2026-03-04T08:00:00Z; nextRun('10-30/10 * * * *', 2026-03-03T09:00:00Z) is 2026-03-03T09:10:00Z; nextRun('59 23 31 12 *', 2026-12-31T23:59:00Z) is 2027-12-31T23:59:00Z; nextRun('0 0 * * 0', 2026-01-01T00:00:00Z) is 2026-01-04T00:00:00Z (a Sunday); invalid: '* * * *', '60 * * * *', '*/0 * * * *', '5-1 * * * *', '* * * * 7', '1,,2 * * * *' all throw 'Invalid cron'. Use only Date.UTC-style arithmetic (the machine's time zone must not matter). Export with module.exports = { nextRun } (CommonJS). Add tests in test/cron.test.js (node:test) that cover these rules and examples.",
+      "files": [
+        "src/cron.js",
+        "test/cron.test.js"
+      ],
+      "verify": "node --test test/cron.test.js",
+      "tier": "standard",
+      "retrySafe": true
+    },
+    {
+      "title": "Run the whole test suite",
+      "detail": "Run npm test. Change nothing unless it fails; fix only failures that this plan's change caused.",
+      "files": [],
+      "verify": "npm test",
+      "tier": "standard",
+      "retrySafe": true
+    }
+  ]
+}

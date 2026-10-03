@@ -1,0 +1,26 @@
+{
+  "id": "csv-parse",
+  "title": "CSV parser",
+  "goal": "Implement parseCsv(text) and toCsv(rows) in src/csv.js to correctly parse and serialize CSV text.",
+  "steps": [
+    {
+      "title": "Parse and serialize CSV",
+      "detail": "src/csv.js exports parseCsv(text) and toCsv(rows). parseCsv returns an array of rows, each an array of strings. Rules: fields are separated by commas; rows end at a line feed or a carriage return plus line feed; a final line ending does not create an extra row; the empty text gives []; a blank line in the middle of the text gives a row with one empty string, ['']; a field may be wrapped in double quotes, and inside quotes commas, line feeds and carriage returns are ordinary characters and a doubled double quote is one double quote; a quoted empty field is an empty string; spaces are kept exactly as written (no trimming); a quote that is never closed throws a SyntaxError whose message starts with 'Unterminated quote'; any character between a closing quote and the next comma or line ending throws a SyntaxError whose message starts with 'Unexpected character'; a double quote in the middle of an unquoted field is an ordinary character. toCsv turns rows back into text: a field that contains a comma, a double quote, a line feed or a carriage return is wrapped in double quotes with inner double quotes doubled; other fields are written as they are; fields are joined by commas, rows by a line feed, and there is no line ending after the last row; toCsv([]) is the empty string. Examples: parseCsv('a,b\\n1,2\\n') is [['a','b'],['1','2']]; parseCsv('a,\"b,c\"\\r\\n') is [['a','b,c']]; parseCsv('\"say \"\"hi\"\"\"') is [['say \"hi\"']]; parseCsv('x,\"line1\\nline2\",y') is [['x','line1\\nline2','y']]; parseCsv('a,,c') is [['a','','c']]; parseCsv('a\\n\\nb') is [['a'],[''],['b']]; parseCsv('') is []; parseCsv(' a , b ') is [[' a ',' b ']]; parseCsv('5\" nail,x') is [['5\" nail','x']]; parseCsv('\"abc') throws SyntaxError starting 'Unterminated quote'; parseCsv('\"a\"b,c') throws SyntaxError starting 'Unexpected character'; toCsv([['a','b,c'],['say \"hi\"','x']]) is 'a,\"b,c\"\\n\"say \"\"hi\"\"\",x'; parseCsv(toCsv(rows)) equals rows for rows [['a','b\\nc'],['',',']]. Export with module.exports = { parseCsv, toCsv } (CommonJS). Add tests in test/csv.test.js (node:test) that cover these rules and examples.",
+      "files": [
+        "src/csv.js",
+        "test/csv.test.js"
+      ],
+      "verify": "node --test test/csv.test.js",
+      "tier": "standard",
+      "retrySafe": true
+    },
+    {
+      "title": "Run the whole test suite",
+      "detail": "Run npm test. Change nothing unless it fails; fix only failures that this plan's change caused.",
+      "files": [],
+      "verify": "npm test",
+      "tier": "standard",
+      "retrySafe": true
+    }
+  ]
+}
