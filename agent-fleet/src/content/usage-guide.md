@@ -99,6 +99,8 @@ Turn it on when you would want to review the approach before anything changes.
    If a step still cannot pass it is *parked*: set aside with its reason, while every
    step that does not depend on it goes on. Steps can say which earlier steps they
    need (by default each needs the one before it, and the last needs all of them).
+   A step that names files it intends to change is parked with cause `no-change` if its
+   check passes but none of those files are edited; the check cannot show the work is done.
    The plan stops as *Blocked* only when nothing more can run, and tells you what
    is done, what is parked and what waited for it. In **Live**, retry one parked
    step or skip it from its banner. You are told once when a step is parked, when

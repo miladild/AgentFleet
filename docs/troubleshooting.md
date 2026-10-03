@@ -137,6 +137,10 @@ this.
 - **A step stopped with "the fleet could not change it by itself".** Its check is broken and no replacement passed the rules
   (it would have passed without the work, or tested less). Change the step's check to one that finishes and tests the result,
   or skip the step, then approve again.
+- **A step is parked with cause `no-change`.** The step names files to change, but nothing was changed and its check passes
+  anyway, so the check cannot show that the work was done. Retry the step to give the model another go, or skip it if the work
+  is already in place. If it happens often, the plan's check is too weak: it should fail until the work is done (for example a
+  test the step adds).
 - **"Blocked by unattended plan policy".** A step tried a command that only a person may run: git, a remote service, a delete of
   folders, a change to a security setting or to the machine's configuration. The command did not run. If the project really
   needs it, do it yourself and retry the step.

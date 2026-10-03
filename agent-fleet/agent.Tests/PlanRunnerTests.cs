@@ -795,7 +795,9 @@ public sealed partial class PlanRunnerTests : PlanTestBase
     [Fact]
     public async Task A_step_that_times_out_is_still_checked_because_the_work_may_be_done()
     {
-        PlanRecord plan = ApprovedPlan(Step("slow"));
+        // The step names no file, so what is under test is only that the check runs after the timeout (a step that names
+        // files and changed none is not accepted on a passing check, whatever stopped the model).
+        PlanRecord plan = ApprovedPlan(new PlanStepInput("slow", "detail of slow", [], "dotnet build", null));
         var agent = new FakeStepAgent(async (_, _, ct) => { await Task.Delay(Timeout.Infinite, ct); return string.Empty; });
 
         await Runner(agent, Pass, TimeSpan.FromMilliseconds(150)).RunPlanAsync(plan.Id, default);
