@@ -48,3 +48,6 @@ agent-fleet/data/
 # Playwright reports and traces
 agent-fleet/playwright-report/
 agent-fleet/test-results/
+
+# ---- Benchmark results (written by bench\Invoke-Bench.ps1) ----
+bench/results/
