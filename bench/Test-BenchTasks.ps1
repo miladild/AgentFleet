@@ -57,6 +57,11 @@ try {
         }
         foreach ($folder in 'project', 'hidden', 'solution') { if (-not (Test-Path (Join-Path $dir $folder))) { $problems += "no $folder folder" } }
         if (-not (Test-Path (Join-Path $dir 'project\package.json'))) { $problems += 'project has no package.json' }
+        # The starting project is what the models get. It must not hold a test, and above all not a copy of the hidden ones.
+        if (Test-Path (Join-Path $dir 'project')) {
+            $leaks = @(Get-ChildItem (Join-Path $dir 'project') -Recurse -Force | Where-Object { $_.Name -like '*hidden*' -or $_.Name -like '*.test.js' -or $_.Name -eq 'node_modules' })
+            foreach ($leak in $leaks) { $problems += "project\ contains $($leak.FullName.Substring($dir.Length + 1)): the models would see it" }
+        }
 
         $start = $null; $solved = $null
         if ($problems.Count -eq 0) {
