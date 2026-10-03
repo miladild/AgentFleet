@@ -150,7 +150,7 @@ steps, and checks each step with a real command instead of trusting itself.
    - **The user is told once** when a step is parked, when the run ends with steps that need you, when the plan is done and
      when the run deadline passes: a line in the run log (**step parked**, **plan needs attention**, **plan done**,
      **run deadline exceeded**), one message in VS Code per new parked step (never repeated for the same count, not even after a
-     reload), and, if `notifyUrl` is set in the fleet config ([configuration.md](configuration.md)), one small JSON message to
+     reload), and, if `notifyUrl` is set in the fleet config ([configuration.md](configuration.md#notifyurl)), one small JSON message to
      that address. The message holds the event, the plan's and the step's titles, the counts of done and parked steps and a
      cause word (`check-kept-failing`, `check`, `environment`, `working-time`, `unknown-failure`): never a file's contents or a
      check's output.
