@@ -429,7 +429,7 @@ internal sealed partial class FleetPlanStore
                 Status = PlanStatus.Approved,
                 ApprovedUtc = approvedAt,
                 RunDeadlineUtc = approvedAt + DefaultRunDuration,
-                RecoveryScope = NormalizeRecoveryScope(recoveryScope) ?? NormalizeRecoveryScope(plan.RecoveryScope) ?? PlanRecoveryScope.WorkerOnly,
+                RecoveryScope = NormalizeRecoveryScope(recoveryScope) ?? NormalizeRecoveryScope(plan.RecoveryScope) ?? PlanRecoveryScope.AllowHubRescue,
                 HealChecks = NormalizeHealChecks(healChecks) ?? NormalizeHealChecks(plan.HealChecks) ?? PlanHealChecks.Auto,
                 Steps = steps
             };

@@ -29,7 +29,7 @@ steps, and checks each step with a real command instead of trusting itself.
    route code work to the hub.
 5. **You decide.** Review each step's restart setting and the **Recovery** choice, then press **Approve and run**, press **Reject**, or reply in the chat with what to change and it proposes a
    revised plan. Typing `approve` also works. (`approve the idea but change step 3` counts as feedback, not approval.)
-   New plans allow hub-model rescue: when a step's worker cannot get a failing check to pass, the hub model takes over (see
+   Hub rescue is on by default: when a step's worker cannot get a failing check to pass, the hub model takes over (see
    the repair ladder below). Choose **Worker only** to keep every model call on the step's workers. Existing plans keep
    their saved recovery scope. **Broken checks** decides what happens when a step's check is itself broken rather than
    failing (see below): **Fix automatically**, the default, or **Ask me first**. Each step also says whether it
@@ -103,6 +103,9 @@ steps, and checks each step with a real command instead of trusting itself.
        the plan allows hub rescue, and only when the hub answers a small test request);
     3. a fresh conversation, on the hub when the plan allows it and otherwise on a worker, that starts from a brief of what
        the earlier rounds tried and is told to find the root cause first.
+
+    When a worker's call times out and hub rescue is allowed, the step is handed to the hub at once; a worker-only plan
+    keeps its worker.
 
     A round that changed nothing (no edit, and no file changed), or that leaves the same failures with no file changed, does
     not wait for its three rounds: the step climbs at once. Every climb is a **rung changed** line in the run log with its

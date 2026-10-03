@@ -1194,8 +1194,12 @@ internal sealed partial class PlanRunner
                 lastRound = outcome;
                 roundsInRung++;
                 roundsTotal++;
-                RepairDecision decision = RepairLadder.Decide(rung, roundsInRung, _roundsPerRung, outcome.NoChange,
-                    NoChangeReason(outcome), HubRungAvailable(step, hub, hubAllowed, model.ModelNode));
+                // A worker that ran out of time on a round is not given the step's remaining time again when the hub may take it
+                // over: the rescue starts at once (a worker-only plan keeps its worker, as before).
+                bool hubRung = HubRungAvailable(step, hub, hubAllowed, model.ModelNode);
+                bool tooSlow = model.TimedOut && hubRung && rung == RepairLadder.RequestedTierRung;
+                RepairDecision decision = RepairLadder.Decide(rung, roundsInRung, _roundsPerRung, outcome.NoChange || tooSlow,
+                    tooSlow && !outcome.NoChange ? "the worker ran out of time on this round" : NoChangeReason(outcome), hubRung);
                 if (decision.Move != RepairMove.NextRound)
                 {
                     (rung, roundsInRung, modelOverride, conversationOver, gaveUp, handover) = await MoveAsync(
@@ -2523,7 +2527,7 @@ internal sealed partial class PlanRunner
             _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.TimedOut, tier, modelMachine ?? _journal?.ActualNode, failure,
                 modelNode: modelMachine, workspaceNode: machine, rung: conversation.Rung, round: conversation.Round);
             result = new ModelAttemptResult(step.Id, string.Empty, failure, ShouldVerify: true, Workspace: worker, Machine: machine,
-                ModelNode: modelMachine ?? _journal?.ActualNode, WorkBefore: work);
+                ModelNode: modelMachine ?? _journal?.ActualNode, WorkBefore: work, TimedOut: true);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -2714,7 +2718,8 @@ internal sealed partial class PlanRunner
         PlanTools.WorkSnapshot? WorkBefore = null,
         Exception? FailureException = null,
         IStepSession? Session = null,
-        ModelBlocker? Blocker = null);
+        ModelBlocker? Blocker = null,
+        bool TimedOut = false);
 
     /// <summary>
     /// What is worth saying again to a model whose step failed, from the step and the failure: used by the first prompt of
