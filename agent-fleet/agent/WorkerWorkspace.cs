@@ -39,6 +39,12 @@ internal sealed record WorkerWorkspaceResume(IWorkerWorkspaceSession? Session, W
 /// <summary>Creates isolated per-plan copies on a selected, explicitly configured worker.</summary>
 internal sealed class WorkerWorkspaceManager(FleetOptions fleet, ILogger logger, TimeSpan commandTimeout) : IWorkerWorkspaceManager
 {
+    // What each worker's copy of a plan held when it was last synced to the hub (file -> hash). A session lasts one round,
+    // so this is how the next staging knows that a worker file nobody touched since that sync holds no unsynced work, even
+    // when the hub has moved on (the runner rolled a round back, or the user edited the project).
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, IReadOnlyDictionary<string, string>> _lastSynced =
+        new(StringComparer.OrdinalIgnoreCase);
+
     public async Task<IWorkerWorkspaceSession> StageAsync(PlanRecord plan, PlanStep step, string machine, CancellationToken cancellationToken)
     {
         FleetNodeDefinition node = fleet.Nodes.FirstOrDefault(candidate =>
@@ -56,11 +62,13 @@ internal sealed class WorkerWorkspaceManager(FleetOptions fleet, ILogger logger,
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        var session = new WorkerWorkspaceSession(machine, config, Path.GetFullPath(plan.WorkingDirectory), logger, commandTimeout);
+        string key = $"{plan.Id}|{machine}";
+        var session = new WorkerWorkspaceSession(machine, config, Path.GetFullPath(plan.WorkingDirectory), logger, commandTimeout,
+            onSynced: hashes => _lastSynced[key] = hashes);
         try
         {
             session.Connect();
-            session.Stage(plan.Id, step, cancellationToken);
+            session.Stage(plan.Id, step, _lastSynced.GetValueOrDefault(key), cancellationToken);
             logger.LogInformation("Staged plan {PlanId} on worker {Machine} at {Workspace}.", plan.Id, machine, session.RemoteRoot);
             await Task.CompletedTask;
             return session;
@@ -164,12 +172,15 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
     private readonly HashSet<string> _stagedFiles = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _stepFiles = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _baselineHashes = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Action<IReadOnlyDictionary<string, string>>? _onSynced;
     private SftpClient? _sftp;
     private SshClient? _ssh;
     private bool _disposed;
 
-    internal WorkerWorkspaceSession(string machine, FleetWorkerWorkspaceConfig config, string hubRoot, ILogger logger, TimeSpan commandTimeout)
+    internal WorkerWorkspaceSession(string machine, FleetWorkerWorkspaceConfig config, string hubRoot, ILogger logger, TimeSpan commandTimeout,
+        Action<IReadOnlyDictionary<string, string>>? onSynced = null)
     {
+        _onSynced = onSynced;
         Machine = machine;
         _config = config;
         _hubRoot = hubRoot;
@@ -243,7 +254,7 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
         }
     }
 
-    internal void Stage(string planId, PlanStep step, CancellationToken cancellationToken)
+    internal void Stage(string planId, PlanStep step, IReadOnlyDictionary<string, string>? lastSynced, CancellationToken cancellationToken)
     {
         if (!Regex.IsMatch(planId, "^[a-f0-9]{32}$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
             throw new InvalidOperationException("Worker workspace unavailable: invalid plan id.");
@@ -274,13 +285,25 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
             long size = _sftp!.GetAttributes(remote).Size;
             if (size > 20 * 1024 * 1024)
                 throw new InvalidOperationException($"Worker workspace unavailable: existing worker file '{relative}' exceeds 20 MiB; it was preserved.");
-            if (!currentFiles.Contains(relative))
+            string? syncedHash = null;
+            lastSynced?.TryGetValue(relative, out syncedHash);
+            bool onHub = currentFiles.Contains(relative);
+            if (!onHub && syncedHash is null)
                 throw new InvalidOperationException($"Worker workspace unavailable: existing worker file '{relative}' is absent from the hub checkout. It may contain unsynced work, so it was preserved.");
 
             using var content = new MemoryStream();
             _sftp.DownloadFile(remote, content);
-            if (!string.Equals(HashBytes(content.ToArray()), HashFile(sourceByRelative[relative]), StringComparison.Ordinal))
-                throw new InvalidOperationException($"Worker workspace unavailable: existing worker file '{relative}' differs from the hub checkout. It may contain unsynced work, so the workspace was preserved.");
+            string workerHash = HashBytes(content.ToArray());
+            switch (JudgeExistingWorkerFile(workerHash, onHub ? HashFile(sourceByRelative[relative]) : null, syncedHash))
+            {
+                case ExistingWorkerFile.Refuse when onHub:
+                    throw new InvalidOperationException($"Worker workspace unavailable: existing worker file '{relative}' differs from the hub checkout. It may contain unsynced work, so the workspace was preserved.");
+                case ExistingWorkerFile.Refuse:
+                    throw new InvalidOperationException($"Worker workspace unavailable: existing worker file '{relative}' is absent from the hub checkout. It may contain unsynced work, so it was preserved.");
+                case ExistingWorkerFile.Remove:
+                    _sftp.DeleteFile(remote);
+                    break;
+            }
         }
 
         foreach (string source in sourceFiles)
@@ -460,6 +483,39 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
         return new WorkerWorkspaceRecoveryAnalysis(changed, apply, conflicts.Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
     }
 
+    internal enum ExistingWorkerFile
+    {
+        /// <summary>The worker's copy is the hub's: nothing to do.</summary>
+        Matches,
+        /// <summary>The hub has moved on and the worker's copy is as it was synced: it is replaced by the hub's.</summary>
+        Replace,
+        /// <summary>The hub no longer has the file and the worker's copy is as it was synced: it is removed.</summary>
+        Remove,
+        /// <summary>The worker's copy was changed after the last sync (or is unknown): it may be unsynced work, so staging stops.</summary>
+        Refuse
+    }
+
+    /// <summary>
+    /// What to do with a file already in a worker's workspace when the project is staged again. A file that differs from the
+    /// hub's is unsynced work only if it also differs from what the worker held at the last sync; when it is exactly that,
+    /// nobody touched it there and the hub (which the runner or the user changed since) is the truth. Without a recorded
+    /// sync (a restart) the safe answer stays the old one: refuse.
+    /// </summary>
+    internal static ExistingWorkerFile JudgeExistingWorkerFile(string workerHash, string? hubHash, string? lastSyncedHash)
+    {
+        if (hubHash is not null && string.Equals(workerHash, hubHash, StringComparison.Ordinal))
+        {
+            return ExistingWorkerFile.Matches;
+        }
+
+        if (lastSyncedHash is null || !string.Equals(workerHash, lastSyncedHash, StringComparison.Ordinal))
+        {
+            return ExistingWorkerFile.Refuse;
+        }
+
+        return hubHash is null ? ExistingWorkerFile.Remove : ExistingWorkerFile.Replace;
+    }
+
     public IDisposable Enter() => WorkerWorkspaceContext.Push(this);
 
     public async Task SyncToHubAsync(CancellationToken cancellationToken)
@@ -554,6 +610,7 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
             foreach (string relative in remaining.Where(AllowedRelative)) _stagedFiles.Add(relative);
             _baselineHashes.Clear();
             foreach ((string relative, string hash) in remoteHashes) _baselineHashes[relative] = hash;
+            _onSynced?.Invoke(new Dictionary<string, string>(remoteHashes, StringComparer.OrdinalIgnoreCase));
             _logger.LogInformation("Synced worker {Machine} workspace back to the plan project ({FileCount} files).", Machine, remaining.Count);
         }
         finally

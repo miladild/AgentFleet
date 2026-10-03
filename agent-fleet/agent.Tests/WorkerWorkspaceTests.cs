@@ -221,4 +221,24 @@ public sealed class WorkerWorkspaceTests : PlanTestBase
         Assert.Equal(["a.cs", "b.cs"], result.Conflicts);
         Assert.Empty(result.FilesToApply);
     }
+
+    // worker's copy, the hub's copy (null: the hub no longer has the file), what the worker held at the last sync (null: none recorded)
+    [Theory]
+    [InlineData("w", "w", null, "Matches")]
+    [InlineData("w", "w", "older", "Matches")]
+    // The runner rolled a round back: the hub holds the older content, the worker is as it was synced.
+    [InlineData("worse", "better", "worse", "Replace")]
+    // The worker's file was changed after the last sync: that is unsynced work, whatever the hub holds.
+    [InlineData("edited", "better", "worse", "Refuse")]
+    // Nothing is known of the worker's copy (a restart): refuse, as before.
+    [InlineData("worse", "better", null, "Refuse")]
+    // The file is gone from the hub (a rollback to before it existed): removed only when it is as it was synced.
+    [InlineData("worse", null, "worse", "Remove")]
+    [InlineData("edited", null, "worse", "Refuse")]
+    [InlineData("worse", null, null, "Refuse")]
+    public void An_existing_worker_file_is_replaced_only_when_nobody_touched_it_since_the_last_sync(
+        string worker, string? hub, string? lastSynced, string expected)
+    {
+        Assert.Equal(expected, WorkerWorkspaceSession.JudgeExistingWorkerFile(worker, hub, lastSynced).ToString());
+    }
 }
