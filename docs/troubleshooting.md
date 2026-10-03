@@ -145,6 +145,11 @@ this.
   changed. The step is automatically retried first (with a fresh repair ladder and budget); once retries are spent you are
   notified. Retry the step again to give the model another go with a new budget, or skip it if the work is already in place.
   If it happens often, the plan's check is too weak: it should fail until the work is done (for example a test the step adds).
+- **"Worker workspace unavailable: existing worker file ... differs from the hub checkout".** The worker's copy of the
+  project holds a change that never reached the hub (the backend stopped in the middle of a step, or someone edited the
+  folder on the worker), so Fleet will not overwrite it. A file Fleet itself put there and nobody touched since is replaced
+  without asking, which includes the files of a round Fleet undid. To go on, copy over what you want to keep, or delete that
+  plan's folder under the worker's workspace root, then **retry step**.
 - **"Blocked by unattended plan policy".** A step tried a command that only a person may run: git, a remote service, a delete of
   folders, a change to a security setting or to the machine's configuration. The command did not run. If the project really
   needs it, do it yourself and retry the step.
