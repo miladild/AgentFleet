@@ -10,7 +10,7 @@ namespace AgentFleet;
 /// The few moments of a plan run that are worth telling the user about, each told once: a step was parked, the run ended
 /// with steps that need the user, the plan is done, the run deadline passed. Kind is the run event's name.
 /// </summary>
-/// <param name="Cause">What stopped a parked step, in a few fixed words ("check", "environment", "working-time"...). Never output or file contents.</param>
+/// <param name="Cause">What stopped a parked step, in a few fixed words ("check", "environment", "working-time", "no-change"...). Never output or file contents.</param>
 internal sealed record PlanNotice(
     string Kind,
     string PlanId,

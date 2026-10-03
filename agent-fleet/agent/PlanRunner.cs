@@ -59,7 +59,7 @@ internal sealed record StepAgentReply(string Text, int ToolCalls, bool EditToolC
 internal sealed class FleetStepAgent(AIAgent agent) : IStepAgent
 {
     internal const string Nudge =
-        "Your last turn only inspected files or gave no usable result. Finish this step now: if it requires a change, use your tools to make it; if no change is needed, explain why. The fleet will run the approved check either way.";
+        "Your last turn only inspected files or gave no usable result. Finish this step now: make the change it asks for with your tools. The fleet runs the approved check afterwards, and a step that names files to change is not done until the work has changed at least one of them.";
 
     public Task<StepAgentReply> RunStepAsync(string prompt, string tier, CancellationToken cancellationToken) =>
         RunStepAsync(prompt, tier, null, cancellationToken);
@@ -840,6 +840,7 @@ internal sealed partial class PlanRunner
         IStepSession? session = continuingSession;
         string? conversationWorkspace = null;
         RoundOutcome? lastRound = null;
+        bool lastRoundUnverified = false;
         string? handover = null;
         bool gaveUp = false;
         StepCheckpoint? best = null;
@@ -1093,8 +1094,16 @@ internal sealed partial class PlanRunner
                     return false;
                 }
 
-                long? verification = RecordCheck(plan, step, attempt, result, model.ModelNode);
                 WorkChange change = await ChangedFilesSinceAsync(plan, model.WorkBefore, cancellationToken);
+                // A check that passes although the step changed nothing it names cannot show that the step's work is done.
+                lastRoundUnverified = result.Done && IsUnverifiedPass(plan, step, model, change.Files, isFinalValidation);
+                if (lastRoundUnverified)
+                {
+                    string unverified = UnverifiedPassMessage(step);
+                    result = new StepCompletion(false, unverified, unverified, result.Restored);
+                }
+
+                long? verification = RecordCheck(plan, step, attempt, result, model.ModelNode);
                 TimeSpan roundTime = _utcNow() - roundStarted;
                 worked += roundTime;
                 RoundOutcome outcome = await RecordRoundClassifiedAsync(plan, step, attempt, model,
@@ -1209,6 +1218,14 @@ internal sealed partial class PlanRunner
         string kept = best is null
             ? string.Empty
             : $" The project is left as it was after its best round (round {best.Round}, {best.Score.Describe()}).";
+        if (lastRoundUnverified)
+        {
+            ParkStep(plan, step, $"Did not do its work after {rounds}: nothing it names changed.", "no-change",
+                reason: $"Step {step.Id} ({step.Title}) was not done: after {rounds} it still changed none of the files it names, and its check passes without a change, " +
+                        "so the check cannot show that the work is done. Retry it, or skip it if the work is already in place.");
+            return false;
+        }
+
         ParkStep(plan, step, $"Did not pass its check after {rounds}.{kept}", "check-kept-failing",
             reason: $"Step {step.Id} ({step.Title}) did not pass its check after {rounds}: every rung of the repair ladder had its rounds.{kept}");
         return false;
@@ -1617,6 +1634,45 @@ internal sealed partial class PlanRunner
         }
     }
 
+    // A package manager's lock file or a build cache rewritten as a side effect is not progress on the step.
+    private IReadOnlyList<string> MeaningfulFiles(PlanRecord plan, PlanStep step, IEnumerable<string> changedFiles) =>
+        changedFiles.Where(file => !RepairLadder.IsIncidentalFile(file) || StepNames(plan, step, file)).ToArray();
+
+    /// <summary>
+    /// The step's check passed, yet the step names files to change and no round of it (this one or an earlier one, also
+    /// before a retry) changed any: the check passes on the project as it was, so it proves nothing about the work. The
+    /// last step of a longer plan is left out: it is the whole-project check, and its files are only the ones it may touch
+    /// to fix what that check finds.
+    /// </summary>
+    private bool IsUnverifiedPass(PlanRecord plan, PlanStep step, ModelAttemptResult model, IReadOnlyList<string> changedFiles, bool isFinalValidation)
+    {
+        if (step.Files.Count == 0 || (isFinalValidation && plan.Steps.Count > 1))
+        {
+            return false;
+        }
+
+        // An edit tool call counts as a change even where git saw none (the same content written again is rare, and a
+        // project that git cannot read has no other sign); where git cannot tell, a model that ran tools may have edited
+        // through a shell command, so only a round with no tool call at all is held to account.
+        bool edited = model.EditToolCalled || (model.WorkBefore is not null && MeaningfulFiles(plan, step, changedFiles).Count > 0);
+        if (edited || (model.WorkBefore is null && model.ToolCalls > 0))
+        {
+            return false;
+        }
+
+        // Rounds before this one (and before a retry) may have made the changes that this round's check now passes on.
+        return !(_store.Get(plan.Id)?.Events ?? []).Any(runEvent => runEvent.StepId == step.Id && runEvent.Kind == RunEventKind.RoundClassified &&
+            (runEvent.EditToolCalled == true ||
+             (runEvent.ChangedFiles is { } earlier
+                 ? MeaningfulFiles(plan, step, earlier).Count > 0
+                 : (runEvent.FilesChanged ?? 0) > 0)));
+    }
+
+    private static string UnverifiedPassMessage(PlanStep step) =>
+        $"Not accepted: this step names files to change ({string.Join(", ", step.Files.Take(6))}), but nothing was changed in them or anywhere else, " +
+        "and its check already passes on the project as it was, so the check cannot show that the work is done. " +
+        "Do the work the step describes. Where the step names a test file, add or extend a test there that fails without your change and passes with it.";
+
     private Task<RoundOutcome> RecordRoundClassifiedAsync(
         PlanRecord plan,
         PlanStep step,
@@ -1629,10 +1685,7 @@ internal sealed partial class PlanRunner
         int? round = null,
         int? durationSeconds = null)
     {
-        // A package manager's lock file or a build cache rewritten as a side effect is not progress on the step.
-        IReadOnlyList<string> meaningful = changedFiles
-            .Where(file => !RepairLadder.IsIncidentalFile(file) || StepNames(plan, step, file))
-            .ToArray();
+        IReadOnlyList<string> meaningful = MeaningfulFiles(plan, step, changedFiles);
         int filesChanged = meaningful.Count;
         PlanRecord current = _store.Get(plan.Id) ?? plan;
         FailureRound[] history = (current.Events ?? [])
