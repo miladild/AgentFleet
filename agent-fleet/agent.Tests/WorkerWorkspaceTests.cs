@@ -93,6 +93,74 @@ public sealed class WorkerWorkspaceTests : PlanTestBase
     }
 
     [Fact]
+    public void A_script_staged_on_a_linux_worker_keeps_the_right_to_run_and_arrives_whole()
+    {
+        string script = WriteHubFile("check.sh", "#!/bin/sh\necho ok\n", executable: true);
+
+        (string Uploaded, List<(string Path, short Mode)> Modes) result = StageOne(script, linuxWorker: true);
+
+        Assert.Equal("#!/bin/sh\necho ok\n", result.Uploaded);
+        Assert.Equal([("/work/check.sh", (short)755)], result.Modes);
+    }
+
+    [Fact]
+    public void A_plain_file_staged_on_a_linux_worker_is_left_as_the_upload_made_it()
+    {
+        string file = WriteHubFile("notes.txt", "hello\n", executable: false);
+
+        (string Uploaded, List<(string Path, short Mode)> Modes) result = StageOne(file, linuxWorker: true);
+
+        Assert.Equal("hello\n", result.Uploaded);
+        Assert.Empty(result.Modes);
+    }
+
+    [Fact]
+    public void An_empty_file_staged_on_a_linux_worker_is_not_taken_for_a_script()
+    {
+        string file = WriteHubFile("empty.txt", "", executable: false);
+
+        (string Uploaded, List<(string Path, short Mode)> Modes) result = StageOne(file, linuxWorker: true);
+
+        Assert.Equal("", result.Uploaded);
+        Assert.Empty(result.Modes);
+    }
+
+    [Fact]
+    public void A_windows_worker_never_gets_a_mode_change()
+    {
+        string script = WriteHubFile("check.sh", "#!/bin/sh\necho ok\n", executable: true);
+
+        (string Uploaded, List<(string Path, short Mode)> Modes) result = StageOne(script, linuxWorker: false);
+
+        Assert.Equal("#!/bin/sh\necho ok\n", result.Uploaded);
+        Assert.Empty(result.Modes);
+    }
+
+    // A Windows hub has no execute bit, so a script is told by its "#!" line; a Unix hub's own mode decides.
+    private string WriteHubFile(string name, string content, bool executable)
+    {
+        string path = Path.Combine(PlansDirectory, name);
+        File.WriteAllText(path, content);
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(path, executable ? UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute : UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+
+        return path;
+    }
+
+    private static (string Uploaded, List<(string Path, short Mode)> Modes) StageOne(string source, bool linuxWorker)
+    {
+        string uploaded = "";
+        var modes = new List<(string Path, short Mode)>();
+        WorkerWorkspaceSession.UploadKeepingMode(
+            source, "/work/" + Path.GetFileName(source), linuxWorker,
+            (stream, _) => uploaded = new StreamReader(stream).ReadToEnd(),
+            (path, mode) => modes.Add((path, mode)));
+        return (uploaded, modes);
+    }
+
+    [Fact]
     public void Restart_reconciliation_accepts_an_unchanged_worker_snapshot()
     {
         PlanRecord plan = NewPlan(new PlanStepInput("recover", "detail", ["a.cs"], "dotnet build", "standard"));

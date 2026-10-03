@@ -133,7 +133,9 @@ when you log in. Check three things as that account, over SSH, the way the fleet
   only, run as that account `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`. The fleet never changes this setting
   itself, and it moves a blocked check to `cmd` on its own, but setting it once saves a wasted round.
 - **It can write where plans are staged.** Create and delete a file under the workspace root, and run a small script
-  there. A Linux root on a mount marked `noexec` cannot run scripts.
+  there. A Linux root on a mount marked `noexec` cannot run scripts. A project script keeps its right to run when it is
+  staged on a Linux worker (a file that starts with `#!`, or any file with the execute bit when the hub is Linux or macOS),
+  so `./gradlew` and `scripts/check.sh` work as written; every other file arrives as a plain file.
 
 Also check the runtimes your projects need (`node --version`, `dotnet --version`, `python --version`) in the same session.
 The fleet parks a step whose check needs a runtime the worker lacks and says which worker it is.
