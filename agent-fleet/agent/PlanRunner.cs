@@ -840,7 +840,7 @@ internal sealed partial class PlanRunner
         IStepSession? session = continuingSession;
         string? conversationWorkspace = null;
         RoundOutcome? lastRound = null;
-        bool lastRoundUnverified = false;
+        string? lastUnverified = null;
         string? handover = null;
         bool gaveUp = false;
         StepCheckpoint? best = null;
@@ -1096,10 +1096,10 @@ internal sealed partial class PlanRunner
 
                 WorkChange change = await ChangedFilesSinceAsync(plan, model.WorkBefore, cancellationToken);
                 // A check that passes although the step changed nothing it names cannot show that the step's work is done.
-                lastRoundUnverified = result.Done && IsUnverifiedPass(plan, step, model, change.Files, isFinalValidation);
-                if (lastRoundUnverified)
+                lastUnverified = result.Done ? UnverifiedPassReason(plan, step, model, change.Files, isFinalValidation) : null;
+                if (lastUnverified is not null)
                 {
-                    string unverified = UnverifiedPassMessage(step);
+                    string unverified = UnverifiedPassMessage(step, lastUnverified);
                     result = new StepCompletion(false, unverified, unverified, result.Restored);
                 }
 
@@ -1222,11 +1222,12 @@ internal sealed partial class PlanRunner
         string kept = best is null
             ? string.Empty
             : $" The project is left as it was after its best round (round {best.Round}, {best.Score.Describe()}).";
-        if (lastRoundUnverified)
+        if (lastUnverified is not null)
         {
-            ParkStep(plan, step, $"Did not do its work after {rounds}: nothing it names changed.", "no-change",
-                reason: $"Step {step.Id} ({step.Title}) was not done: after {rounds} it still changed none of the files it names, and its check passes without a change, " +
-                        "so the check cannot show that the work is done. Retry it, or skip it if the work is already in place.");
+            bool testsOnly = lastUnverified == UnverifiedNoTest;
+            ParkStep(plan, step, $"Did not do its work after {rounds}: {(testsOnly ? "no test file it names changed" : "nothing it names changed")}.", "no-change",
+                reason: $"Step {step.Id} ({step.Title}) was not done: after {rounds} it still changed {(testsOnly ? "none of the test files it names" : "none of the files it names")}, " +
+                        "and its check passes without that, so the check cannot show that the work is done. Retry it, or skip it if the work is already in place.");
             return false;
         }
 
@@ -1642,40 +1643,67 @@ internal sealed partial class PlanRunner
     private IReadOnlyList<string> MeaningfulFiles(PlanRecord plan, PlanStep step, IEnumerable<string> changedFiles) =>
         changedFiles.Where(file => !RepairLadder.IsIncidentalFile(file) || StepNames(plan, step, file)).ToArray();
 
+    private const string UnverifiedNoChange = "no-change";
+    private const string UnverifiedNoTest = "no-test";
+
     /// <summary>
-    /// The step's check passed, yet the step names files to change and no round of it (this one or an earlier one, also
-    /// before a retry) changed any: the check passes on the project as it was, so it proves nothing about the work. The
-    /// last step of a longer plan is left out: it is the whole-project check, and its files are only the ones it may touch
-    /// to fix what that check finds.
+    /// Why a passing check does not show that the step's work is done, or null when it does. First: the step names files to
+    /// change and no round of it (this one or an earlier one, also before a retry) changed any, so the check passes on the
+    /// project as it was. Then: the step names test files and none of them changed in any round, so the check can only be
+    /// running the tests as they were, which say nothing about the new work. The last step of a longer plan is left out: it
+    /// is the whole-project check, and its files are only the ones it may touch to fix what that check finds.
     /// </summary>
-    private bool IsUnverifiedPass(PlanRecord plan, PlanStep step, ModelAttemptResult model, IReadOnlyList<string> changedFiles, bool isFinalValidation)
+    private string? UnverifiedPassReason(PlanRecord plan, PlanStep step, ModelAttemptResult model, IReadOnlyList<string> changedFiles, bool isFinalValidation)
     {
         if (step.Files.Count == 0 || (isFinalValidation && plan.Steps.Count > 1))
         {
-            return false;
+            return null;
         }
+
+        IReadOnlyList<string> meaningful = MeaningfulFiles(plan, step, changedFiles);
+        PlanRunEvent[] earlier = (_store.Get(plan.Id)?.Events ?? [])
+            .Where(runEvent => runEvent.StepId == step.Id && runEvent.Kind == RunEventKind.RoundClassified).ToArray();
 
         // An edit tool call counts as a change even where git saw none (the same content written again is rare, and a
         // project that git cannot read has no other sign); where git cannot tell, a model that ran tools may have edited
-        // through a shell command, so only a round with no tool call at all is held to account.
-        bool edited = model.EditToolCalled || (model.WorkBefore is not null && MeaningfulFiles(plan, step, changedFiles).Count > 0);
-        if (edited || (model.WorkBefore is null && model.ToolCalls > 0))
+        // through a shell command, so only a round with no tool call at all is held to account. Rounds before this one (and
+        // before a retry) may have made the changes that this round's check now passes on.
+        bool edited = model.EditToolCalled || (model.WorkBefore is not null && meaningful.Count > 0) ||
+                      earlier.Any(runEvent => runEvent.EditToolCalled == true ||
+                          (runEvent.ChangedFiles is { } files ? MeaningfulFiles(plan, step, files).Count > 0 : (runEvent.FilesChanged ?? 0) > 0));
+        if (!edited && !(model.WorkBefore is null && model.ToolCalls > 0))
         {
-            return false;
+            return UnverifiedNoChange;
         }
 
-        // Rounds before this one (and before a retry) may have made the changes that this round's check now passes on.
-        return !(_store.Get(plan.Id)?.Events ?? []).Any(runEvent => runEvent.StepId == step.Id && runEvent.Kind == RunEventKind.RoundClassified &&
-            (runEvent.EditToolCalled == true ||
-             (runEvent.ChangedFiles is { } earlier
-                 ? MeaningfulFiles(plan, step, earlier).Count > 0
-                 : (runEvent.FilesChanged ?? 0) > 0)));
+        // The test files the step names must change too, where git can say what changed.
+        if (model.WorkBefore is not null && step.Files.Any(IsTestPath))
+        {
+            bool testChanged = meaningful
+                .Concat(earlier.SelectMany(runEvent => runEvent.ChangedFiles ?? []))
+                .Any(file => IsTestPath(file) && StepNames(plan, step, file));
+            if (!testChanged)
+            {
+                return UnverifiedNoTest;
+            }
+        }
+
+        return null;
     }
 
-    private static string UnverifiedPassMessage(PlanStep step) =>
-        $"Not accepted: this step names files to change ({string.Join(", ", step.Files.Take(6))}), but nothing was changed in them or anywhere else, " +
-        "and its check already passes on the project as it was, so the check cannot show that the work is done. " +
-        "Do the work the step describes. Where the step names a test file, add or extend a test there that fails without your change and passes with it.";
+    // A test file by where it lives or how it is named (tests/, __tests__, foo.test.ts, foo_spec.rb, FooTests.cs, test_foo.py).
+    internal static bool IsTestPath(string path) => TestPath().IsMatch(path.Replace('\\', '/'));
+
+    [GeneratedRegex(@"(^|/)(tests?|__tests__|specs?)(/|$)|[._-](test|spec)s?\.[^/.]+$|(?-i:[a-z0-9](Test|Tests|Spec)\.[^/.]+$)|(^|/)test[_-][^/]*$", RegexOptions.IgnoreCase)]
+    private static partial Regex TestPath();
+
+    private static string UnverifiedPassMessage(PlanStep step, string reason) => reason == UnverifiedNoTest
+        ? $"Not accepted: this step names test files ({string.Join(", ", step.Files.Where(IsTestPath).Take(6))}), but none of them was changed. " +
+          "Its check passes on the tests as they were, so it cannot show that the new work behaves as the step asks. " +
+          "Add or extend a test in one of those files that fails without your change and passes with it, and make the whole check pass."
+        : $"Not accepted: this step names files to change ({string.Join(", ", step.Files.Take(6))}), but nothing was changed in them or anywhere else, " +
+          "and its check already passes on the project as it was, so the check cannot show that the work is done. " +
+          "Do the work the step describes. Where the step names a test file, add or extend a test there that fails without your change and passes with it.";
 
     private Task<RoundOutcome> RecordRoundClassifiedAsync(
         PlanRecord plan,

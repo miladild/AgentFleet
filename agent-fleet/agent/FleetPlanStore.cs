@@ -402,7 +402,8 @@ internal sealed partial class FleetPlanStore
     /// Whether approving a blocked plan also gives every parked step a fresh start (the default: "approve and resume" means
     /// try again). False for a call that only goes on past one step the user skipped.
     /// </param>
-    public PlanRecord? Approve(string id, bool exportToProject = false, string? recoveryScope = null, string? healChecks = null, bool retryStopped = true)
+    public PlanRecord? Approve(string id, bool exportToProject = false, string? recoveryScope = null, string? healChecks = null, bool retryStopped = true,
+        int? autoRetries = null)
     {
         bool changed = false;
         bool retryingBlockedPlan = false;
@@ -431,6 +432,7 @@ internal sealed partial class FleetPlanStore
                 RunDeadlineUtc = approvedAt + DefaultRunDuration,
                 RecoveryScope = NormalizeRecoveryScope(recoveryScope) ?? NormalizeRecoveryScope(plan.RecoveryScope) ?? PlanRecoveryScope.AllowHubRescue,
                 HealChecks = NormalizeHealChecks(healChecks) ?? NormalizeHealChecks(plan.HealChecks) ?? PlanHealChecks.Auto,
+                AutoRetries = Math.Clamp(autoRetries ?? plan.AutoRetries ?? PlanAutoRetry.Default, 0, PlanAutoRetry.Max),
                 Steps = steps
             };
             if (exportToProject)
@@ -497,6 +499,21 @@ internal sealed partial class FleetPlanStore
     /// rest of the plan is left alone. In a plan that is still running the runner picks it up by itself; for a blocked plan
     /// the caller approves the plan again. Null when there is no such plan or step; the plan unchanged when the step is not stopped.
     /// </summary>
+    /// <summary>
+    /// The runner's own retry of a step it was about to park: the same fresh start as <see cref="RetryStep"/>, noted in the
+    /// log as automatic (and counted against the plan's budget of automatic retries, see PlanRunner.TryRetryAutomatically).
+    /// </summary>
+    public PlanRecord? RetryStepAutomatically(string id, int stepId, string detail)
+    {
+        PlanRecord? result = Update(id, plan => plan.Steps.Any(step => step.Id == stepId)
+            ? FleetPlanStoreSteps.With(plan, stepId, s => s with { Status = StepStatus.Pending, Attempts = 0 })
+            : plan);
+        return result is null ? null : AddEvent(id, stepId, null, RunEventKind.StepRetried, detail: detail, failureClass: AutoRetryClass) ?? result;
+    }
+
+    /// <summary>The failure class that marks a step-retried event as the runner's own.</summary>
+    internal const string AutoRetryClass = "AutoRetry";
+
     public PlanRecord? RetryStep(string id, int stepId)
     {
         bool retried = false;
@@ -541,6 +558,7 @@ internal sealed partial class FleetPlanStore
         }
 
         text.AppendLine($"Recovery scope: {(PlanRecoveryScope.AllowsHubRescue(plan.RecoveryScope) ? "hub model rescue allowed after worker failure" : "worker only")}");
+        text.AppendLine($"A parked step is retried automatically: {(PlanAutoRetry.For(plan) is var retries and > 0 ? $"up to {retries} time{(retries == 1 ? string.Empty : "s")}" : "never")}");
         if (plan.RunDeadlineUtc is { } deadline)
         {
             text.AppendLine($"Run deadline: {Local(deadline)}.");
@@ -641,6 +659,7 @@ internal sealed partial class FleetPlanStore
         text.AppendLine();
         text.AppendLine($"Status: **{plan.Status.Replace('-', ' ')}**. {Marker(plan.Id)}");
         text.AppendLine($"Recovery scope: {(PlanRecoveryScope.AllowsHubRescue(plan.RecoveryScope) ? "hub model rescue allowed after worker failure" : "worker only")}");
+        text.AppendLine($"A parked step is retried automatically: {(PlanAutoRetry.For(plan) is var retries and > 0 ? $"up to {retries} time{(retries == 1 ? string.Empty : "s")}" : "never")}");
         text.AppendLine($"Broken checks: {(PlanHealChecks.IsAuto(plan.HealChecks) ? "fixed automatically" : "the fleet asks first")}");
         if (plan.WorkingDirectory is not null)
         {

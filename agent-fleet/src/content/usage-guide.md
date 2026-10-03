@@ -100,11 +100,14 @@ Turn it on when you would want to review the approach before anything changes.
    step that does not depend on it goes on. Steps can say which earlier steps they
    need (by default each needs the one before it, and the last needs all of them).
    A step that names files it intends to change is parked with cause `no-change` if its
-   check passes but none of those files are edited; the check cannot show the work is done.
+   check passes but none of those files are edited; if it names test files, at least one
+   must also change. The step is automatically retried first with a fresh repair ladder
+   (default budget of 2 retries per step, settable when approving); you are not notified
+   while retries remain. Once the budget is used the step is parked and you are told.
    The plan stops as *Blocked* only when nothing more can run, and tells you what
    is done, what is parked and what waited for it. In **Live**, retry one parked
-   step or skip it from its banner. You are told once when a step is parked, when
-   the run ends with steps waiting for you and when the plan is done.
+   step (which starts a new budget) or skip it from its banner. You are told once when
+   a step is parked, when the run ends with steps waiting for you and when the plan is done.
 
 You can close the chat and come back: the **Plans** button lists every plan and
 how far it got, and a plan that was running when the backend restarted keeps its

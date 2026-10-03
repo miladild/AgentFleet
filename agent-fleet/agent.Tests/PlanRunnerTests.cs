@@ -144,14 +144,14 @@ public sealed partial class PlanRunnerTests : PlanTestBase
 
     private static string Fail(string _) => "Exit code: 1\n--- stdout ---\nerror CS1002: ; expected";
 
-    private PlanRecord ApprovedPlan(params PlanStepInput[] steps) => Store.Approve(NewPlan(steps).Id)!;
+    private PlanRecord ApprovedPlan(params PlanStepInput[] steps) => Store.Approve(NewPlan(steps).Id, autoRetries: 0)!;
 
     private PlanRecord InterruptedWorkerPlan(out WorkerWorkspaceBaseline baseline)
     {
         PlanRecord plan = NewPlan(new PlanStepInput("recover worker work", "detail", ["a.cs"], "dotnet build", "standard", RetrySafe: true));
         plan = Store.SelectMachine(plan.Id, 1, "worker-a", out string? selectionError)!;
         Assert.Null(selectionError);
-        plan = Store.Approve(plan.Id)!;
+        plan = Store.Approve(plan.Id, autoRetries: 0)!;
         Store.Update(plan.Id, current => current with
         {
             Status = PlanStatus.Running,
@@ -322,7 +322,7 @@ public sealed partial class PlanRunnerTests : PlanTestBase
         PlanRecord? routed = Store.SelectMachine(plan.Id, 1, "worker-b", out string? error);
         Assert.Null(error);
         Assert.Equal("worker-b", routed!.Steps[0].Machine);
-        plan = Store.Approve(plan.Id)!;
+        plan = Store.Approve(plan.Id, autoRetries: 0)!;
         FakeStepAgent agent = Agent();
 
         await Runner(agent, Pass).RunPlanAsync(plan.Id, default);
@@ -508,7 +508,7 @@ public sealed partial class PlanRunnerTests : PlanTestBase
             PlanRecord plan = NewPlan(Step("recover", tier: "standard"));
             plan = Store.SelectMachine(plan.Id, 1, "worker-a", out string? selectError)!;
             Assert.Null(selectError);
-            plan = Store.Approve(plan.Id, recoveryScope: allowHub ? PlanRecoveryScope.AllowHubRescue : PlanRecoveryScope.WorkerOnly)!;
+            plan = Store.Approve(plan.Id, recoveryScope: allowHub ? PlanRecoveryScope.AllowHubRescue : PlanRecoveryScope.WorkerOnly, autoRetries: 0)!;
             int calls = 0;
             var agent = new FakeStepAgent((_, _, _) => ++calls == 1
                 ? throw new HttpRequestException("model server unavailable")
@@ -602,7 +602,7 @@ public sealed partial class PlanRunnerTests : PlanTestBase
             })!;
             plan = Store.SelectMachine(plan.Id, 1, "worker-a", out string? selectError)!;
             Assert.Null(selectError);
-            plan = Store.Approve(plan.Id)!;
+            plan = Store.Approve(plan.Id, autoRetries: 0)!;
             plan = Store.Update(plan.Id, current => current with { RunDeadlineUtc = fakeNow.AddSeconds(10) })!;
 
             var workspaces = new WorkerWorkspaceManager(options, NullLogger.Instance, TimeSpan.FromSeconds(1));
@@ -898,8 +898,8 @@ public sealed partial class PlanRunnerTests : PlanTestBase
         var approvals = new List<string>();
         Store.Approved += approvals.Add;
 
-        Store.Approve(plan.Id);
-        Store.Approve(plan.Id);
+        Store.Approve(plan.Id, autoRetries: 0);
+        Store.Approve(plan.Id, autoRetries: 0);
 
         Assert.Equal([plan.Id], approvals);
         await Task.CompletedTask;

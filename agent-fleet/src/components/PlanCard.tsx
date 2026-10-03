@@ -70,6 +70,7 @@ export type Plan = {
   recoveryScope?: string | null;
   /** What the runner does with a check that is broken, not failing: "auto" fixes it, "ask" parks the step with the proposal. */
   healChecks?: string | null;
+  autoRetries?: number | null;
   runDeadlineUtc?: string | null;
 };
 
@@ -252,6 +253,7 @@ export function PlanCard({ planId }: { planId: string }) {
   const [exportToProject, setExportToProject] = useState(false);
   const [recoveryChoice, setRecoveryChoice] = useState<string | null>(null);
   const [healChoice, setHealChoice] = useState<string | null>(null);
+  const [retryChoice, setRetryChoice] = useState<number | null>(null);
 
   async function approve() {
     setBusy(true);
@@ -264,6 +266,7 @@ export function PlanCard({ planId }: { planId: string }) {
           exportToProject,
           recoveryScope: recoveryChoice ?? plan?.recoveryScope ?? "allow-hub-rescue",
           healChecks: healChoice ?? plan?.healChecks ?? "auto",
+          autoRetries: retryChoice ?? plan?.autoRetries ?? 2,
         }),
       });
       if (!res.ok) {
@@ -471,6 +474,24 @@ export function PlanCard({ planId }: { planId: string }) {
               >
                 <option value="auto">Fix automatically</option>
                 <option value="ask">Ask me first</option>
+              </select>
+            </label>
+          )}
+          {canApprove && (
+            <label className="flex items-center gap-1.5 text-[11px] text-neutral-400">
+              <span>Parked steps</span>
+              <select
+                aria-label="Automatic retries of a parked step"
+                value={retryChoice ?? plan.autoRetries ?? 2}
+                onChange={(event) => setRetryChoice(Number(event.target.value))}
+                disabled={busy}
+                title="When a step's repair ladder is spent, the fleet can give it a fresh ladder by itself, from the best state the last attempt left, before it waits for you to retry or skip it."
+                className="rounded border border-neutral-700 bg-neutral-900 px-1.5 py-1 text-[11px] text-neutral-200"
+              >
+                <option value={0}>Wait for me</option>
+                <option value={1}>Retry once by itself</option>
+                <option value={2}>Retry up to 2 times by itself</option>
+                <option value={3}>Retry up to 3 times by itself</option>
               </select>
             </label>
           )}
