@@ -290,8 +290,7 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
             string destination = JoinRemote(RemoteRoot, relative);
             EnsureNoLinkComponents(destination);
             CreateDirectoryTree(Parent(destination));
-            using FileStream input = File.OpenRead(source);
-            _sftp!.UploadFile(input, destination, canOverride: true);
+            UploadHubFile(source, destination);
             _stagedFiles.Add(relative);
             _baselineHashes[relative] = HashFile(source);
         }
@@ -395,8 +394,7 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
                 string destination = JoinRemote(RemoteRoot, relative);
                 EnsureNoLinkComponents(destination);
                 CreateDirectoryTree(Parent(destination));
-                using FileStream input = File.OpenRead(source);
-                _sftp.UploadFile(input, destination, canOverride: true);
+                UploadHubFile(source, destination);
             }
 
             _stagedFiles.Clear();
@@ -578,8 +576,7 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
                 string destination = JoinRemote(RemoteRoot, relative);
                 EnsureNoLinkComponents(destination);
                 CreateDirectoryTree(Parent(destination));
-                using FileStream input = File.OpenRead(source);
-                _sftp!.UploadFile(input, destination, canOverride: true);
+                UploadHubFile(source, destination);
                 _stagedFiles.Add(relative);
                 _baselineHashes[relative] = HashFile(source);
             }
@@ -850,6 +847,40 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
         if (!full.StartsWith(prefix, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
             throw new IOException("Worker returned a path outside the project.");
         return full;
+    }
+
+    // Uploads one hub file. On a Linux worker a script that is meant to be run keeps the right to run (see UploadKeepingMode).
+    private void UploadHubFile(string source, string destination) =>
+        UploadKeepingMode(source, destination, string.Equals(_config.Platform, "linux", StringComparison.OrdinalIgnoreCase),
+            (stream, path) => _sftp!.UploadFile(stream, path, canOverride: true),
+            (path, mode) => _sftp!.ChangePermissions(path, mode));
+
+    /// <summary>
+    /// Uploads a file and, for a Linux worker, makes it executable when it was meant to be: an upload gives a new file the default
+    /// mode, so a project's own script (`./gradlew`, `scripts/check.sh`) would fail with "Permission denied" on the worker. On a
+    /// Windows hub there is no mode to copy, so a file that starts with `#!` is taken to be a script; on a Unix hub the file's own
+    /// execute bit decides. Other files are left as the upload made them, and nothing is changed for a Windows worker.
+    /// </summary>
+    internal static void UploadKeepingMode(string source, string destination, bool linuxWorker, Action<Stream, string> upload, Action<string, short> setMode)
+    {
+        using FileStream input = File.OpenRead(source);
+        bool executable = linuxWorker && IsMeantToBeExecuted(input, source);
+        input.Position = 0;
+        upload(input, destination);
+        if (executable)
+        {
+            setMode(destination, 755);
+        }
+    }
+
+    internal static bool IsMeantToBeExecuted(FileStream input, string path)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return (File.GetUnixFileMode(path) & UnixFileMode.UserExecute) != 0;
+        }
+
+        return input.ReadByte() == '#' && input.ReadByte() == '!';
     }
 
     private IEnumerable<string> EnumerateStageFiles(string root)
