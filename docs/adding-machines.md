@@ -118,6 +118,26 @@ the **Setup** tab lists anything still missing on any machine.
 
 The left panel of the web UI shows a green or red dot per machine. The hub checks every machine every 10 seconds.
 
+### Check what the agent account can run
+
+A model only gets as far as the dedicated workspace account on the worker lets it, and the account sees less than you do
+when you log in. Check three things as that account, over SSH, the way the fleet connects:
+
+- **Its tools are on its PATH.** On Linux run `ssh <account>@<worker> 'command -v node npm git'`. A command run over SSH does
+  not read login files, so a Node.js installed for one user (with a version manager, or unpacked in the home folder) is
+  invisible until its PATH line sits at the very top of `~/.bashrc`, above the line that says "if not running
+  interactively". Without it a step fails with "node: command not found" and the step is parked.
+- **PowerShell may run npm's script (Windows).** Run `Get-ExecutionPolicy -List`. With every scope `Undefined`, Windows
+  uses `Restricted` and a check such as `npm test` fails with "running scripts is disabled on this system", because npm
+  starts through a script file. A policy of `RemoteSigned` for the account (or for the machine) fixes it; for the account
+  only, run as that account `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`. The fleet never changes this setting
+  itself, and it moves a blocked check to `cmd` on its own, but setting it once saves a wasted round.
+- **It can write where plans are staged.** Create and delete a file under the workspace root, and run a small script
+  there. A Linux root on a mount marked `noexec` cannot run scripts.
+
+Also check the runtimes your projects need (`node --version`, `dotnet --version`, `python --version`) in the same session.
+The fleet parks a step whose check needs a runtime the worker lacks and says which worker it is.
+
 ## Keep it reliable
 
 A machine that is red in the morning is almost always one of these:
