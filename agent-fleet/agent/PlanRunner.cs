@@ -2569,9 +2569,14 @@ internal sealed partial class PlanRunner
         {
             // Whatever the model managed to change is still worth checking below.
             _logger.LogWarning("Plan {PlanId} step {StepId} attempt {Attempt} timed out.", plan.Id, step.Id, attempt);
-            string failure = limit is null
-                ? $"The attempt ran out of time after {_attemptTimeout.TotalMinutes:0} minutes."
-                : $"The attempt was stopped after {Duration(limit.Duration)} because {limit.Reason}.";
+            // The attempt's own timer did not fire: one model call got no reply within the network timeout (a worker that
+            // makes 11 tokens a second is silent for minutes while it writes a file). It used to be reported as "ran out of
+            // time after 20 minutes" although it had run for 12 and 9, and answered with the hint about a hung command.
+            string failure = !attemptCancellation.IsCancellationRequested
+                ? $"A model call got no reply within {Duration(_fleetOptions?.NetworkTimeout ?? TimeSpan.FromMinutes(15))}: what it was writing was too long to finish, and is lost."
+                : limit is null
+                    ? $"The attempt ran out of time after {_attemptTimeout.TotalMinutes:0} minutes."
+                    : $"The attempt was stopped after {Duration(limit.Duration)} because {limit.Reason}.";
             _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.TimedOut, tier, modelMachine ?? _journal?.ActualNode, failure,
                 modelNode: modelMachine, workspaceNode: machine, rung: conversation.Rung, round: conversation.Round);
             result = new ModelAttemptResult(step.Id, string.Empty, failure, ShouldVerify: true, Workspace: worker, Machine: machine,
@@ -2783,7 +2788,12 @@ internal sealed partial class PlanRunner
                 "sets up and expects with this step's instructions before you change the code.";
         }
 
-        if (failure.Contains("timeout", StringComparison.OrdinalIgnoreCase) ||
+        if (failure.Contains("too long to finish", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return "Your last reply took too long to write and was lost. Write less in each call: one short file or a few " +
+                "functions per write_file, then add the rest to it with edit_file.";
+        }
+        else if (failure.Contains("timeout", StringComparison.OrdinalIgnoreCase) ||
             failure.Contains("ran out of time", StringComparison.OrdinalIgnoreCase))
         {
             yield return "A command that never finishes usually means something keeps the process alive: a timer (setInterval), " +
@@ -2823,7 +2833,7 @@ internal sealed partial class PlanRunner
         string shell = workerWorkspace
             ? string.Equals(workerPlatform, "windows", StringComparison.OrdinalIgnoreCase)
                 ? "Windows PowerShell 5.1 for ordinary commands; && and || chains use cmd.exe"
-                : "bash"
+                : "bash on Linux (to discard output use /dev/null; there is no nul)"
             : HubPlatform.ShellDescription;
         text.AppendLine($"run_command runs in the project folder unless you give another, with {shell}" +
                         (workerWorkspace ? "." : OperatingSystem.IsWindows() ? ": head, tail, grep and PowerShell commands such as Select-Object do not exist there." : ".") +

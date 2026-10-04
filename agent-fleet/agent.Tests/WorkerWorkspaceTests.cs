@@ -81,6 +81,36 @@ public sealed class WorkerWorkspaceTests : PlanTestBase
     }
 
     [Theory]
+    [InlineData("nul")]
+    [InlineData("NUL")]
+    [InlineData("nul.txt")]
+    [InlineData("src/con")]
+    [InlineData("aux.js")]
+    [InlineData("prn")]
+    [InlineData("com1")]
+    [InlineData("lpt9.log")]
+    [InlineData("nul.")]
+    [InlineData("nul ")]
+    [InlineData("src/nul/index.js")]
+    public void A_name_Windows_reserves_is_not_synced_from_a_worker_to_a_Windows_hub(string relativePath)
+    {
+        // A Linux worker can create it (a command ending "> nul" did); a Unix hub can hold it, a Windows hub cannot.
+        Assert.Equal(!OperatingSystem.IsWindows(), WorkerWorkspaceSession.IsAllowedProjectFile(relativePath));
+    }
+
+    [Theory]
+    [InlineData("null")]
+    [InlineData("nullable.js")]
+    [InlineData("src/console.js")]
+    [InlineData("auxiliary.txt")]
+    [InlineData("com10")]
+    [InlineData("lpt")]
+    public void A_name_that_only_looks_like_a_reserved_one_is_synced(string relativePath)
+    {
+        Assert.True(WorkerWorkspaceSession.IsAllowedProjectFile(relativePath));
+    }
+
+    [Theory]
     [InlineData(".env", false)]
     [InlineData("src/.ssh/id_ed25519", false)]
     [InlineData("certs/dev.pem", false)]

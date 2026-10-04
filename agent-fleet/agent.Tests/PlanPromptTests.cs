@@ -50,6 +50,19 @@ public sealed class PlanPromptTests : PlanTestBase
         Assert.DoesNotContain("the test can be the mistake", PlanRunner.BuildPrompt(plan, plan.Steps[0], 1, null));
     }
 
+    [Fact]
+    public void A_retry_after_a_call_that_was_too_long_to_finish_says_to_write_less_per_call()
+    {
+        PlanRecord plan = NewApproved();
+
+        // No command was running, so the hint about a process that stays alive would be wrong here.
+        string prompt = PlanRunner.BuildPrompt(plan, plan.Steps[0], 2,
+            "A model call got no reply within 15 minutes: what it was writing was too long to finish, and is lost.");
+
+        Assert.Contains("Write less in each call", prompt);
+        Assert.DoesNotContain("keeps the process alive", prompt);
+    }
+
     [Theory]
     [InlineData("Error: command exceeded the 120s timeout and was killed.")]
     [InlineData("The attempt ran out of time after 20 minutes.")]
@@ -132,6 +145,12 @@ public sealed class PlanPromptTests : PlanTestBase
         Assert.Contains("isolated workspace of the selected worker", prompt);
         Assert.Contains("Use project-relative paths", prompt);
         Assert.Contains(shell, prompt);
+        if (platform == "linux")
+        {
+            // A model on a Linux worker wrote "> nul" and left a file by that name (measured on a worker).
+            Assert.Contains("/dev/null", prompt);
+        }
+
         Assert.DoesNotContain(plan.WorkingDirectory!, prompt);
         Assert.DoesNotContain("Project folder:", prompt);
     }

@@ -279,6 +279,34 @@ public sealed partial class PlanRunnerTests
     }
 
     [Fact]
+    public async Task A_model_call_that_gets_no_reply_is_reported_as_that_and_not_as_the_attempt_running_out_of_time()
+    {
+        (FleetOptions options, FleetHealthMonitor health) = HubFleet();
+        PlanRecord plan = RepairPlan("worker-a", PlanRecoveryScope.WorkerOnly);
+        int calls = 0;
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            if (++calls == 1)
+            {
+                // What an HttpClient raises when its timeout passes while the model is still writing.
+                throw new TaskCanceledException("The request was canceled due to the configured HttpClient.Timeout of 900 seconds elapsing.");
+            }
+
+            File.WriteAllText(SourceFile, "fixed");
+            return Task.FromResult("Worked on it.");
+        });
+
+        await RepairRunner(agent, _ => File.Exists(SourceFile) && File.ReadAllText(SourceFile).Contains("fixed", StringComparison.Ordinal)
+            ? Pass("check")
+            : FailWith("widget::renders"), options, health).RunPlanAsync(plan.Id, default);
+
+        PlanRunEvent timedOut = Assert.Single(Store.Get(plan.Id)!.Events!, runEvent => runEvent.Kind == RunEventKind.TimedOut);
+        Assert.Contains("got no reply within 15 minutes", timedOut.Detail);
+        Assert.Contains("too long to finish", timedOut.Detail);
+        Assert.DoesNotContain("ran out of time", timedOut.Detail);
+    }
+
+    [Fact]
     public async Task The_same_failure_with_no_file_changed_is_a_stall_and_climbs_a_rung()
     {
         (FleetOptions options, FleetHealthMonitor health) = HubFleet();
