@@ -37,6 +37,9 @@ internal static class PlanRecoveryScope
 
     public static bool AllowsHubRescue(string? scope) =>
         string.Equals(scope, AllowHubRescue, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>A step's own choice, when it has one, wins over the plan's.</summary>
+    public static bool AllowsHubRescue(PlanRecord plan, PlanStep step) => AllowsHubRescue(step.Rescue ?? plan.RecoveryScope);
 }
 
 /// <summary>
@@ -67,6 +70,9 @@ internal static class PlanSecondOpinion
 
     public static bool IsOn(PlanRecord plan) => !string.Equals(plan.Review, Off, StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>A step's own choice, when it has one, wins over the plan's.</summary>
+    public static bool IsOn(PlanRecord plan, PlanStep step) => !string.Equals(step.Review ?? plan.Review, Off, StringComparison.OrdinalIgnoreCase);
+
     internal static string? Normalize(string? mode) =>
         mode?.Trim().ToLowerInvariant() switch
         {
@@ -82,6 +88,9 @@ internal static class PlanAutoRetry
     public const int Max = 5;
 
     public static int For(PlanRecord plan) => Math.Clamp(plan.AutoRetries ?? Default, 0, Max);
+
+    /// <summary>A step's own number, when it has one, wins over the plan's.</summary>
+    public static int For(PlanRecord plan, PlanStep step) => Math.Clamp(step.AutoRetries ?? plan.AutoRetries ?? Default, 0, Max);
 
     // The causes a pass from the best state may fix: the ladder was spent, nothing changed, the step ran out of time. An
     // environment, a broken check or an unknown failure is not made better by trying again.
@@ -104,7 +113,10 @@ internal sealed record PlanStep(
     string? Machine = null,
     bool RetrySafe = false,
     string? OriginalVerify = null,
-    IReadOnlyList<int>? DependsOn = null);
+    IReadOnlyList<int>? DependsOn = null,
+    int? AutoRetries = null,
+    string? Rescue = null,
+    string? Review = null);
 
 internal static class RunEventKind
 {
@@ -239,7 +251,10 @@ internal sealed record PlanStepInput(
     [property: Description("How capable a model the step needs: heavy for hard or risky work, standard for ordinary work, light for trivial edits")] string? Tier = null,
     [property: Description("Optional shared short label for two or more consecutive, independent steps that can run at the same time. Leave empty unless their files are disjoint and neither depends on the other")] string? ParallelGroup = null,
     [property: Description("Set true only when this step's project-local edits and commands are safe to repeat if the backend restarts mid-step. Otherwise false; interrupted steps then wait for user review")] bool RetrySafe = false,
-    [property: Description("Numbers of the earlier steps this one needs finished first. Leave empty for the usual chain (each step needs the one before it); the last step always needs all of them. A step that cannot be finished holds back only the steps that need it")] int[]? DependsOn = null);
+    [property: Description("Numbers of the earlier steps this one needs finished first. Leave empty for the usual chain (each step needs the one before it); the last step always needs all of them. A step that cannot be finished holds back only the steps that need it")] int[]? DependsOn = null,
+    [property: Description("Optional, only when the user asked: how many times the fleet may retry this step by itself before it waits for the user (0 to 5). Leave empty to use the plan's setting")] int? Retries = null,
+    [property: Description("Optional, only when the user asked: allow-hub-rescue or worker-only for this step. Leave empty to use the plan's setting")] string? Rescue = null,
+    [property: Description("Optional, only when the user asked: auto or off, whether a second model reads this step before it is accepted. Leave empty to use the plan's setting")] string? Review = null);
 
 internal sealed record StepMachineRequest(int StepId, string? Machine);
 

@@ -829,7 +829,7 @@ internal sealed partial class PlanRunner
         TimeSpan worked = TimeSpan.FromSeconds(earlierEvents
             .Where(runEvent => runEvent.Kind == RunEventKind.RoundClassified).Sum(runEvent => runEvent.DurationSeconds ?? 0));
         string? hub = _fleetOptions?.Nodes.SingleOrDefault(node => node.Fallback)?.Name;
-        bool hubAllowed = hub is not null && PlanRecoveryScope.AllowsHubRescue(plan.RecoveryScope);
+        bool hubAllowed = hub is not null && PlanRecoveryScope.AllowsHubRescue(plan, step);
 
         // A restart loses the open conversation, but not the rung: a step that had climbed to the hub stays on it.
         if (modelOverride is null && rung >= RepairLadder.HubRung && hubAllowed)
@@ -1952,7 +1952,7 @@ internal sealed partial class PlanRunner
             return alternate;
         }
 
-        if (!PlanRecoveryScope.AllowsHubRescue(plan.RecoveryScope) || _fleetOptions is null || _healthMonitor is null)
+        if (!PlanRecoveryScope.AllowsHubRescue(plan, step) || _fleetOptions is null || _healthMonitor is null)
         {
             return null;
         }

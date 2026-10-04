@@ -629,6 +629,22 @@ internal sealed partial class FleetPlanStore
                 text.AppendLine($"  - Depends on: {string.Join(", ", declared.Select(id => $"step {id}"))}");
             }
 
+            // A step's own choices, when it has any, as the plan file would write them.
+            if (step.AutoRetries is { } stepRetries)
+            {
+                text.AppendLine($"  - Retries: {stepRetries}");
+            }
+
+            if (step.Rescue is not null)
+            {
+                text.AppendLine($"  - Rescue: {step.Rescue}");
+            }
+
+            if (step.Review is not null)
+            {
+                text.AppendLine($"  - Review: {step.Review}");
+            }
+
             if (step.Verify is not null)
             {
                 text.AppendLine($"  - {(step.Id == plan.Steps[^1].Id ? "Runner final validation" : "Verify")}: `{step.Verify}`");
@@ -891,22 +907,38 @@ internal sealed partial class FleetPlanStore
             tier = FleetTiers.Standard;
         }
 
+        // The light tier is for trivial edits. A step that names several files is not one, and a small model measured on a
+        // five-file step used up its whole attempt and left code that did not compile.
+        IReadOnlyList<string> files = Clean(input.Files);
+        string? note = null;
+        if (tier == FleetTiers.Light && files.Count > MaxLightStepFiles)
+        {
+            tier = FleetTiers.Standard;
+            note = $"Raised from the light tier to standard: it names {files.Count} files, and the light tier is for trivial edits (at most {MaxLightStepFiles}).";
+        }
+
         return new PlanStep(
             id,
             input.Title.Trim(),
             input.Detail?.Trim() ?? string.Empty,
-            Clean(input.Files),
+            files,
             string.IsNullOrWhiteSpace(input.Verify) ? null : input.Verify.Trim(),
             tier,
             StepStatus.Pending,
-            null,
+            note,
             0,
             null,
             null,
             CleanParallelGroup(input.ParallelGroup),
             RetrySafe: input.RetrySafe,
-            DependsOn: input.DependsOn is { Length: > 0 } declared ? declared.Where(id => id > 0).Distinct().Order().ToList() : null);
+            DependsOn: input.DependsOn is { Length: > 0 } declared ? declared.Where(id => id > 0).Distinct().Order().ToList() : null,
+            AutoRetries: input.Retries is { } retries ? Math.Clamp(retries, 0, PlanAutoRetry.Max) : null,
+            Rescue: NormalizeRecoveryScope(input.Rescue),
+            Review: PlanSecondOpinion.Normalize(input.Review));
     }
+
+    /// <summary>The most files a light-tier step may name; a step that names more is raised to the standard tier.</summary>
+    internal const int MaxLightStepFiles = 2;
 
     internal static string? NormalizeRecoveryScope(string? scope) =>
         scope?.Trim().ToLowerInvariant() switch

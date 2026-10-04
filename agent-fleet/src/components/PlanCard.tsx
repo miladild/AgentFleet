@@ -18,6 +18,10 @@ export type PlanStep = {
   /** The numbers of the steps this one waits for. Every step has them once the plan is read from the backend. */
   dependsOn?: number[] | null;
   retrySafe?: boolean;
+  /** This step's own choices, when it has any; else the plan's apply. */
+  autoRetries?: number | null;
+  rescue?: string | null;
+  review?: string | null;
   status: string;
   note: string | null;
   attempts: number;
@@ -393,6 +397,18 @@ export function PlanCard({ planId }: { planId: string }) {
                       </span>
                       {step.parallelGroup && (
                         <span className="ml-1 text-[10px] text-violet-300">parallel: {step.parallelGroup}</span>
+                      )}
+                      {(step.autoRetries != null || step.rescue || step.review) && (
+                        <span
+                          className="ml-1 text-[10px] text-sky-300"
+                          title="This step's own settings. They replace the plan's Recovery, Parked steps and Second opinion choices for this step only."
+                        >
+                          {[
+                            step.autoRetries != null ? (step.autoRetries === 0 ? "no auto retry" : `${step.autoRetries} auto retr${step.autoRetries === 1 ? "y" : "ies"}`) : null,
+                            step.rescue ? (step.rescue === "worker-only" ? "worker only" : "hub rescue") : null,
+                            step.review ? (step.review === "off" ? "no second opinion" : "second opinion") : null,
+                          ].filter(Boolean).join(" · ")}
+                        </span>
                       )}
                       {needsOtherThanChain(plan, step) && (
                         <span

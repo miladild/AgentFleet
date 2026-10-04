@@ -29,6 +29,9 @@ internal sealed record PlanFileContent(
 /// - Tier: heavy | standard | light
 /// - Parallel group: name                   (optional)
 /// - Depends: 1, 3                          (optional: steps that must finish first; else the one before)
+/// - Retries: 0                             (optional: automatic retries of this step when it would be parked, 0 to 5; else the plan's)
+/// - Rescue: worker-only                    (optional: worker-only | allow-hub-rescue for this step; else the plan's)
+/// - Review: off                            (optional: auto | off, the second opinion on this step; else the plan's)
 /// - Files: `a.ts`, `b.ts`
 /// - Check: `npm test`
 /// Everything after those lines is the step's instructions.
@@ -251,9 +254,10 @@ internal static partial class PlanFile
 
     private static PlanStepInput Step(string title, string[] body)
     {
-        string? tier = null, group = null, check = null;
+        string? tier = null, group = null, check = null, rescue = null, review = null;
         string[] files = [];
         int[]? dependsOn = null;
+        int? retries = null;
         int line = 0;
         while (line < body.Length && string.IsNullOrWhiteSpace(body[line]))
         {
@@ -282,6 +286,15 @@ internal static partial class PlanFile
                     int[] numbers = PlanGraph.ParseStepNumbers(value);
                     dependsOn = numbers.Length > 0 ? numbers : null;
                     break;
+                case "retries":
+                    retries = int.TryParse(Unquote(value).Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault(), out int count) ? count : null;
+                    break;
+                case "rescue":
+                    rescue = Unquote(value).Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.ToLowerInvariant();
+                    break;
+                case "review":
+                    review = Unquote(value).Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.ToLowerInvariant();
+                    break;
                 case "files":
                     files = value.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
                         .Select(Unquote).Where(file => NoneToNull(file) is not null).ToArray();
@@ -293,7 +306,8 @@ internal static partial class PlanFile
         }
 
         string detail = string.Join('\n', body[line..]).Trim();
-        return new PlanStepInput(title, detail.Length > 0 ? detail : title, files, check, tier, group, DependsOn: dependsOn);
+        return new PlanStepInput(title, detail.Length > 0 ? detail : title, files, check, tier, group, DependsOn: dependsOn,
+            Retries: retries, Rescue: rescue, Review: review);
     }
 
     // The text after "Goal:" up to the next blank line.
@@ -375,7 +389,7 @@ internal static partial class PlanFile
     [GeneratedRegex(@"^\s*(?:\*\*)?Working directory(?:\*\*)?\s*:\s*(?:\*\*)?\s*`?([^`]+?)`?\s*$", RegexOptions.IgnoreCase)]
     private static partial Regex WorkingDirectoryLine();
 
-    [GeneratedRegex(@"^\s*[-*]\s*(?:\*\*)?(Tier|Parallel group|Depends(?: on)?|Files|Check|Verify)(?:\*\*)?\s*:\s*(.*)$", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"^\s*[-*]\s*(?:\*\*)?(Tier|Parallel group|Depends(?: on)?|Retries|Rescue|Review|Files|Check|Verify)(?:\*\*)?\s*:\s*(.*)$", RegexOptions.IgnoreCase)]
     private static partial Regex FieldLine();
 
     [GeneratedRegex(@"^\s*[-*]\s+(.+)$")]
