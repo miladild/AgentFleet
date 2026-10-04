@@ -78,7 +78,7 @@ function Invoke-Run([string]$Id, [int]$Number) {
         autoRetries = 0; reviewFailed = 0; reviewPassed = 0; parkCauses = ''; models = ''; blockedReason = ''; error = '' }
     $started = Get-Date
     try {
-        # -Tier sends every step at one tier: the tasks are written as standard, which only ever reaches the standard machine.
+        # -Tier overrides the tiers written by the task, so the same workload can be measured on another worker tier.
         $steps = $task.steps
         if ($Tier -ne 'as-written') {
             $steps = @($task.steps | ForEach-Object { $copy = $_ | ConvertTo-Json -Depth 6 | ConvertFrom-Json; $copy.tier = $Tier; $copy })
@@ -157,7 +157,7 @@ $rate = if ($n) { [Math]::Round(100.0 * $completed / $n, 0) } else { 0 }
 $lines = @()
 $lines += "# Benchmark results ($n runs, $(Get-Date -Format 'yyyy-MM-dd HH:mm'))"
 $lines += ''
-$lines += "Backend $BaseUrl; steps $(if ($Tier -eq 'as-written') { 'at the tier the task says (standard)' } else { "all at the $Tier tier" }); second opinion $Review; $(if ($WorkerOnly) { 'worker only' } else { 'hub rescue allowed' }); automatic retries $(if ($AutoRetries -ge 0) { $AutoRetries } else { 'default' })."
+$lines += "Backend $BaseUrl; steps $(if ($Tier -eq 'as-written') { 'at the tiers specified by each task' } else { "all at the $Tier tier" }); second opinion $Review; $(if ($WorkerOnly) { 'worker only' } else { 'hub rescue allowed' }); automatic retries $(if ($AutoRetries -ge 0) { $AutoRetries } else { 'default' })."
 $lines += ''
 $lines += '| task | run | plan | hidden tests | minutes | rounds | rung | retries | reviews failed | parked causes | models |'
 $lines += '|---|---|---|---|---|---|---|---|---|---|---|'
