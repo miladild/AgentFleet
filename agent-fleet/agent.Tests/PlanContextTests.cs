@@ -605,16 +605,17 @@ public sealed class PlanContextTests : ContextTestBase
 
         await Runner().RunPlanAsync(plan.Id, default);
         Assert.Equal(PlanStatus.Blocked, Plans.Get(plan.Id)!.Status);
-        // Two conversations: the first one's rounds changed no file and brought the same failure back, so the second one
-        // (a fresh start with a brief) got the step; it too brought the same failure back with no file changed.
+        // Two conversations: the first one's second round changed no file and brought the same failure back, so the second one
+        // (a fresh start with a brief) got the step; on the last rung a round that changes nothing is spent like any other, so it
+        // had its three rounds, and each brought the same failure back with no file changed.
         Assert.Equal(2, Plans.Get(plan.Id)!.Steps[0].Attempts);
-        Assert.Equal(3, agent.Calls.Count);
+        Assert.Equal(5, agent.Calls.Count);
 
         fixedNow = true;
         Plans.Approve(plan.Id, autoRetries: 0);
         await Runner().RunPlanAsync(plan.Id, default);
 
-        string resumed = agent.Calls[3].Prompt;
+        string resumed = agent.Calls[5].Prompt;
         Assert.Contains("tried before and did not pass", resumed);
         Assert.Contains("slug keeps accents", resumed);
         PlanRecord after = Plans.Get(plan.Id)!;

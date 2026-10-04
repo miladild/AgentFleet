@@ -122,7 +122,8 @@ steps, and checks each step with a real command instead of trusting itself.
     keeps its worker.
 
     A round that changed nothing (no edit, and no file changed), or that leaves the same failures with no file changed, does
-    not wait for its three rounds: the step climbs at once. Every climb is a **rung changed** line in the run log with its
+    not wait for its three rounds: the step climbs at once, except on the last rung, which has nowhere to climb to: there such a
+    round is spent like any other, and the step is parked when the rung's rounds are used up. Every climb is a **rung changed** line in the run log with its
     reason. A round that leaves the step worse than its best round so far (more failing names, or code that stopped
     building) is **undone**: the runner puts the project's changed and new files back as they were after the best round
     before the next round, tells the model what it broke, and logs **round rolled back**. Lock files and build caches that a

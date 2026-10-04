@@ -916,7 +916,9 @@ public sealed class PlanRepairLogicTests
     [InlineData(2, 1, true, "FreshConversation", 3)]
     [InlineData(3, 2, false, "NextRound", 3)]
     [InlineData(3, 3, false, "GiveUp", 3)]
-    [InlineData(3, 1, true, "GiveUp", 3)]
+    [InlineData(3, 1, true, "NextRound", 3)]
+    [InlineData(3, 2, true, "NextRound", 3)]
+    [InlineData(3, 3, true, "GiveUp", 3)]
     public void The_ladder_climbs_when_rounds_stop_paying_off(int rung, int rounds, bool noChange, string expected, int toRung)
     {
         RepairDecision decision = RepairLadder.Decide(rung, rounds, 3, noChange, "nothing changed", hubRungAvailable: true);

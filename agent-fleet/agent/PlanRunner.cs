@@ -2923,6 +2923,11 @@ internal sealed partial class PlanRunner
                 ? $"Attempt {attempt}. The previous attempt did not pass. What went wrong:"
                 : "This step was tried before and did not pass, and the plan stopped here; the user has asked for another go. What went wrong the last time:");
             text.AppendLine(lastFailure);
+            if (FailureLocation.Describe(lastFailure, plan.WorkingDirectory) is { } where)
+            {
+                text.AppendLine(where);
+            }
+
             text.AppendLine("Look at what is already on disk (read_file, list_directory) and fix the cause instead of starting over. " +
                 "The cause can be in a file an earlier step wrote: if the output points there, fix that file too.");
             foreach (string hint in RetryHints(step, lastFailure))

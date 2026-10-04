@@ -144,7 +144,10 @@ internal static class RepairLadder
     /// </summary>
     public static RepairDecision Decide(int rung, int roundsInRung, int roundsPerRung, bool noChange, string noChangeWhy, bool hubRungAvailable)
     {
-        if (!noChange && roundsInRung < roundsPerRung)
+        // A round that changed nothing sends the step up a rung at once, but the last rung has nowhere to go: there it is spent like any
+        // other round. Measured (benchmark p2, a standard worker): four of six parked steps ended on one round of a fresh conversation
+        // in which the model answered, or ran commands, and changed no file; the rung's other two rounds were never tried.
+        if ((!noChange || rung == FreshRung) && roundsInRung < roundsPerRung)
         {
             return new RepairDecision(RepairMove.NextRound, rung, string.Empty);
         }
@@ -242,6 +245,11 @@ internal static class RepairMessages
             ? $"Round {round}: the step is not finished yet. What went wrong:"
             : $"Round {round}: the approved check did not pass yet. The fleet runs it for you with `{step.Verify}`. What it printed:");
         text.AppendLine(string.IsNullOrWhiteSpace(failure) ? "(no output)" : failure);
+        if (FailureLocation.Describe(failure, plan.WorkingDirectory) is { } where)
+        {
+            text.AppendLine();
+            text.AppendLine(where);
+        }
 
         var changes = new List<string>();
         if (rollback is not null)
