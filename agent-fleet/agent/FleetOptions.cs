@@ -90,8 +90,11 @@ internal sealed class FleetOptions
 
         return new FleetOptions(
             nodes,
-            // A planning turn on the heavy model can legitimately generate a long structured plan.
-            ReadDuration(configuration, "FLEET_NETWORK_TIMEOUT_SECONDS", 300, minimum: 10, maximum: 900),
+            // A planning turn on the heavy model can legitimately generate a long structured plan, and Ollama sends nothing
+            // while it writes a tool call (a whole file in write_file), so one reply can be silent for as long as it takes to
+            // generate 4096 tokens: 6 minutes on a worker that makes 11 tokens a second (measured), and then everything it
+            // wrote is lost. 300 seconds cut exactly that; 900 holds 4096 tokens down to about 4.5 tokens a second.
+            ReadDuration(configuration, "FLEET_NETWORK_TIMEOUT_SECONDS", 900, minimum: 10, maximum: 900),
             ReadDuration(configuration, "FLEET_HEALTH_PROBE_TIMEOUT_SECONDS", 3, minimum: 1, maximum: 30),
             ReadDuration(configuration, "FLEET_HEALTH_CACHE_SECONDS", 10, minimum: 1, maximum: 300));
     }

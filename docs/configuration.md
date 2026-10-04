@@ -153,7 +153,7 @@ set them in your user environment variables. For a Windows service set them on t
 | `FLEET_FILES_ROOT` | the backend's working folder | What relative paths in file tools are relative to |
 | `FLEET_ALLOWED_HOSTS` | none | Extra host names the backend answers to (comma separated). See [security.md](security.md) |
 | `FLEET_FRONTEND_URL` | `http://localhost:3000` | Where the backend finds the web UI, used to check plan diagrams |
-| `FLEET_NETWORK_TIMEOUT_SECONDS` | 300 | How long to wait for one model reply (10 to 900) |
+| `FLEET_NETWORK_TIMEOUT_SECONDS` | 900 | How long to wait for one model reply (10 to 900). Ollama sends nothing while a model writes a tool call such as a whole file, so a slow machine is silent for as long as it takes to generate the answer (up to 4096 tokens: about 6 minutes at 11 tokens a second); a shorter wait throws that work away |
 | `FLEET_HEALTH_PROBE_TIMEOUT_SECONDS` | 3 | Health probe timeout (1 to 30) |
 | `FLEET_HEALTH_CACHE_SECONDS` | 10 | How often nodes are probed (1 to 300) |
 | `SHELL_EXECUTION_TIMEOUT_SECONDS` | 120 | How long one `run_command` may run |

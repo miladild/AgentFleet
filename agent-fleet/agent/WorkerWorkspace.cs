@@ -156,6 +156,9 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
         "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", "authorized_keys", "known_hosts"
     };
     private static readonly Regex SecretEnvironmentFile = new(@"^\.env(?:\..*)?$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // Windows reserves these names, with or without an extension, trailing dots and spaces ignored.
+    private static readonly Regex WindowsDeviceName = new(@"^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
     private static readonly HashSet<string> PrivateDirectories = new(StringComparer.OrdinalIgnoreCase)
     {
         ".ssh", ".aws", ".azure", ".gnupg", ".kube", "secrets", "credentials"
@@ -1059,7 +1062,15 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
     private static bool AllowedRelative(string relative) => !string.IsNullOrWhiteSpace(relative) &&
         !relative.Split('/').Any(SkippedDirectories.Contains) && !relative.Split('/').Any(PrivateDirectories.Contains) &&
         !relative.Split('/').Any(PrivateFiles.Contains) &&
-        !relative.Split('/').Any(part => SecretEnvironmentFile.IsMatch(part) || PrivateExtensions.Contains(Path.GetExtension(part)));
+        !relative.Split('/').Any(part => SecretEnvironmentFile.IsMatch(part) || PrivateExtensions.Contains(Path.GetExtension(part))) &&
+        !relative.Split('/').Any(IsWindowsDeviceName);
+
+    // A Linux worker can create a file called nul (a command ending "> nul" does), but a Windows hub cannot hold one: its path
+    // resolves to the nul device, outside the project, and the whole sync failed with "Worker returned a path outside the
+    // project" (measured on a worker: the step was parked as an environment fault). Such a file stays on the worker and is not
+    // synced; nothing on the hub can depend on a file it cannot have.
+    private static bool IsWindowsDeviceName(string part) => OperatingSystem.IsWindows() && WindowsDeviceName.IsMatch(part.TrimEnd(' ', '.'));
+
     private static bool IsSafeRelative(string relative)
     {
         string normalized = relative.Replace('\\', '/');
@@ -1180,15 +1191,29 @@ internal static class WorkspaceTools
             ? worker.ReadFileAsync(path, startLine, endLine, cancellationToken)
             : HubFileSystemTools.ReadFileAsync(path, startLine, endLine, cancellationToken);
 
+    // The placeholder the runner puts where it shortened old tool output (see ContextSizeChatClient.RemovedMarker) is not part
+    // of any file. A small model that copied it into a write was left with a file cut off after its first lines, found only
+    // when the check failed on a syntax error. Refusing the write says what is wrong at once.
+    internal static bool CarriesHistoryPlaceholder(string? text) =>
+        text?.Contains(ContextSizeChatClient.RemovedMarker, StringComparison.Ordinal) == true;
+
+    internal static string HistoryPlaceholderRefusal(string path) =>
+        $"Error: nothing was written to {path}. The text contains \"{ContextSizeChatClient.RemovedMarker}\", which only stands in for old " +
+        "output in this conversation and is not part of any file. Write the complete, real content (read the file first if you need it).";
+
     public static Task<string> WriteFileAsync(string path, string content, CancellationToken cancellationToken) =>
-        WorkerWorkspaceContext.Current is { } worker
-            ? worker.WriteFileAsync(path, content, cancellationToken)
-            : HubFileSystemTools.WriteFileAsync(path, content, cancellationToken);
+        CarriesHistoryPlaceholder(content)
+            ? Task.FromResult(HistoryPlaceholderRefusal(path))
+            : WorkerWorkspaceContext.Current is { } worker
+                ? worker.WriteFileAsync(path, content, cancellationToken)
+                : HubFileSystemTools.WriteFileAsync(path, content, cancellationToken);
 
     public static Task<string> EditFileAsync(string path, string oldText, string newText, bool? replaceAll, CancellationToken cancellationToken) =>
-        WorkerWorkspaceContext.Current is { } worker
-            ? worker.EditFileAsync(path, oldText, newText, replaceAll, cancellationToken)
-            : HubFileSystemTools.EditFileAsync(path, oldText, newText, replaceAll, cancellationToken);
+        CarriesHistoryPlaceholder(newText)
+            ? Task.FromResult(HistoryPlaceholderRefusal(path))
+            : WorkerWorkspaceContext.Current is { } worker
+                ? worker.EditFileAsync(path, oldText, newText, replaceAll, cancellationToken)
+                : HubFileSystemTools.EditFileAsync(path, oldText, newText, replaceAll, cancellationToken);
 
     public static string ListDirectory(string path) =>
         WorkerWorkspaceContext.Current is { } worker ? worker.ListDirectory(path) : HubFileSystemTools.ListDirectory(path);

@@ -313,7 +313,10 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
     }
 
     private const int LongPart = 400;
-    private const string Removed = " [the rest was removed to keep this conversation inside the model's window]";
+    /// <summary>What stands in for shortened tool output; no tool may write it into a file (see WorkspaceTools).</summary>
+    internal const string RemovedMarker = "[the rest was removed to keep this conversation inside the model's window]";
+
+    private const string Removed = " " + RemovedMarker;
 
     private static ChatMessage? Shortened(ChatMessage message)
     {
@@ -327,10 +330,14 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
                     contents.Add(new FunctionResultContent(result.CallId, text[..200] + Removed));
                     changed = true;
                     break;
+                // The long arguments of an old call (a file's content, an edit's text) are dropped, not cut with a marker. A small
+                // model copies the shape of its own earlier calls: with a marker in them it wrote the marker into the next file
+                // (measured: a worker's test file was its first line and "[the rest was removed ...]", and nothing said so
+                // until the check failed on a syntax error). A call without the argument fails loudly when copied.
                 case FunctionCallContent call when call.Arguments?.Values.Any(value => value?.ToString()?.Length > LongPart) == true:
-                    contents.Add(new FunctionCallContent(call.CallId, call.Name, call.Arguments.ToDictionary(
-                        pair => pair.Key,
-                        pair => pair.Value?.ToString() is { Length: > LongPart } text ? (object?)(text[..120] + Removed) : pair.Value)));
+                    contents.Add(new FunctionCallContent(call.CallId, call.Name, call.Arguments
+                        .Where(pair => pair.Value?.ToString()?.Length is not > LongPart)
+                        .ToDictionary(pair => pair.Key, pair => pair.Value)));
                     changed = true;
                     break;
                 case TextContent text when message.Role == ChatRole.Assistant && text.Text is { Length: > 4 * LongPart }:
