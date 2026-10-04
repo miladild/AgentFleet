@@ -331,6 +331,17 @@ public sealed class CheckHealingToolPolicyTests
     [InlineData("web_fetch", true, PlanRunnerToolPolicy.CheckAuditRole, false)]
     [InlineData("write_file", true, null, true)]
     [InlineData("run_command", false, null, true)]
+    // A model carrying out a step is shown only what it may call; chat is shown everything.
+    [InlineData("edit_file", true, null, true)]
+    [InlineData("run_command", true, null, true)]
+    [InlineData("search_context", true, null, true)]
+    [InlineData("web_search", true, null, false)]
+    [InlineData("web_fetch", true, null, false)]
+    [InlineData("http_request", true, null, false)]
+    [InlineData("run_sandboxed_code", true, null, false)]
+    [InlineData("validate_diagram", true, null, false)]
+    [InlineData("record_decision", true, null, false)]
+    [InlineData("web_search", false, null, true)]
     public void Tools_are_offered_by_who_is_asking(string tool, bool fromRunner, string? role, bool offered) =>
         Assert.Equal(offered, PlanRunnerToolPolicy.Offers(tool, fromRunner, role));
 

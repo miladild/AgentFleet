@@ -116,6 +116,52 @@ public sealed class WorkerFailureModeTests : IDisposable
         Assert.Equal(expected, WorkspaceTools.CarriesHistoryPlaceholder(text));
     }
 
+    private static ChatOptions WithHubParagraph() => new()
+    {
+        Instructions = "You are a local coding assistant." + Environment.NewLine + Environment.NewLine + HubPlatform.PathInstructions +
+                       Environment.NewLine + Environment.NewLine + "Available tools: read_file, write_file."
+    };
+
+    [Fact]
+    public void A_model_on_a_linux_worker_is_not_told_its_machine_is_the_hubs()
+    {
+        ChatOptions original = WithHubParagraph();
+
+        ChatOptions? changed = WorkerPlatformChatClient.ForWorker(original, "linux");
+
+        Assert.NotSame(original, changed);
+        Assert.DoesNotContain(HubPlatform.PathInstructions, changed!.Instructions);
+        Assert.Contains("Linux worker", changed.Instructions);
+        Assert.Contains("/dev/null", changed.Instructions);
+        Assert.StartsWith("You are a local coding assistant.", changed.Instructions);
+        Assert.EndsWith("Available tools: read_file, write_file.", changed.Instructions);
+        Assert.Contains(HubPlatform.PathInstructions, original.Instructions); // the caller's options are untouched
+    }
+
+    [Fact]
+    public void A_model_on_a_windows_worker_is_told_about_that_worker()
+    {
+        ChatOptions? changed = WorkerPlatformChatClient.ForWorker(WithHubParagraph(), "Windows");
+
+        Assert.Contains("Windows worker", changed!.Instructions);
+        Assert.Contains("PowerShell", changed.Instructions);
+        Assert.DoesNotContain(HubPlatform.PathInstructions, changed.Instructions);
+    }
+
+    [Fact]
+    public void Outside_a_worker_step_or_without_the_hub_paragraph_the_options_are_left_alone()
+    {
+        ChatOptions chat = WithHubParagraph();
+        Assert.Same(chat, WorkerPlatformChatClient.ForWorker(chat, null)); // ordinary chat: the tools act on the hub
+
+        var other = new ChatOptions { Instructions = "No machine paragraph here." };
+        Assert.Same(other, WorkerPlatformChatClient.ForWorker(other, "linux"));
+
+        Assert.Null(WorkerPlatformChatClient.ForWorker(null, "linux"));
+        var empty = new ChatOptions();
+        Assert.Same(empty, WorkerPlatformChatClient.ForWorker(empty, "linux"));
+    }
+
     [Theory]
     [InlineData(null, 900)]
     [InlineData("120", 120)]

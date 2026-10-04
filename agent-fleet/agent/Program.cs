@@ -584,7 +584,9 @@ int planRoundsPerRung = int.TryParse(builder.Configuration["FLEET_PLAN_ROUNDS_PE
     : RepairLadder.DefaultRoundsPerRung;
 
 IChatClient agentClient = new ChatClientBuilder(fleetClient)
-    // Outermost: the current tool list goes onto the request before anything looks for a tool by name.
+    // A plan step on a worker is told about the worker's machine, not the hub's (see WorkerPlatformChatClient).
+    .Use(inner => new WorkerPlatformChatClient(inner))
+    // Next: the current tool list goes onto the request before anything looks for a tool by name.
     .Use(inner => new DynamicToolsChatClient(inner, toolRegistry, (messages, options, toolName) =>
         PlanRunnerToolPolicy.Offers(
             toolName,

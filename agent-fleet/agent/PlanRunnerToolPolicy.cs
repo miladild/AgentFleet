@@ -47,6 +47,14 @@ internal static partial class PlanRunnerToolPolicy
             return ReviewTools.Contains(toolName);
         }
 
+        // A model carrying out a step is shown the tools it may call and no others. It used to be shown all nineteen (web search,
+        // HTTP requests, the sandbox, diagrams, decision records: refused if called) at about 1000 tokens, and a small model is
+        // tempted by what it sees.
+        if (fromRunner && role is null)
+        {
+            return AllowedTools.Contains(toolName);
+        }
+
         return !(fromRunner && role == CheckAuditRole) || AuditTools.Contains(toolName);
     }
 
