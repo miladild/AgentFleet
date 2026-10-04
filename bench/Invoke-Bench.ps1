@@ -23,7 +23,8 @@ param(
     [int]$TimeoutMinutes = 120,
     [ValidateSet('auto', 'off')][string]$Review = 'auto',
     [switch]$WorkerOnly,
-    [int]$AutoRetries = -1
+    [int]$AutoRetries = -1,
+    [ValidateSet('as-written', 'light', 'standard', 'heavy')][string]$Tier = 'as-written'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -77,7 +78,12 @@ function Invoke-Run([string]$Id, [int]$Number) {
         autoRetries = 0; reviewFailed = 0; reviewPassed = 0; parkCauses = ''; models = ''; blockedReason = ''; error = '' }
     $started = Get-Date
     try {
-        $body = @{ title = "bench $Id #$Number"; goal = $task.goal; workingDirectory = $project; steps = $task.steps; source = 'bench' } | ConvertTo-Json -Depth 8
+        # -Tier sends every step at one tier: the tasks are written as standard, which only ever reaches the standard machine.
+        $steps = $task.steps
+        if ($Tier -ne 'as-written') {
+            $steps = @($task.steps | ForEach-Object { $copy = $_ | ConvertTo-Json -Depth 6 | ConvertFrom-Json; $copy.tier = $Tier; $copy })
+        }
+        $body = @{ title = "bench $Id #$Number"; goal = $task.goal; workingDirectory = $project; steps = $steps; source = 'bench' } | ConvertTo-Json -Depth 8
         $created = Invoke-RestMethod -Uri "$BaseUrl/api/plans" -Method Post -ContentType 'application/json' -Body $body
         $result.planId = $created.id
         $approval = @{ review = $Review }
@@ -151,7 +157,7 @@ $rate = if ($n) { [Math]::Round(100.0 * $completed / $n, 0) } else { 0 }
 $lines = @()
 $lines += "# Benchmark results ($n runs, $(Get-Date -Format 'yyyy-MM-dd HH:mm'))"
 $lines += ''
-$lines += "Backend $BaseUrl; second opinion $Review; $(if ($WorkerOnly) { 'worker only' } else { 'hub rescue allowed' }); automatic retries $(if ($AutoRetries -ge 0) { $AutoRetries } else { 'default' })."
+$lines += "Backend $BaseUrl; steps $(if ($Tier -eq 'as-written') { 'at the tier the task says (standard)' } else { "all at the $Tier tier" }); second opinion $Review; $(if ($WorkerOnly) { 'worker only' } else { 'hub rescue allowed' }); automatic retries $(if ($AutoRetries -ge 0) { $AutoRetries } else { 'default' })."
 $lines += ''
 $lines += '| task | run | plan | hidden tests | minutes | rounds | rung | retries | reviews failed | parked causes | models |'
 $lines += '|---|---|---|---|---|---|---|---|---|---|---|'
