@@ -3,6 +3,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { splitAmount, splitByWeights } = require('../src/split.js');
 
+// The text says every share of a negative amount is negated, which does not say whether a zero share is 0 or -0. Strict
+// deepEqual tells them apart, so the shares are normalised (x + 0 turns -0 into 0) and only the amounts are compared.
+const shares = (list) => list.map((x) => x + 0);
+
 test('splitAmount: positive amounts distribute evenly with first shares getting remainder', () => {
   assert.deepEqual(splitAmount(100, 3), [34, 33, 33]);
   assert.deepEqual(splitAmount(1, 3), [1, 0, 0]);
@@ -12,7 +16,7 @@ test('splitAmount: positive amounts distribute evenly with first shares getting 
 
 test('splitAmount: negative amounts are split on absolute value and negated', () => {
   assert.deepEqual(splitAmount(-100, 3), [-34, -33, -33]);
-  assert.deepEqual(splitAmount(-1, 3), [-1, 0, 0]);
+  assert.deepEqual(shares(splitAmount(-1, 3)), [-1, 0, 0]);
   assert.deepEqual(splitAmount(-7, 2), [-4, -3]);
 });
 
