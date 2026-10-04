@@ -15,7 +15,10 @@ those tests, not by the plan saying "done".
 
 The benchmark uses the machines in your fleet configuration, so they are busy while it runs. `Invoke-Bench.ps1` writes
 `results.json` and `summary.md` under `bench\results\<time>`. Useful options: `-Tasks early-close,slugify`,
-`-WorkerOnly` (never use the hub), `-Review off` (no second opinion), `-AutoRetries 0`, `-TimeoutMinutes`.
+`-WorkerOnly` (never use the hub), `-Review off` (no second opinion), `-AutoRetries 0`, `-TimeoutMinutes`, and
+`-Tier light` (send every step at that tier). The tasks are written as `standard`, which only ever reaches the standard
+machine; run the benchmark again with `-Tier light` to measure the light-tier machine, which a plan only reaches when
+its step is light.
 
 ## What the summary checks (the gate)
 
