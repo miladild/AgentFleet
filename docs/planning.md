@@ -40,6 +40,9 @@ steps, and checks each step with a real command instead of trusting itself.
    machine is available. If the reviewer times out or cannot answer, the step is accepted on its check. On fail, the
    reviewer's problems are sent back like a failing check and the step climbs the repair ladder. Each step also says whether it
    may resume automatically after a backend restart; steps not marked restart-safe stop for review if interrupted.
+   Any step can override the plan's Recovery, Parked steps, or Second opinion setting for itself only. Use this to
+   keep a sensitive step on its worker only (Rescue: worker-only), to wait for you rather than retry (Retries: 0),
+   or to skip a trivial step's review (Review: off). The step's own setting is shown on its row in the plan card.
    In the web UI, you can optionally check **Save a Markdown copy** before approving; it writes the plan into the project
    folder shown on the card. The default is off.
 6. **The run.** Approval starts the plan **in the background**, in order. Each step requires a configured worker
@@ -266,7 +269,14 @@ on, the cases its test must cover.
 - `Working directory` is optional (the file's folder otherwise); so are `Goal`, `Decisions` (or `Assumptions`) and
   `Risks`.
 - `Tier` is heavy, standard or light. Steps that share a `Parallel group` run at the same time on different machines:
-  give them different tiers and separate files.
+  give them different tiers and separate files. A light-tier step that names more than 2 files is raised to standard
+  when the plan is saved.
+- `Retries` (optional, 0 to 5) is how many times the fleet retries a parked step automatically before it waits for
+  you; the plan's default applies if not set.
+- `Rescue` (optional, `worker-only` or `allow-hub-rescue`) overrides whether the hub model may take over if the
+  worker's model fails; the plan's default applies if not set.
+- `Review` (optional, `off` or `auto`) overrides whether a second opinion reads the step's changes before it is
+  accepted; the plan's default applies if not set.
 - `Check` is the command the fleet runs to decide whether the step worked. Name the files a step creates in `Files`.
 - `Depends` (optional) lists the numbers of earlier steps this one needs finished first (`- Depends: 1, 3`). Without it a
   step needs the one before it, and the last step always needs all of them. Use it for steps that really are independent,

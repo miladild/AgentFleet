@@ -57,7 +57,7 @@ internal sealed partial class PlanRunner
         }
 
         PlanRecord latest = _store.Get(plan.Id) ?? plan;
-        int budget = PlanAutoRetry.For(latest);
+        int budget = PlanAutoRetry.For(latest, step);
         int used = AutomaticRetriesUsed(latest, step.Id);
         if (used >= budget || (latest.RunDeadlineUtc is { } deadline && _utcNow() >= deadline))
         {

@@ -199,7 +199,7 @@ internal sealed partial class PlanRunner
         Note($"Auditing the check: {defect.Name}. {defect.Evidence}", "Started");
 
         string? hub = _fleetOptions?.Nodes.SingleOrDefault(node => node.Fallback)?.Name;
-        bool useHub = hub is not null && PlanRecoveryScope.AllowsHubRescue(plan.RecoveryScope);
+        bool useHub = hub is not null && PlanRecoveryScope.AllowsHubRescue(plan, step);
         string auditTier = useHub ? FleetTiers.Heavy : step.Tier;
         string? auditMachine = useHub ? hub : workMachine ?? step.Machine;
 

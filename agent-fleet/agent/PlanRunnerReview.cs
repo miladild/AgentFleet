@@ -16,7 +16,7 @@ internal sealed partial class PlanRunner
         int? rung, int? round, CancellationToken cancellationToken)
     {
         PlanRecord latest = _store.Get(plan.Id) ?? plan;
-        if (!PlanSecondOpinion.IsOn(latest) || step.Files.Count == 0)
+        if (!PlanSecondOpinion.IsOn(latest, step) || step.Files.Count == 0)
         {
             return null;
         }
@@ -32,7 +32,7 @@ internal sealed partial class PlanRunner
             return null;
         }
 
-        (string reviewerTier, string? reviewer, string? unavailable) = ChooseReviewer(latest, model);
+        (string reviewerTier, string? reviewer, string? unavailable) = ChooseReviewer(latest, step, model);
         if (reviewer is null)
         {
             Note($"No independent reviewer is available ({unavailable}); the step is accepted on its check.", "Skipped");
@@ -153,14 +153,14 @@ internal sealed partial class PlanRunner
 
     // A model that did not write the code: the hub when the plan lets it be used and it did not do the work itself, else a
     // machine other than the author's. Without one the step is accepted on its check, and the log says why.
-    private (string Tier, string? Machine, string? Unavailable) ChooseReviewer(PlanRecord plan, ModelAttemptResult model)
+    private (string Tier, string? Machine, string? Unavailable) ChooseReviewer(PlanRecord plan, PlanStep step, ModelAttemptResult model)
     {
         FleetNodeDefinition[] nodes = _fleetOptions?.Nodes.Where(node => !node.Vision).ToArray() ?? [];
         string? hub = nodes.SingleOrDefault(node => node.Fallback)?.Name;
         string? author = model.ModelNode ?? model.Machine;
         bool Same(string? left, string? right) => string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
 
-        if (hub is not null && PlanRecoveryScope.AllowsHubRescue(plan.RecoveryScope) && !Same(author, hub))
+        if (hub is not null && PlanRecoveryScope.AllowsHubRescue(plan, step) && !Same(author, hub))
         {
             return (FleetTiers.Heavy, hub, null);
         }
