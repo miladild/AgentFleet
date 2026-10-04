@@ -254,6 +254,8 @@ internal static class RepairMessages
                         (step.Verify is null
                             ? "When you are finished, reply with one short sentence saying what you did."
                             : "Run the check yourself with run_command before you finish, and as soon as it passes, stop: reply with one short sentence saying what you did."));
+        text.AppendLine();
+        text.AppendLine(PlanRunner.ActFirst);
         text.AppendLine(FleetPlanStore.Marker(plan.Id));
         return text.ToString();
     }
