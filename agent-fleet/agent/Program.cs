@@ -573,9 +573,14 @@ int planStepToolRounds = int.TryParse(builder.Configuration["FLEET_PLAN_STEP_TOO
     : 25;
 
 // How long one plan step may work (model calls and checks, not waiting for a machine) before it stops with what it tried.
-int planStepMinutes = int.TryParse(builder.Configuration["FLEET_PLAN_STEP_MINUTES"], out int stepMinutes) && stepMinutes is >= 5 and <= 480
+int planStepMinutes = int.TryParse(builder.Configuration["FLEET_PLAN_STEP_MINUTES"], out int stepMinutes) && stepMinutes is >= 5 and <= 1440
     ? stepMinutes
     : (int)PlanRunner.DefaultStepClock.TotalMinutes;
+
+// The longest one round of model work may run: a machine that makes 11 tokens a second needs most of 20 minutes to write a test file.
+int planAttemptMinutes = int.TryParse(builder.Configuration["FLEET_PLAN_ATTEMPT_MINUTES"], out int attemptMinutes) && attemptMinutes is >= 5 and <= 240
+    ? attemptMinutes
+    : (int)PlanRunner.DefaultAttemptTimeout.TotalMinutes;
 
 // How many rounds (model works, then the approved check runs) a step gets on each rung of the repair ladder before it
 // climbs to the next one.
@@ -803,6 +808,7 @@ var planRunner = new PlanRunner(
     sleepGuard: new SystemSleepGuard(loggerFactory.CreateLogger("AgentFleet.Power")),
     roundsPerRung: planRoundsPerRung,
     stepClock: TimeSpan.FromMinutes(planStepMinutes),
+    attemptTimeout: TimeSpan.FromMinutes(planAttemptMinutes),
     notifier: planNotifier);
 planStore.Approved += planRunner.Enqueue;
 app.Lifetime.ApplicationStarted.Register(() => planRunner.Start(app.Lifetime.ApplicationStopping));

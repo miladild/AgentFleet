@@ -585,6 +585,30 @@ public sealed partial class PlanRunnerTests
     }
 
     [Fact]
+    public async Task A_step_that_is_getting_closer_is_not_moved_up_a_rung_for_having_used_its_rounds()
+    {
+        // Four failing, then three, then two, then done, with two rounds allowed on a rung. Rounds that improve are free, so the
+        // worker keeps its conversation and its machine all the way; charged, the second round would have ended the rung.
+        (PlanRecord after, FakeStepAgent agent) = await RunWritingAsync(["broke it", "three", "one", "fixed"], roundsPerRung: 2, allowHub: true);
+
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.DoesNotContain(after.Events!, runEvent => runEvent.Kind == RunEventKind.RungChanged);
+        Assert.Equal(4, agent.Calls.Count);
+        Assert.All(agent.Calls, call => Assert.Equal("worker-a", call.Machine));
+    }
+
+    [Fact]
+    public async Task A_step_that_stands_still_is_still_moved_up_after_its_rounds()
+    {
+        // The same number failing round after round is not progress: two rounds, then the climb.
+        (PlanRecord after, _) = await RunWritingAsync(["two", "two again", "fixed"], roundsPerRung: 2, allowHub: true);
+
+        Assert.Equal(PlanStatus.Done, after.Status);
+        PlanRunEvent climb = Assert.Single(after.Events!, runEvent => runEvent.Kind == RunEventKind.RungChanged);
+        Assert.Equal(RepairLadder.HubRung, climb.Rung);
+    }
+
+    [Fact]
     public async Task A_round_that_breaks_more_tests_is_undone_and_the_next_message_says_so()
     {
         File.WriteAllText(Path.Combine(ProjectDirectory, "earlier.cs"), "an earlier step's work");
@@ -717,6 +741,31 @@ public sealed partial class PlanRunnerTests
         Assert.DoesNotContain("FAILED t3", wrong);
     }
 
+
+    [Fact]
+    public async Task A_step_that_keeps_getting_closer_is_not_stopped_at_the_old_forty_five_minutes()
+    {
+        // On a slow machine a round takes twenty minutes. The step goes from four failing to three to two to done in eighty:
+        // the default working time (a backstop of hours, no longer forty-five minutes) does not cut it off while it improves.
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        PlanRecord plan = RepairPlan("worker-a", PlanRecoveryScope.WorkerOnly);
+        string[] writes = ["broke it", "three", "one", "fixed"];
+        int calls = 0;
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            now += TimeSpan.FromMinutes(20);
+            File.WriteAllText(SourceFile, writes[Math.Min(calls++, writes.Length - 1)]);
+            return Task.FromResult("Worked.");
+        });
+
+        await RepairRunner(agent, _ => ChecksOf(File.ReadAllText(SourceFile)), utcNow: () => now).RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.Equal(4, agent.Calls.Count);
+        Assert.DoesNotContain(after.Events!, runEvent => runEvent.Kind == RunEventKind.StepTimeLimit);
+        Assert.Equal(TimeSpan.FromHours(4), PlanRunner.DefaultStepClock);
+    }
 
     [Fact]
     public async Task A_step_stops_when_its_working_time_is_used_up_and_leaves_the_project_at_its_best_state()
@@ -903,6 +952,62 @@ public sealed class PlanRepairLogicTests
 
         Assert.Equal(new RepairPosition(2, 1, 3), position);
         Assert.Equal(new RepairPosition(1, 0, 0), RepairLadder.PositionFrom([]));
+    }
+
+    [Fact]
+    public void A_round_with_fewer_failing_names_than_any_before_it_is_not_charged_to_the_rung()
+    {
+        PlanRunEvent[] events =
+        [
+            Round(1, 1, 1, signature: "a\nb\nc\nd"), // the first round is always charged
+            Round(1, 1, 2, signature: "a\nb\nc"),    // 3 < 4: progress, free
+            Round(1, 1, 3, signature: "a\nb"),       // 2 < 3: progress, free
+            Round(1, 1, 4, signature: "x\ny")        // 2 is not fewer than 2: charged
+        ];
+
+        Assert.Equal(new RepairPosition(1, 2, 4), RepairLadder.PositionFrom(events));
+        Assert.Equal(2, RepairLadder.BestFailing(events));
+    }
+
+    [Fact]
+    public void A_worse_round_and_a_round_whose_failures_cannot_be_counted_are_charged()
+    {
+        PlanRunEvent[] events =
+        [
+            Round(1, 1, 1, signature: "a\nb\nc"),
+            Round(1, 1, 2, signature: "a\nb\nc\nd"),   // worse
+            Round(1, 1, 3, signature: "sha256:0123abcd"), // a hash of the output: nothing to count
+            Round(1, 1, 4)                                 // no signature at all
+        ];
+
+        Assert.Equal(new RepairPosition(1, 4, 4), RepairLadder.PositionFrom(events));
+        Assert.Equal(3, RepairLadder.BestFailing(events));
+    }
+
+    [Fact]
+    public void A_climb_resets_the_rung_but_the_best_so_far_stays_the_bar_to_beat()
+    {
+        PlanRunEvent[] events =
+        [
+            Round(1, 1, 1, signature: "a\nb\nc\nd"),
+            new PlanRunEvent(DateTimeOffset.UtcNow, 1, 1, RunEventKind.RungChanged, "standard", "hub", "climb", Rung: 2),
+            Round(1, 2, 1, signature: "a\nb\nc"),  // better than the best before the climb: free
+            Round(1, 2, 2, signature: "a\nb\nc")   // equal: charged
+        ];
+
+        Assert.Equal(new RepairPosition(2, 1, 3), RepairLadder.PositionFrom(events));
+    }
+
+    [Theory]
+    [InlineData(3, 4, true)]
+    [InlineData(4, 4, false)]
+    [InlineData(5, 4, false)]
+    [InlineData(null, 4, false)]
+    [InlineData(3, null, false)]
+    [InlineData(null, null, false)]
+    public void Only_fewer_failing_names_than_the_best_so_far_is_progress(int? failing, int? best, bool progress)
+    {
+        Assert.Equal(progress, RepairLadder.Improved(failing, best));
     }
 
     private static PlanRecord PlanWithOneStep(out PlanStep step)
