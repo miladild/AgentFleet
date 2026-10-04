@@ -356,7 +356,7 @@ internal sealed partial class PlanTools
 
             string result = await _runCommand(step.Verify, plan.WorkingDirectory, cancellationToken);
             passed = result.StartsWith("Exit code: 0", StringComparison.Ordinal);
-            output = ShortenCheckOutput(result);
+            output = ShortenCheckOutput(FailureLocation.ProjectRelative(result, plan.WorkingDirectory));
             restored.AddRange(await RestoreUnnamedDeletionsAsync(plan, cancellationToken));
         }
 
@@ -436,7 +436,7 @@ internal sealed partial class PlanTools
         }
 
         string result = await _runCommand(command, plan.WorkingDirectory, cancellationToken);
-        return (result.StartsWith("Exit code: 0", StringComparison.Ordinal), ShortenCheckOutput(result));
+        return (result.StartsWith("Exit code: 0", StringComparison.Ordinal), ShortenCheckOutput(FailureLocation.ProjectRelative(result, plan.WorkingDirectory)));
     }
 
     public PlanRecord CommitStepDone(string planId, int stepId, string? note)
