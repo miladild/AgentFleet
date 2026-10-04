@@ -28,6 +28,34 @@ internal static partial class FailureLocation
     [GeneratedRegex(@" in (?<path>[^\r\n]+?):line (?<line>\d+)")]
     private static partial Regex Dotnet();
 
+    // The worker's workspace as the runner lays it out: <root>/plans/<plan id>/<machine>/project/.
+    [GeneratedRegex(@"[^\s()'""<>]*?plans[\\/][0-9a-f]{32}[\\/][^\\/\s()'""<>]+[\\/]project[\\/]")]
+    private static partial Regex WorkerProject();
+
+    /// <summary>
+    /// The output of a check with the project's own folder taken off its paths, so a stack frame reads "src/semver.js:35:28" and the model
+    /// opens that path. With a worker's absolute path in it (a long path through the worker's plans folder) a small model read the long path
+    /// (it is not a path its file tools take), or took it for another machine's copy and blamed that. On the replay of one real repair round
+    /// the approved check passed after the round in 6 of 8 trials with the line and the paths cut, 4 of 8 with the line only, 2 of 8 without.
+    /// </summary>
+    public static string ProjectRelative(string text, string? projectRoot)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return text;
+        }
+
+        string result = WorkerProject().Replace(text, string.Empty);
+        if (!string.IsNullOrWhiteSpace(projectRoot))
+        {
+            string root = projectRoot.TrimEnd('\\', '/');
+            result = result.Replace(root.Replace('/', '\\') + "\\", string.Empty, StringComparison.OrdinalIgnoreCase);
+            result = result.Replace(root.Replace('\\', '/') + "/", string.Empty, StringComparison.OrdinalIgnoreCase);
+        }
+
+        return result;
+    }
+
     private static readonly string[] NotTheProject = ["node_modules", "site-packages", "dist-packages", ".nuget", "/usr/lib/", "\\dotnet\\shared\\"];
 
     /// <summary>

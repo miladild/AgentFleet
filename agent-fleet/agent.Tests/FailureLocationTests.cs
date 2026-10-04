@@ -2,6 +2,8 @@ namespace AgentFleet.Tests;
 
 public sealed class FailureLocationTests : IDisposable
 {
+    private const char Backslash = (char)92;
+
     private readonly string _root = Path.Combine(Path.GetTempPath(), "fleet-location-" + Guid.NewGuid().ToString("N"));
 
     public FailureLocationTests()
@@ -118,5 +120,28 @@ public sealed class FailureLocationTests : IDisposable
 
         string without = RepairMessages.Build(plan with { WorkingDirectory = null }, step, failure, 2, [], [], sameOutput: false, changedFiles: null);
         Assert.DoesNotContain("Where it failed", without);
+    }
+
+    [Theory]
+    [InlineData(@"at validate (C:\AgentFleet\Workspaces\agentfleet\plans\0123456789abcdef0123456789abcdef\worker-a\project\src\semver.js:35:28)", @"at validate (src\semver.js:35:28)")]
+    [InlineData("at f (/home/runner/Workspaces/plans/0123456789abcdef0123456789abcdef/worker-b/project/test/a.test.js:4:1)", "at f (test/a.test.js:4:1)")]
+    [InlineData("nothing to cut: src/a.js:1:1 and plans/short/project/x", "nothing to cut: src/a.js:1:1 and plans/short/project/x")]
+    public void A_workers_project_folder_is_taken_off_the_paths_of_its_output(string output, string expected)
+    {
+        Assert.Equal(expected, FailureLocation.ProjectRelative(output, null));
+    }
+
+    [Fact]
+    public void The_hubs_own_project_folder_is_taken_off_in_either_slash_style_and_any_case()
+    {
+        string root = Path.Combine(_root, "proj");
+        string back = root.Replace('/', Backslash);
+        string forward = root.Replace(Backslash, '/');
+
+        string cut = FailureLocation.ProjectRelative($"at a ({back}{Backslash}src{Backslash}a.js:1:1)\nat b ({forward.ToUpperInvariant()}/src/b.js:2:2)\nat c ({forward}/src/c.js:3:3)", root);
+
+        Assert.Equal($"at a (src{Backslash}a.js:1:1)\nat b (src/b.js:2:2)\nat c (src/c.js:3:3)", cut);
+        Assert.Equal("same", FailureLocation.ProjectRelative("same", root));
+        Assert.Equal(string.Empty, FailureLocation.ProjectRelative(string.Empty, root));
     }
 }
