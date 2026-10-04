@@ -110,9 +110,35 @@ public sealed class PlanPromptTests : PlanTestBase
         Assert.Contains("Do step 3.", idle.Sent[1].Select(message => message.Text)); // same session: the step is still there
         Assert.Equal(FleetStepAgent.Nudge, idle.Sent[1][^1].Text);
 
-        var busy = new Replies("Done.");
-        Assert.Equal("Done.", (await new FleetStepAgent(new Microsoft.Agents.AI.ChatClientAgent(busy)).RunStepAsync("Do step 4.", "light", default)).Text);
-        Assert.Single(busy.Sent);
+        // A reply in words that called no tool at all did no work either (measured: a worker wrote the right diagnosis of its
+        // failing tests and stopped there), so it is asked once more too.
+        var narrating = new Replies("The problem is that the tests expect lowercase.", "Fixed it.");
+        StepAgentReply narrated = await new FleetStepAgent(new Microsoft.Agents.AI.ChatClientAgent(narrating)).RunStepAsync("Do step 4.", "light", default);
+        Assert.Equal("Fixed it.", narrated.Text);
+        Assert.Equal(2, narrating.Sent.Count);
+        Assert.Equal(FleetStepAgent.Nudge, narrating.Sent[1][^1].Text);
+    }
+
+    [Fact]
+    public async Task A_conversation_with_a_role_is_not_a_step_and_is_never_nudged()
+    {
+        // The reviewer and the check auditor answer in words: a reply with no tool call is their result.
+        var reviewer = new Replies("PASS - the code does what the step says.");
+        StepAgentReply reply = await new FleetStepAgent(new Microsoft.Agents.AI.ChatClientAgent(reviewer))
+            .OpenSession(PlanRunnerToolPolicy.StepReviewRole).SendAsync("Review step 1.", "heavy", null, default);
+
+        Assert.Equal("PASS - the code does what the step says.", reply.Text);
+        Assert.Single(reviewer.Sent);
+    }
+
+    [Fact]
+    public void Every_round_message_and_the_nudge_tell_the_model_to_act_before_explaining()
+    {
+        PlanRecord plan = NewApproved();
+
+        Assert.Contains(PlanRunner.ActFirst, PlanRunner.BuildPrompt(plan, plan.Steps[0], 1, null));
+        Assert.Contains(PlanRunner.ActFirst, PlanRunner.BuildPrompt(plan, plan.Steps[0], 2, "Exit code: 1"));
+        Assert.Contains(PlanRunner.ActFirst, FleetStepAgent.Nudge);
     }
 
     [Fact]

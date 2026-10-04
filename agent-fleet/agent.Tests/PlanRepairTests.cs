@@ -913,6 +913,19 @@ public sealed class PlanRepairLogicTests
     }
 
     [Fact]
+    public void A_follow_up_ends_by_telling_the_model_to_act_before_explaining()
+    {
+        PlanRecord plan = PlanWithOneStep(out PlanStep step);
+
+        string message = RepairMessages.Build(plan, step, "FAILED widget::a", 2, previousFailing: [], currentFailing: ["widget::a"],
+            sameOutput: false, changedFiles: null);
+
+        Assert.Contains(PlanRunner.ActFirst, message);
+        Assert.True(message.IndexOf(PlanRunner.ActFirst, StringComparison.Ordinal) > message.IndexOf("FAILED widget::a", StringComparison.Ordinal),
+            "the instruction comes after the failure it is about");
+    }
+
+    [Fact]
     public void A_follow_up_says_what_was_fixed_what_is_new_and_what_files_changed_without_repeating_the_task()
     {
         PlanRecord plan = PlanWithOneStep(out PlanStep step);
@@ -1071,7 +1084,9 @@ public sealed class FleetStepSessionTests
     public async Task A_second_message_reaches_the_model_with_the_first_exchange_before_it_and_the_machine_it_names()
     {
         var client = new ScriptedChatClient(_ => null);
-        IStepSession session = Agent(client).OpenSession();
+        // A role session: this test is about what the conversation holds, and a step's session would also be nudged when the
+        // scripted answer calls no tool.
+        IStepSession session = Agent(client).OpenSession("probe");
 
         Assert.False(session.HasHistory);
         await session.SendAsync("the whole task", "standard", "worker-a", default);

@@ -59,7 +59,7 @@ internal sealed record StepAgentReply(string Text, int ToolCalls, bool EditToolC
 internal sealed class FleetStepAgent(AIAgent agent) : IStepAgent
 {
     internal const string Nudge =
-        "Your last turn only inspected files or gave no usable result. Finish this step now: make the change it asks for with your tools. The fleet runs the approved check afterwards, and a step that names files to change is not done until the work has changed at least one of them.";
+        "Your last turn only inspected files or gave no usable result. Finish this step now: make the change it asks for with your tools. The fleet runs the approved check afterwards, and a step that names files to change is not done until the work has changed at least one of them. " + PlanRunner.ActFirst;
 
     public Task<StepAgentReply> RunStepAsync(string prompt, string tier, CancellationToken cancellationToken) =>
         RunStepAsync(prompt, tier, null, cancellationToken);
@@ -111,7 +111,9 @@ internal sealed class FleetStepSession(AIAgent agent, string? role = null) : ISt
             "read_file" or "list_directory" or "find_files" or "search_files" or "project_overview" or "get_plan" or "search_context");
         var seen = calls.ToList();
         // A conversation with a role is not a step: it has no change to make, and an answer in words is a valid result.
-        if (role is null && ((string.IsNullOrWhiteSpace(response.Text) && calls.Length == 0) || readOnlyOnly))
+        // A turn that wrote text and called no tool at all (an analysis of what is wrong, ending where the work should start) is
+        // the same: measured, a small worker wrote the right diagnosis of its failing tests and stopped there, round after round.
+        if (role is null && (calls.Length == 0 || readOnlyOnly))
         {
             response = await agent.RunAsync(FleetStepAgent.Nudge, _session, options, cancellationToken);
             FunctionCallContent[] nudgedCalls = response.Messages.SelectMany(reply => reply.Contents)
@@ -2933,9 +2935,20 @@ internal sealed partial class PlanRunner
                   ? "When you are finished, reply with one short sentence saying what you did."
                   : "Run the check yourself with run_command before you finish, so you see what the fleet will see. As soon as it " +
                     "passes, stop: reply with one short sentence saying what you did."));
+        text.AppendLine();
+        text.AppendLine(ActFirst);
         text.AppendLine(FleetPlanStore.Marker(plan.Id));
         return text.ToString();
     }
+
+    /// <summary>
+    /// Said to a model carrying out a step, in the first prompt, every repair message and the nudge. Measured on a 9B worker
+    /// that was shown its failing tests: half of its turns wrote an analysis ("let me recount... wait...") until the 4096-token
+    /// limit and called no tool (one to two minutes lost each time, then a round that changed nothing); with this sentence none
+    /// did, and every turn began with a tool call within seconds.
+    /// </summary>
+    internal const string ActFirst =
+        "Act with tool calls. Do not write out analysis, a plan or a list of cases first: if you must reason, use at most two short sentences, then call a tool.";
 
     private static async Task<string> LoadStepFileContextAsync(PlanRecord plan, PlanStep step, CancellationToken cancellationToken)
     {
