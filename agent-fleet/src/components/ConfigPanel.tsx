@@ -22,6 +22,8 @@ type FleetConfigNode = {
   api?: string | null;
   caveman?: string | null;
   ponytail?: string | null;
+  /** off (default): a model that thinks first is told not to; model: the model's own behaviour. */
+  thinking?: string | null;
   workspace?: WorkerWorkspaceConfig | null;
   clearWorkspace?: boolean;
 };
@@ -528,6 +530,19 @@ function MachineCard({
                 {STYLE_LEVELS.map((level) => <option key={level} value={level}>{level[0].toUpperCase() + level.slice(1)}</option>)}
               </select>
             </div>
+            <div>
+              <label className="block text-[10px] uppercase tracking-wide text-neutral-500 mb-0.5">Thinking</label>
+              <select
+                value={node.thinking ?? "off"}
+                onChange={(e) => onChange({ ...node, thinking: e.target.value })}
+                aria-label="Thinking"
+                className="text-xs px-2 py-1 rounded bg-neutral-900 border border-neutral-700 text-neutral-200"
+              >
+                <option value="off">Off (recommended)</option>
+                <option value="model">Model&apos;s own</option>
+              </select>
+            </div>
+            <p className="col-span-2 text-[10px] text-neutral-600">Thinking: a small model that thinks before it answers can spend its whole answer on it and write nothing (measured on a 9B worker: one turn in three). Off tells it to answer directly. Choose Model&apos;s own only for a machine whose model works better thinking.</p>
             <p className="col-span-2 text-[10px] text-neutral-600">Caveman controls reply brevity; Ponytail controls coding minimalism. Lite is light, Full is stronger, and Ultra is strongest. The selected style follows a request through fallback, so match levels across machines for consistent handoffs.</p>
           </div>
           <div className="border-t border-neutral-700 pt-2 space-y-2">

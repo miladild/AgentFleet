@@ -71,6 +71,7 @@ fallback, found 2."
 | `api` | `ollama` (default): Ollama's native API, which is what lets the fleet set the context size. `openai`: any OpenAI-compatible server (LM Studio, vLLM, llama.cpp); it then chooses its own context size |
 | `caveman` | `off`, `lite`, `full` or `ultra`: asks this machine's model to answer more briefly while preserving useful detail and safety conditions. Missing means `off`. |
 | `ponytail` | `off`, `lite`, `full` or `ultra`: asks this machine's model to make small, correct coding changes and avoid speculative work. Missing means `off`. |
+| `thinking` | `off` (default) or `model`. A model that thinks before it answers is told not to (`off`); `model` leaves it to the model. A small model can spend its whole answer (4096 tokens) on thinking and end the turn with no tool call and no text: measured on a 9B worker, one turn in three. Choose `model` only for a machine whose model does better thinking. |
 
 At least one text node (not vision) is required.
 
