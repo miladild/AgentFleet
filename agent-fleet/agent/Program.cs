@@ -660,7 +660,7 @@ IChatClient agentClient = new ChatClientBuilder(fleetClient)
 
             try
             {
-                object? result = await context.Function.InvokeAsync(context.Arguments, cancellationToken);
+                object? result = await ToolLoopGuard.InvokeAsync(context, fromRunner, cancellationToken);
                 if (fromRunner)
                 {
                     result = ToolLoopGuard.Apply(context, result, toolLoopLogger);
