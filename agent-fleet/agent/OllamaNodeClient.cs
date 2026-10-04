@@ -285,24 +285,26 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
         // The latest turns can hold whole files (measured: a retry on the hub stayed at 29000 of its 28672 tokens after
         // every older turn was shortened, because its last turns wrote a file and read it back). Those are shortened
         // too when the older ones are not enough, but never the last call and its result, which the model is acting on.
-        if (!ShortenUntilItFits(0, fitted.Count - KeepRecentMessages))
+        if (!ShortenUntilItFits(0, fitted.Count - KeepRecentMessages, ShortenStep))
         {
-            ShortenUntilItFits(Math.Max(0, fitted.Count - KeepRecentMessages), fitted.Count - 2);
+            ShortenUntilItFits(Math.Max(0, fitted.Count - KeepRecentMessages), fitted.Count - 2, 1);
         }
 
         return fitted;
 
-        bool ShortenUntilItFits(int from, int to)
+        // The turns older than a boundary are shortened, and the boundary only stops at a multiple of ShortenStep: between
+        // two such steps the oldest part of the conversation reaches the model unchanged, so Ollama keeps its work on it.
+        bool ShortenUntilItFits(int from, int to, int step)
         {
             for (int index = from; index < to; index++)
             {
-                if (index == task || fitted[index].Role == ChatRole.System || Shortened(fitted[index]) is not { } shorter)
+                if (index != task && fitted[index].Role != ChatRole.System && Shortened(fitted[index]) is { } shorter)
                 {
-                    continue;
+                    fitted[index] = shorter;
                 }
 
-                fitted[index] = shorter;
-                if (EstimateTokens(fitted, options) * scale <= budgetTokens)
+                bool boundary = (index + 1) % step == 0 || index == to - 1;
+                if (boundary && EstimateTokens(fitted, options) * scale <= budgetTokens)
                 {
                     return true;
                 }
@@ -311,6 +313,14 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
             return false;
         }
     }
+
+    /// <summary>
+    /// How many messages the shortened part of a conversation grows by at a time. Ollama keeps its work on the start of a
+    /// prompt only while that start is unchanged (measured on a 15000-token prompt: the same prompt again took 0.2 s, with
+    /// text added at its end 2 s, with one word changed near its start 28 s). Shortened one message at a time, the start
+    /// changed at every call and a worker re-read nearly all of its window each time; in steps, only every few calls.
+    /// </summary>
+    internal const int ShortenStep = 8;
 
     private const int LongPart = 400;
     /// <summary>What stands in for shortened tool output; no tool may write it into a file (see WorkspaceTools).</summary>

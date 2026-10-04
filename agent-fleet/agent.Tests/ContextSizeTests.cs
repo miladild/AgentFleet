@@ -266,6 +266,63 @@ public sealed class ContextSizeTests
     }
 
     [Fact]
+    public void The_shortened_part_of_a_growing_conversation_changes_in_steps_so_the_model_server_keeps_its_work_on_the_start()
+    {
+        // A worker alternating a file write (the file in the call) with a test run (a long output), as measured on a real
+        // step: about 25 tool calls a round, and Ollama re-reads from the first token that differs from the call before.
+        List<ChatMessage> conversation = [new(ChatRole.System, "You carry out one plan step. " + new string('s', 1_000)), new(ChatRole.User, "Implement the cache. " + new string('t', 2_000))];
+        IReadOnlyList<ChatMessage>? previous = null;
+        long reread = 0;
+        long whole = 0;
+        int calls = 0;
+        for (int call = 0; call < 80; call++)
+        {
+            bool write = call % 2 == 0;
+            conversation.Add(new ChatMessage(ChatRole.Assistant, [new FunctionCallContent($"c{call}", write ? "write_file" : "run_command",
+                write ? new Dictionary<string, object?> { ["path"] = "src/lru.js", ["content"] = new string('w', 3_000) + call }
+                      : new Dictionary<string, object?> { ["command"] = "node --test" })]));
+            conversation.Add(new ChatMessage(ChatRole.Tool, [new FunctionResultContent($"c{call}", write ? "Wrote src/lru.js" : "not ok 1 " + new string('r', 9_000) + call)]));
+
+            IReadOnlyList<ChatMessage> sent = ContextSizeChatClient.FitToWindow(conversation, null, 28_672, 1.0);
+            Assert.True(ContextSizeChatClient.EstimateTokens(sent, null) <= 28_672);
+            if (previous is not null && call >= 30)
+            {
+                int firstChanged = FirstDifference(previous, sent);
+                reread += ContextSizeChatClient.EstimateTokens(sent.Skip(firstChanged).ToList(), null);
+                whole += ContextSizeChatClient.EstimateTokens(sent, null);
+                calls++;
+            }
+
+            previous = sent;
+        }
+
+        // Shortened one message at a time the model server re-read about nine tenths of its prompt at every call.
+        Assert.True(reread < whole * 0.4, $"The model server re-read {reread} of {whole} tokens over {calls} calls ({100.0 * reread / whole:0}%).");
+    }
+
+    private static int FirstDifference(IReadOnlyList<ChatMessage> before, IReadOnlyList<ChatMessage> after)
+    {
+        static string Key(ChatMessage message) => message.Role + "|" + string.Join("|", message.Contents.Select(content => content switch
+        {
+            TextContent text => text.Text,
+            FunctionCallContent call => call.Name + System.Text.Json.JsonSerializer.Serialize(call.Arguments),
+            FunctionResultContent result => result.Result?.ToString(),
+            _ => content.GetType().Name
+        }));
+
+        int shared = Math.Min(before.Count, after.Count);
+        for (int index = 0; index < shared; index++)
+        {
+            if (Key(before[index]) != Key(after[index]))
+            {
+                return index;
+            }
+        }
+
+        return shared;
+    }
+
+    [Fact]
     public async Task A_caller_that_sets_its_own_size_keeps_it()
     {
         ContextSizeChatClient client = Client("{}", 32768, out _);
