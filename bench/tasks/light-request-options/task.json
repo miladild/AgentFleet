@@ -1,0 +1,23 @@
+{
+  "id": "light-request-options",
+  "title": "Preserve zero pagination options",
+  "goal": "Fix the existing requestOptions helper in src/requestOptions.js so explicit zero pagination values survive defaulting, while its output shape and sort behavior stay working.",
+  "steps": [
+    {
+      "title": "Preserve explicit zero pagination values",
+      "detail": "src/requestOptions.js already exports requestOptions(options = {}). Fix its pagination defaults: options.page and options.pageSize are non-negative integer numbers when supplied, including zero. Preserve supplied values exactly. Only an absent or undefined page defaults to 1, and only an absent or undefined pageSize defaults to 25. Calling the helper with no argument is the same as {}. Keep its existing output shape: return a NEW object with exactly page, pageSize and sort, without modifying the input object. Keep the existing sort behavior: a supplied non-empty sort string is preserved exactly, while an absent, undefined or empty sort string defaults to 'name'. Examples: requestOptions() and requestOptions({}) are {page:1,pageSize:25,sort:'name'}; requestOptions({page:undefined,pageSize:undefined,sort:undefined}) has those defaults; requestOptions({page:0,pageSize:0}) is {page:0,pageSize:0,sort:'name'}; requestOptions({page:0}) is {page:0,pageSize:25,sort:'name'}; requestOptions({pageSize:0}) is {page:1,pageSize:0,sort:'name'}; requestOptions({page:2,pageSize:50,sort:'price'}) is {page:2,pageSize:50,sort:'price'}; requestOptions({sort:''}) uses sort 'name'. Keep the CommonJS export module.exports = { requestOptions }. Do not add dependencies or add validation for inputs outside these rules. Add tests in test/requestOptions.test.js using node:test for every rule and example.",
+      "files": ["src/requestOptions.js", "test/requestOptions.test.js"],
+      "verify": "node --test test/requestOptions.test.js",
+      "tier": "light",
+      "retrySafe": true
+    },
+    {
+      "title": "Run the whole test suite",
+      "detail": "Run npm test. Change nothing unless it fails; fix only failures that this plan's change caused.",
+      "files": [],
+      "verify": "npm test",
+      "tier": "light",
+      "retrySafe": true
+    }
+  ]
+}

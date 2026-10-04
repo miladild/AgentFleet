@@ -16,9 +16,17 @@ those tests, not by the plan saying "done".
 The benchmark uses the machines in your fleet configuration, so they are busy while it runs. `Invoke-Bench.ps1` writes
 `results.json` and `summary.md` under `bench\results\<time>`. Useful options: `-Tasks early-close,slugify`,
 `-WorkerOnly` (never use the hub), `-Review off` (no second opinion), `-AutoRetries 0`, `-TimeoutMinutes`, and
-`-Tier light` (send every step at that tier). The tasks are written as `standard`, which only ever reaches the standard
-machine; run the benchmark again with `-Tier light` to measure the light-tier machine, which a plan only reaches when
-its step is light.
+`-Tier light` (send every step at that tier). The eight algorithm tasks are written as `standard`. Two small repairs to
+existing code, `light-display-label` and `light-request-options`, are written as `light` and each changes one helper plus its
+tests. Measure these separately when calibrating the light tier:
+
+```powershell
+.\bench\Invoke-Bench.ps1 -Tasks light-display-label,light-request-options -WorkerOnly -AutoRetries 0 -Repeat 3
+```
+
+`-AutoRetries 0` disables automatic retries of parked steps; the repair ladder still runs its rounds and conversations.
+Use the same explicit task list and settings for before/after comparisons. A partial run does not provide a completion
+rate for tasks it never reached. Forcing standard tasks to `light` measures a harder workload than these small repairs.
 
 ## What the summary checks (the gate)
 

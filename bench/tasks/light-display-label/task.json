@@ -1,0 +1,23 @@
+{
+  "id": "light-display-label",
+  "title": "Trim a display label",
+  "goal": "Fix the existing displayLabel helper in src/displayLabel.js so strings lose only their outer whitespace, while its fallback behavior stays working.",
+  "steps": [
+    {
+      "title": "Trim only the outside of display labels",
+      "detail": "src/displayLabel.js already exports displayLabel(value, fallback = 'Unnamed item'). Fix the existing helper. For a string value, return that string with leading and trailing whitespace removed, including spaces, tabs and line feeds. Preserve its case and all whitespace inside the text exactly. An empty string or a string containing only whitespace returns the empty string, not the fallback. For any non-string value, return fallback exactly as supplied, without trimming it; when fallback is omitted or undefined, it is 'Unnamed item'. Examples: displayLabel('  North  ') is 'North'; displayLabel('\tNorth\n') is 'North'; displayLabel('  Case  Label\tName\nNext  ') is 'Case  Label\tName\nNext'; displayLabel('') and displayLabel(' \t\n ') are ''; displayLabel(undefined), displayLabel(null), displayLabel(0), displayLabel(false), displayLabel({}) and displayLabel([]) are 'Unnamed item'; displayLabel(null, '  Missing  ') is '  Missing  '; displayLabel(null, undefined) is 'Unnamed item'; displayLabel('', 'Missing') is ''. Keep the CommonJS export module.exports = { displayLabel }. Do not add dependencies. Add tests in test/displayLabel.test.js using node:test for every rule and example.",
+      "files": ["src/displayLabel.js", "test/displayLabel.test.js"],
+      "verify": "node --test test/displayLabel.test.js",
+      "tier": "light",
+      "retrySafe": true
+    },
+    {
+      "title": "Run the whole test suite",
+      "detail": "Run npm test. Change nothing unless it fails; fix only failures that this plan's change caused.",
+      "files": [],
+      "verify": "npm test",
+      "tier": "light",
+      "retrySafe": true
+    }
+  ]
+}
