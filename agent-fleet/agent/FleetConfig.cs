@@ -37,6 +37,11 @@ internal static class FleetTiers
 /// </param>
 /// <param name="Caveman">Optional concise-response preset: off, lite, full, or ultra.</param>
 /// <param name="Ponytail">Optional minimal-coding preset: off, lite, full, or ultra.</param>
+/// <param name="Thinking">
+/// "off" (default): a model that thinks before it answers is told not to. Measured on a 9B worker: one turn in three
+/// spent its whole 4096-token answer on thinking and ended with no tool call and no text, minutes lost on a slow
+/// machine. "model": the model's own behaviour, for a machine whose model is better thinking.
+/// </param>
 internal sealed record FleetNodeConfig(
     string Name,
     string Url,
@@ -49,7 +54,8 @@ internal sealed record FleetNodeConfig(
     string? Api = null,
     string? Caveman = null,
     string? Ponytail = null,
-    FleetWorkerWorkspaceConfig? Workspace = null);
+    FleetWorkerWorkspaceConfig? Workspace = null,
+    string? Thinking = null);
 
 /// <summary>SSH workspace for approved plan work. Configure only a dedicated, non-admin worker account.</summary>
 internal sealed record FleetWorkerWorkspaceConfig(

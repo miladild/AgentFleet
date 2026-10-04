@@ -113,7 +113,8 @@ FleetRoutingChatClient BuildRouter(FleetConfig config)
                 node.Api,
                 node.ContextLength ?? defaultContextLength,
                 fleetOptions.NetworkTimeout,
-                loggerFactory.CreateLogger($"AgentFleet.Node.{node.Name}")),
+                loggerFactory.CreateLogger($"AgentFleet.Node.{node.Name}"),
+                node.Thinking),
             node,
             healthMonitor,
             loggerFactory.CreateLogger($"AgentFleet.Node.{node.Name}"),
@@ -886,7 +887,7 @@ app.MapGet("/api/fleet-config", () =>
     return Results.Json(new
     {
         triageModel = config.TriageModel,
-        nodes = config.Nodes.Select(node => new { node.Name, node.Url, node.Model, node.Purpose, node.Tier, node.Vision, node.Fallback, node.ContextLength, node.Api, node.Caveman, node.Ponytail, node.Workspace }),
+        nodes = config.Nodes.Select(node => new { node.Name, node.Url, node.Model, node.Purpose, node.Tier, node.Vision, node.Fallback, node.ContextLength, node.Api, node.Caveman, node.Ponytail, node.Workspace, node.Thinking }),
         tools = ToolsPayload(config),
         mcpServers = config.McpServerMap,
         // What actually happened at the last startup, which can differ from the saved
@@ -1010,7 +1011,8 @@ app.MapPut("/api/fleet-config", async (FleetConfigUpdateRequest request, Cancell
                         node.Api,
                         node.Caveman ?? previous?.Caveman,
                         node.Ponytail ?? previous?.Ponytail,
-                        node.ClearWorkspace ? null : node.Workspace ?? previous?.Workspace);
+                        node.ClearWorkspace ? null : node.Workspace ?? previous?.Workspace,
+                        node.Thinking ?? previous?.Thinking);
                 }).ToList()
                 : current.Nodes,
             Tools = request.Tools is { Count: > 0 }
@@ -1059,7 +1061,7 @@ app.MapPut("/api/fleet-config", async (FleetConfigUpdateRequest request, Cancell
         return Results.Json(new
         {
             triageModel = saved.TriageModel,
-            nodes = saved.Nodes.Select(node => new { node.Name, node.Url, node.Model, node.Purpose, node.Tier, node.Vision, node.Fallback, node.ContextLength, node.Api, node.Caveman, node.Ponytail, node.Workspace }),
+            nodes = saved.Nodes.Select(node => new { node.Name, node.Url, node.Model, node.Purpose, node.Tier, node.Vision, node.Fallback, node.ContextLength, node.Api, node.Caveman, node.Ponytail, node.Workspace, node.Thinking }),
             tools = ToolsPayload(saved),
             mcpServers = saved.McpServerMap,
             mcpStatus = toolRegistry.Mcp.Statuses,
@@ -1907,7 +1909,8 @@ internal sealed record FleetConfigNodeUpdate(
     string? Caveman = null,
     string? Ponytail = null,
     FleetWorkerWorkspaceConfig? Workspace = null,
-    bool ClearWorkspace = false);
+    bool ClearWorkspace = false,
+    string? Thinking = null);
 
 internal sealed record FleetConfigUpdateRequest(
     string? TriageModel,

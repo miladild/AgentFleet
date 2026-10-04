@@ -47,6 +47,15 @@ rules to the named peer IPs. `-RestrictOllamaRules` remains accepted for compati
   `CONTEXT` column is the size the fleet asked for, and a `PROCESSOR` split such as `20%/80% CPU/GPU` means it did not
   fit. Lower that machine's `contextLength` ([configuration.md](configuration.md#nodes)) or use a smaller model. A machine
   that times out rests for ten minutes (the Setup tab says so) while the fallback answers.
+  If `CONTEXT` shows a huge number such as 262144 with only part of the model on the GPU, something other than the fleet
+  loaded it: Ollama's own default window on a new version is the model's maximum, and any program that asks without a size
+  gets it, and every change of size makes Ollama reload the model (10 to 25 seconds). The fleet always asks for a size,
+  and its own health checks now ask at the size already loaded. To make Ollama's default sane on a worker, set
+  `OLLAMA_CONTEXT_LENGTH=32768` in that machine's Ollama environment and restart Ollama.
+- **A small model writes nothing for minutes, round after round.** A model that thinks before it answers can spend its
+  whole answer (4096 tokens, minutes on a slow machine) on thinking and end the turn with no tool call and no text; the
+  plan log shows a round with no edit and the step climbing to the hub. Nodes are told not to think by default
+  (`thinking`, [configuration.md](configuration.md#nodes)); if you set a node to `model`, set it back to `off`.
 - **The model forgets the task, ignores the tools, or answers something else.** Most often the conversation did not fit in
   what the model may see. The fleet sizes each request for Ollama; if the log says a request "needs about N tokens but
   the most it may use is M", give that machine a larger `contextLength` (if its memory allows) or a model with a longer

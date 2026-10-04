@@ -4,6 +4,7 @@ using System.Text.Json;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using OllamaSharp;
+using OllamaChatRequest = OllamaSharp.Models.Chat.ChatRequest;
 using OpenAI;
 
 namespace AgentFleet;
@@ -14,6 +15,17 @@ namespace AgentFleet;
 /// default of 4096 tokens is less than the fleet's instructions and tool list alone (measured: about 7000 tokens for a
 /// plain "hello"). Ollama then silently drops the start of the request, and a plan step's model loses its task.
 /// </summary>
+internal static class NodeThinking
+{
+    /// <summary>A model that thinks first is told not to.</summary>
+    public const string Off = "off";
+
+    /// <summary>The model's own behaviour.</summary>
+    public const string Model = "model";
+
+    public static string Normalize(string? value) => string.IsNullOrWhiteSpace(value) ? Off : value.Trim().ToLowerInvariant();
+}
+
 internal static class OllamaNodeClient
 {
     /// <summary>
@@ -34,7 +46,9 @@ internal static class OllamaNodeClient
         string? api,
         int contextLength,
         TimeSpan networkTimeout,
-        ILogger logger)
+        ILogger logger,
+        string thinking = NodeThinking.Off,
+        HttpMessageHandler? handler = null)
     {
         IChatClient raw;
         if (string.Equals(api, "openai", StringComparison.OrdinalIgnoreCase))
@@ -47,8 +61,11 @@ internal static class OllamaNodeClient
         else
         {
             var root = new UriBuilder(openAiEndpoint.Scheme, openAiEndpoint.Host, openAiEndpoint.IsDefaultPort ? -1 : openAiEndpoint.Port, "/").Uri;
-            var http = new HttpClient { BaseAddress = root, Timeout = networkTimeout };
-            raw = new ContextSizeChatClient(new OllamaApiClient(http, model), http, model, contextLength, logger);
+            var http = handler is null
+                ? new HttpClient { BaseAddress = root, Timeout = networkTimeout }
+                : new HttpClient(handler) { BaseAddress = root, Timeout = networkTimeout };
+            raw = new ContextSizeChatClient(new OllamaApiClient(http, model), http, model, contextLength, logger,
+                thinkingOff: NodeThinking.Normalize(thinking) == NodeThinking.Off);
         }
 
         // Works around a known, open Ollama bug (ollama/ollama#18530, #18563) where its qwen3-coder tool-call parser can
@@ -64,9 +81,12 @@ internal static class OllamaNodeClient
 /// to the processor at 32K and takes minutes per call). A size, once used, is kept for twenty minutes so a conversation
 /// that grows does not make Ollama reload the model at every step down and up.
 /// </summary>
-internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, string model, int maximum, ILogger logger) : DelegatingChatClient(inner)
+internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, string model, int maximum, ILogger logger, bool thinkingOff = false) : DelegatingChatClient(inner)
 {
-    private static readonly int[] Sizes = [8192, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072, 196608, 262144];
+    /// <summary>The smallest window a request asks for; the health probe asks for it when nothing is loaded.</summary>
+    internal const int SmallestSize = 8192;
+
+    private static readonly int[] Sizes = [SmallestSize, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072, 196608, 262144];
     private static readonly TimeSpan KeepSize = TimeSpan.FromMinutes(20);
     internal const int MaxAnswerTokens = 4096;
 
@@ -185,6 +205,13 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
     {
         ChatOptions sized = options?.Clone() ?? new ChatOptions();
         sized.AdditionalProperties ??= [];
+        if (thinkingOff && sized.RawRepresentationFactory is null)
+        {
+            // Ollama's think: false. A model that thinks first spends its answer budget on it (see FleetNodeConfig.Thinking);
+            // a model that cannot think ignores it.
+            sized.RawRepresentationFactory = _ => new OllamaChatRequest { Think = false };
+        }
+
         if (sized.AdditionalProperties.ContainsKey("num_ctx"))
         {
             return new Sized(sized, 0, 0, Chosen: false, messages);

@@ -154,6 +154,7 @@ internal sealed class FleetConfigStore
                 Api = string.IsNullOrWhiteSpace(node.Api) ? null : node.Api.Trim().ToLowerInvariant(),
                 Caveman = AgentStylePrompt.Normalize(node.Caveman),
                 Ponytail = AgentStylePrompt.Normalize(node.Ponytail),
+                Thinking = string.IsNullOrWhiteSpace(node.Thinking) ? null : node.Thinking.Trim().ToLowerInvariant(),
                 Workspace = node.Workspace is null ? null : node.Workspace with
                 {
                     Host = node.Workspace.Host?.Trim() ?? string.Empty,
@@ -263,6 +264,11 @@ internal sealed class FleetConfigStore
             if (!AgentStylePrompt.IsValid(node.Caveman))
             {
                 throw new InvalidOperationException($"Node '{node.Name}' has caveman '{node.Caveman}': choose off, lite, full, or ultra.");
+            }
+
+            if (node.Thinking is not (null or NodeThinking.Off or NodeThinking.Model))
+            {
+                throw new InvalidOperationException($"Node '{node.Name}' has thinking '{node.Thinking}': choose off (the default) or model.");
             }
 
             if (!AgentStylePrompt.IsValid(node.Ponytail))

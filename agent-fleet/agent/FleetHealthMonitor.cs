@@ -198,17 +198,14 @@ internal sealed class FleetHealthMonitor
 
             using var inferenceCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             inferenceCancellation.CancelAfter(InferenceProbeTimeout);
-            using var request = new HttpRequestMessage(HttpMethod.Post,
-                new Uri(node.OpenAiEndpoint.ToString().TrimEnd('/') + "/chat/completions"))
+            using HttpRequestMessage? request = await InferenceProbeRequestAsync(client, node, forceInferenceProbe, inferenceCancellation.Token);
+            if (request is null)
             {
-                Content = JsonContent.Create(new
-                {
-                    model = node.Model,
-                    messages = new[] { new { role = "user", content = "Reply only OK." } },
-                    max_tokens = 32,
-                    stream = false
-                })
-            };
+                // Another model is working on this machine: loading this one just to ask would push it out.
+                _inference[node.Name] = (now, true, null);
+                return new NodeHealthSnapshot(node.Name, node.Model, true, true, true, now, null);
+            }
+
             inferenceStarted = true;
             using HttpResponseMessage inferenceResponse = await client.SendAsync(request, inferenceCancellation.Token);
             if (!inferenceResponse.IsSuccessStatusCode)
@@ -228,7 +225,10 @@ internal sealed class FleetHealthMonitor
             bool hasMessage = hasChoice && choices[0].TryGetProperty("message", out JsonElement message) &&
                 (message.TryGetProperty("content", out JsonElement content) && content.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(content.GetString()) ||
                  message.TryGetProperty("reasoning", out JsonElement reasoning) && reasoning.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(reasoning.GetString()));
-            bool answered = hasChoice && (hasFinishReason || hasMessage);
+            // Ollama's native API ends its answer with "done": true; an OpenAI-compatible server answers with choices.
+            bool nativeAnswer = completion is not null && completion.RootElement.TryGetProperty("done", out JsonElement done) &&
+                done.ValueKind == JsonValueKind.True;
+            bool answered = nativeAnswer || hasChoice && (hasFinishReason || hasMessage);
             string? inferenceFailure = answered ? null : "inference_empty";
             DateTimeOffset checkedAt = DateTimeOffset.UtcNow;
             _inference[node.Name] = (checkedAt, answered, inferenceFailure);
@@ -253,6 +253,97 @@ internal sealed class FleetHealthMonitor
             if (inferenceStarted) _inference[node.Name] = (DateTimeOffset.UtcNow, false, failure);
             else _inference.TryRemove(node.Name, out _);
             return Unavailable(node, failure, reachable: true, modelAvailable: modelListed);
+        }
+    }
+
+    // Ollama's OpenAI-compatible endpoint takes no num_ctx, so a probe through it loads the model at Ollama's own default
+    // window (measured on a worker: 262144 tokens, two thirds of the model out of graphics memory and slow), and the next
+    // real request reloads it at the size the work needs, 10 to 25 seconds each way. A probe went out every five minutes.
+    // Through the native API, at the window the model already has, it changes nothing; with nothing loaded it asks for the
+    // smallest window the fleet uses. A server that is not Ollama (api "openai") is probed through its OpenAI endpoint.
+    // A routine probe returns null when a different model is loaded on the machine and this one is not: loading a second
+    // model to ask it a question can push the working one out of graphics memory (measured: the vision model and the coding
+    // model on one worker took turns). A forced probe, which a plan asks for after an outage, always goes through.
+    internal static async Task<HttpRequestMessage?> InferenceProbeRequestAsync(
+        HttpClient client, FleetNodeDefinition node, bool force, CancellationToken cancellationToken)
+    {
+        if (string.Equals(node.Api, "openai", StringComparison.OrdinalIgnoreCase))
+        {
+            return new HttpRequestMessage(HttpMethod.Post, new Uri(node.OpenAiEndpoint.ToString().TrimEnd('/') + "/chat/completions"))
+            {
+                Content = JsonContent.Create(new
+                {
+                    model = node.Model,
+                    messages = new[] { new { role = "user", content = "Reply only OK." } },
+                    max_tokens = 32,
+                    stream = false
+                })
+            };
+        }
+
+        (int? loadedWindow, bool otherModelLoaded) = await LoadedAsync(client, node, cancellationToken);
+        if (loadedWindow is null && otherModelLoaded && !force)
+        {
+            return null;
+        }
+
+        int window = loadedWindow ?? ContextSizeChatClient.SmallestSize;
+        return new HttpRequestMessage(HttpMethod.Post, new Uri(node.OllamaRoot, "api/chat"))
+        {
+            Content = JsonContent.Create(new
+            {
+                model = node.Model,
+                messages = new[] { new { role = "user", content = "Reply only OK." } },
+                stream = false,
+                think = false,
+                options = new { num_ctx = window, num_predict = 16 }
+            })
+        };
+    }
+
+    // What Ollama's /api/ps says is loaded: the window this node's model has right now (null when it is not loaded), and
+    // whether some other model is loaded. Ollama that cannot say counts as nothing loaded.
+    private static async Task<(int? Window, bool OtherModelLoaded)> LoadedAsync(
+        HttpClient client, FleetNodeDefinition node, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using HttpResponseMessage response = await client.GetAsync(new Uri(node.OllamaRoot, "api/ps"), cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                return (null, false);
+            }
+
+            using JsonDocument? loaded = await response.Content.ReadFromJsonAsync<JsonDocument>(cancellationToken: cancellationToken);
+            if (loaded is null || !loaded.RootElement.TryGetProperty("models", out JsonElement models) || models.ValueKind != JsonValueKind.Array)
+            {
+                return (null, false);
+            }
+
+            string expected = NormalizeModelTag(node.Model);
+            int? window = null;
+            bool other = false;
+            foreach (JsonElement model in models.EnumerateArray())
+            {
+                string? name = model.TryGetProperty("name", out JsonElement nameValue) && nameValue.ValueKind == JsonValueKind.String
+                    ? nameValue.GetString()
+                    : null;
+                if (!string.Equals(NormalizeModelTag(name), expected, StringComparison.Ordinal))
+                {
+                    other |= !string.IsNullOrEmpty(name);
+                }
+                else if (model.TryGetProperty("context_length", out JsonElement length) && length.ValueKind == JsonValueKind.Number &&
+                         length.TryGetInt32(out int size) && size > 0)
+                {
+                    window = size;
+                }
+            }
+
+            return (window, other);
+        }
+        catch (Exception exception) when (exception is HttpRequestException or JsonException)
+        {
+            return (null, false);
         }
     }
 
