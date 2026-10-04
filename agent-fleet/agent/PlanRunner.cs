@@ -166,14 +166,21 @@ internal sealed partial class PlanRunner
     private const int MaxStepContextFiles = 8;
     private const int MaxStepContextBytesPerFile = 32 * 1024;
     private const int MaxStepContextCharacters = 48_000;
-    private static readonly TimeSpan DefaultAttemptTimeout = TimeSpan.FromMinutes(20);
 
     /// <summary>
-    /// How long a step may work (its model calls and its checks, not the time it waits for a machine) before it stops with
-    /// everything it tried: a step that cannot be fixed in this time will not be by more of the same, and the rest of the
-    /// plan, and the user, should hear about it. A retry gives the step a fresh clock.
+    /// The longest one model attempt (one round: its tool calls, not the check) may run. It is not what decides that a step is
+    /// stuck, the ladder is: a slow machine, 11 tokens a second, needs 20 minutes for a round that writes a test file.
     /// </summary>
-    public static readonly TimeSpan DefaultStepClock = TimeSpan.FromMinutes(45);
+    public static readonly TimeSpan DefaultAttemptTimeout = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// The most a step may work (its model calls and its checks, not the time it waits for a machine) before it stops with
+    /// everything it tried. This is a backstop and not the rule: what stops a step that is not getting anywhere is the repair
+    /// ladder (rounds that change nothing or do not improve climb a rung, and the last rung parks), and a step that is getting
+    /// closer is never stopped for how long it has been at it. It used to be 45 minutes, which cut off slow machines while
+    /// their code was partly right. A retry gives the step a fresh clock.
+    /// </summary>
+    public static readonly TimeSpan DefaultStepClock = TimeSpan.FromHours(4);
     private static readonly char[] LineBreaks = ['\r', '\n'];
 
     private readonly FleetPlanStore _store;
@@ -828,6 +835,7 @@ internal sealed partial class PlanRunner
         int rung = position.Rung;
         int roundsInRung = position.RoundsInRung;
         int roundsTotal = position.RoundsTotal;
+        int? bestFailing = RepairLadder.BestFailing(earlierEvents);
         TimeSpan worked = TimeSpan.FromSeconds(earlierEvents
             .Where(runEvent => runEvent.Kind == RunEventKind.RoundClassified).Sum(runEvent => runEvent.DurationSeconds ?? 0));
         string? hub = _fleetOptions?.Nodes.SingleOrDefault(node => node.Fallback)?.Name;
@@ -1206,7 +1214,26 @@ internal sealed partial class PlanRunner
                 }
 
                 lastRound = outcome;
-                roundsInRung++;
+                // A round that left fewer failing names than any round before it is progress, and progress is not charged to
+                // the rung (RepairLadder.Improved): the step climbs when rounds stop paying off, not because it used three.
+                int? failingNow = outcome.Signature.Items.Count > 0 ? outcome.Signature.Items.Count : null;
+                bool improved = RepairLadder.Improved(failingNow, bestFailing);
+                if (failingNow is { } countNow && (bestFailing is null || countNow < bestFailing))
+                {
+                    bestFailing = countNow;
+                }
+
+                if (improved)
+                {
+                    _logger.LogInformation(
+                        "Plan {PlanId} step {StepId} round {Round} left {Failing} failing, fewer than before: it does not use up the rung's rounds.",
+                        plan.Id, step.Id, round, failingNow);
+                }
+                else
+                {
+                    roundsInRung++;
+                }
+
                 roundsTotal++;
                 // A worker that ran out of time on a round is not given the step's remaining time again when the hub may take it
                 // over: the rescue starts at once (a worker-only plan keeps its worker, as before).

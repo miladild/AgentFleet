@@ -75,8 +75,9 @@ Turn it on when you would want to review the approach before anything changes.
    it, then a fresh conversation starts from a brief of what was tried. File
    edits, Git commands and checks stay on the selected worker, and the requested
    tier stays the same.
-   A round that makes the check worse is undone before the next one, and a step
-   has 45 minutes of working time. A step that ends without passing leaves its
+   A round that makes the check worse is undone before the next one, a round that
+   leaves fewer tests failing than any before it does not use up the rung's
+   rounds, and a step has a backstop of 4 hours of working time. A step that ends without passing leaves its
    files at the best state it reached. A check that is itself broken (it never
    exits, the machine's shell cannot parse it, it names a program that is not
    there) is not a failing test: the fleet asks a model to audit it, applies a

@@ -45,12 +45,17 @@ internal static class RepairLadder
         _ => "a fresh conversation with a brief"
     };
 
-    /// <summary>The rung and round count from the step's events since the user last approved a retry, oldest first.</summary>
+    /// <summary>
+    /// The rung and round count from the step's events since the user last approved a retry, oldest first. A round that left
+    /// fewer failing names than every round before it is progress, and progress is not charged to the rung's round allowance
+    /// (see <see cref="Improved"/>): the step is not stopped while it is getting closer.
+    /// </summary>
     public static RepairPosition PositionFrom(IEnumerable<PlanRunEvent> stepEvents)
     {
         int rung = RequestedTierRung;
         int inRung = 0;
         int total = 0;
+        int? best = null;
         foreach (PlanRunEvent runEvent in stepEvents)
         {
             if (runEvent.Kind == RunEventKind.RungChanged && runEvent.Rung is { } to)
@@ -60,13 +65,52 @@ internal static class RepairLadder
             }
             else if (IsVerdictRound(runEvent))
             {
-                inRung++;
                 total++;
+                int? failing = FailingCount(runEvent);
+                if (!Improved(failing, best))
+                {
+                    inRung++;
+                }
+
+                if (failing is { } count && (best is null || count < best))
+                {
+                    best = count;
+                }
             }
         }
 
         return new RepairPosition(rung, inRung, total);
     }
+
+    /// <summary>How many failing names a round's check printed; null when it named none that can be counted (a hash of the output).</summary>
+    public static int? FailingCount(PlanRunEvent runEvent)
+    {
+        int names = RepairMessages.FailingNames(runEvent.FailureSignature).Count;
+        return names > 0 ? names : null;
+    }
+
+    /// <summary>The fewest failing names any round of the step has left, or null when none could be counted.</summary>
+    public static int? BestFailing(IEnumerable<PlanRunEvent> stepEvents)
+    {
+        int? best = null;
+        foreach (PlanRunEvent runEvent in stepEvents.Where(IsVerdictRound))
+        {
+            if (FailingCount(runEvent) is { } count && (best is null || count < best))
+            {
+                best = count;
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>
+    /// A round that left fewer failing names than the best round so far. The first round is never one (there is nothing to be
+    /// better than), nor is a round whose failures cannot be counted. Such a round is not charged to the rung: a worker that
+    /// goes from fourteen failing to nine to four to one is not interrupted for having used three rounds, while one that
+    /// stands still is. It always ends: the count can only fall so many times.
+    /// </summary>
+    public static bool Improved(int? failing, int? bestSoFar) => failing is { } now && bestSoFar is { } prior && now < prior;
 
     /// <summary>
     /// A file that a package manager or a build rewrites as a side effect, which is not a change to the code the failing check

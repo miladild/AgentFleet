@@ -66,10 +66,13 @@ steps, and checks each step with a real command instead of trusting itself.
      when the model makes the same call and gets the same error back: the third time the result carries a short note ("this is
      not working, try a different approach"), the fifth ends the turn. Only failing calls count, and timings in the error
      text do not make two failures different.
-   - A step has a **working time** of 45 minutes (`FLEET_PLAN_STEP_MINUTES`): its model calls and its checks, not the time it
-     waits for a machine. A model call is cut short when it would run past that time or past the plan's run deadline, and a
-     step that has used its working time without passing stops with the log's **step time limit** line and everything it
-     tried; retrying the step gives it a fresh clock.
+   - A step has a **working time** backstop of 4 hours (`FLEET_PLAN_STEP_MINUTES`): its model calls and its checks, not the
+     time it waits for a machine. It is not what decides that a step is stuck: a step that is getting closer is not stopped for
+     how long it has been at it (see the repair ladder below, where a round that leaves fewer failing tests than any round
+     before it does not use up the rung's rounds), and one that stands still is moved up the ladder and then parked. A model
+     call is cut short when it would run past the backstop or past the plan's run deadline, and a step that has used its
+     working time without passing stops with the log's **step time limit** line and everything it tried; retrying the step
+     gives it a fresh clock. One round of model work may run `FLEET_PLAN_ATTEMPT_MINUTES` (30 by default).
   - **A broken check is not a failing check.** Fleet tells them apart. A failing test, an assertion or a compiler error is a
     verdict: only the model changes the code, and the check is never edited. A check that cannot run or finish is a defect of
     the plan, and spending a round on it only wastes the night. The signs are a command that never exits (a dev server, a
@@ -106,7 +109,9 @@ steps, and checks each step with a real command instead of trusting itself.
   - A failed check does not restart the model. The runner sends the check's real output back into the **same conversation**,
     with what changed since the round before (failing names fixed or new, files changed), so the model still has the task and
     everything it already did. One **round** is: the model works, then the runner runs the approved check. The step climbs a
-    **repair ladder**, three rounds on each rung (`FLEET_PLAN_ROUNDS_PER_RUNG`):
+    **repair ladder**, three rounds on each rung (`FLEET_PLAN_ROUNDS_PER_RUNG`), where a round that leaves fewer failing
+    names than any round before it is progress and is not counted against the rung (a worker that goes from fourteen failing to
+    nine to four is not moved up for having used three rounds; one that stands still is):
     1. the machine the step was given, at its own tier;
     2. the hub model, continuing the same conversation, while file tools and checks stay on the selected worker (only when
        the plan allows hub rescue, and only when the hub answers a small test request);
@@ -325,7 +330,7 @@ report.
 | What went wrong | What Fleet does by itself | What stops it |
 |---|---|---|
 | **A machine cannot answer** (off, rebooting, overloaded, the network is down) | Waits with growing pauses, asks the machine for a small real answer each time, and carries on when it can. Moves to another ready machine of the same tier, or to the hub when the plan allows it, but never to a machine that just failed without waiting first. No attempt is spent. | The run deadline. The plan stops as blocked and says so once. |
-| **The model's work is wrong** (the check ran and failed) | Sends the real output back into the same conversation. Climbs the repair ladder: more rounds on the step's machine, then the hub model in the same conversation, then a fresh conversation with a brief of what was tried. Undoes a round that made things worse. Stops a model that repeats one failing call. | The ladder is spent or the step's working time (45 minutes) is used: the step is **parked**. |
+| **The model's work is wrong** (the check ran and failed) | Sends the real output back into the same conversation. Climbs the repair ladder: more rounds on the step's machine, then the hub model in the same conversation, then a fresh conversation with a brief of what was tried. Undoes a round that made things worse. Stops a model that repeats one failing call. | The ladder is spent or the step's working time backstop (4 hours) is used: the step is **parked**. |
 | **The check itself is broken** (it never exits, the shell cannot run it, a program or file it names is not there, it timed out twice the same way) | Asks a model to audit it and applies a replacement only if fixed rules allow it. Keeps the original and logs both. Costs no round. | Two changes to one step, a refused replacement, or **Ask me first**: the step is parked with the reason. |
 | **The machine lacks what the project declares** (no `node_modules`, no restored packages) | Installs it once with the project's own command, as the limited worker account, and runs the check again. | Anything the project does not declare, another package manager, no virtual environment: the step's model is told exactly what is missing. |
 
