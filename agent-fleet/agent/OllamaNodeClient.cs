@@ -229,7 +229,7 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
                 messages = fitted;
                 estimate = EstimateTokens(messages, options);
                 logger.LogInformation(
-                    "A conversation with {Model} outgrew its {Ceiling}-token window: shortened old tool output from about {Before} to {After} tokens, keeping the task and the latest turns.",
+                    "A conversation with {Model} outgrew its {Ceiling}-token window: left out its oldest tool calls and shortened old output, from about {Before} to {After} tokens, keeping the task and the latest turns.",
                     model, ceiling, (int)(before * scale), (int)(estimate * scale));
             }
         }
@@ -268,9 +268,11 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
     /// <summary>
     /// A conversation cut to fit the window from the middle, not the start. Past the window Ollama drops messages from
     /// the start, and the task goes first (measured: a plan step on the hub grew to about 50000 tokens in 34 tool
-    /// rounds, lost its task and went round in circles). Here the oldest tool outputs, and file contents in old calls,
-    /// are shortened until it fits; the system instructions, the first user message (the task) and the latest turns
-    /// stay whole, and every call keeps its result, so the model still sees what it did. The caller's list is not changed.
+    /// rounds, lost its task and went round in circles). Here the oldest tool calls go, each with its results, and the
+    /// output and follow-ups that stay are shortened, until it fits; the system instructions, the first user message (the
+    /// task) and the latest turns stay whole. A call that stays is never changed: a model copies the shape of the calls
+    /// it sees (measured: with an old write_file shown without its content or with a placeholder in it, a worker's
+    /// next write_file had no content or the placeholder as its content, 15 times in 15). The caller's list is not changed.
     /// </summary>
     internal static IReadOnlyList<ChatMessage> FitToWindow(IReadOnlyList<ChatMessage> messages, ChatOptions? options, int budgetTokens, double scale)
     {
@@ -280,31 +282,44 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
         }
 
         List<ChatMessage> fitted = [.. messages];
+        bool[] gone = new bool[fitted.Count];
+        int[] resultsEnd = ResultsEnds(fitted);
         int task = fitted.FindIndex(message => message.Role == ChatRole.User);
 
         // The latest turns can hold whole files (measured: a retry on the hub stayed at 29000 of its 28672 tokens after
-        // every older turn was shortened, because its last turns wrote a file and read it back). Those are shortened
+        // every older turn was shortened, because its last turns wrote a file and read it back). The older of those go
         // too when the older ones are not enough, but never the last call and its result, which the model is acting on.
         if (!ShortenUntilItFits(0, fitted.Count - KeepRecentMessages, ShortenStep))
         {
             ShortenUntilItFits(Math.Max(0, fitted.Count - KeepRecentMessages), fitted.Count - 2, 1);
         }
 
-        return fitted;
+        return fitted.Where((_, index) => !gone[index]).ToList();
 
-        // The turns older than a boundary are shortened, and the boundary only stops at a multiple of ShortenStep: between
-        // two such steps the oldest part of the conversation reaches the model unchanged, so Ollama keeps its work on it.
+        // The turns older than a boundary go or are shortened, and the boundary only stops at a multiple of ShortenStep:
+        // between two such steps the oldest part of the conversation reaches the model unchanged, so Ollama keeps its work on it.
         bool ShortenUntilItFits(int from, int to, int step)
         {
             for (int index = from; index < to; index++)
             {
-                if (index != task && fitted[index].Role != ChatRole.System && Shortened(fitted[index]) is { } shorter)
+                if (!gone[index] && index != task && fitted[index].Role != ChatRole.System)
                 {
-                    fitted[index] = shorter;
+                    if (resultsEnd[index] >= 0)
+                    {
+                        // A call and its results go together, or not at all.
+                        if (resultsEnd[index] < to)
+                        {
+                            Array.Fill(gone, true, index, resultsEnd[index] - index + 1);
+                        }
+                    }
+                    else if (Shortened(fitted[index]) is { } shorter)
+                    {
+                        fitted[index] = shorter;
+                    }
                 }
 
                 bool boundary = (index + 1) % step == 0 || index == to - 1;
-                if (boundary && EstimateTokens(fitted, options) * scale <= budgetTokens)
+                if (boundary && EstimateTokens(fitted.Where((_, at) => !gone[at]).ToList(), options) * scale <= budgetTokens)
                 {
                     return true;
                 }
@@ -312,6 +327,30 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
 
             return false;
         }
+    }
+
+    // For the message that holds tool calls: the index of the last message that answers them; -1 for any other message.
+    private static int[] ResultsEnds(List<ChatMessage> messages)
+    {
+        int[] ends = new int[messages.Count];
+        Array.Fill(ends, -1);
+        for (int index = 0; index < messages.Count; index++)
+        {
+            if (messages[index].Role != ChatRole.Assistant || !messages[index].Contents.Any(content => content is FunctionCallContent))
+            {
+                continue;
+            }
+
+            int last = index;
+            while (last + 1 < messages.Count && messages[last + 1].Role == ChatRole.Tool && messages[last + 1].Contents.Any(content => content is FunctionResultContent))
+            {
+                last++;
+            }
+
+            ends[index] = last > index ? last : -1;
+        }
+
+        return ends;
     }
 
     /// <summary>
@@ -338,16 +377,6 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
             {
                 case FunctionResultContent result when result.Result?.ToString() is { Length: > LongPart } text:
                     contents.Add(new FunctionResultContent(result.CallId, text[..200] + Removed));
-                    changed = true;
-                    break;
-                // The long arguments of an old call (a file's content, an edit's text) are dropped, not cut with a marker. A small
-                // model copies the shape of its own earlier calls: with a marker in them it wrote the marker into the next file
-                // (measured: a worker's test file was its first line and "[the rest was removed ...]", and nothing said so
-                // until the check failed on a syntax error). A call without the argument fails loudly when copied.
-                case FunctionCallContent call when call.Arguments?.Values.Any(value => value?.ToString()?.Length > LongPart) == true:
-                    contents.Add(new FunctionCallContent(call.CallId, call.Name, call.Arguments
-                        .Where(pair => pair.Value?.ToString()?.Length is not > LongPart)
-                        .ToDictionary(pair => pair.Key, pair => pair.Value)));
                     changed = true;
                     break;
                 case TextContent text when message.Role == ChatRole.Assistant && text.Text is { Length: > 4 * LongPart }:

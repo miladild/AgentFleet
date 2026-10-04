@@ -39,32 +39,34 @@ public sealed class WorkerFailureModeTests : IDisposable
     }
 
     [Fact]
-    public void An_old_write_loses_its_content_argument_and_is_not_left_with_a_marker_to_copy()
+    public void A_call_that_stays_in_a_shortened_conversation_is_whole_because_the_model_copies_its_shape()
     {
         List<ChatMessage> conversation = LongWriteConversation("Implement the holidays.", rounds: 3);
 
         IReadOnlyList<ChatMessage> fitted = ContextSizeChatClient.FitToWindow(conversation, null, 28_672, 1.0);
 
-        var oldCall = (FunctionCallContent)fitted[2].Contents[0];
-        Assert.Equal("write_file", oldCall.Name);
-        Assert.Equal("src/a.ts", oldCall.Arguments!["path"]); // what it did stays visible
-        Assert.False(oldCall.Arguments.ContainsKey("content"), "a marker in a call is copied into the next file");
-        Assert.DoesNotContain(oldCall.Arguments.Values, value => value?.ToString()?.Contains("removed to keep", StringComparison.Ordinal) == true);
-        // The latest call is whole, and old results still say that something was cut (the model cannot copy a result into a call).
-        Assert.Equal(new string('w', 20_000), ((FunctionCallContent)fitted[^2].Contents[0]).Arguments!["content"]);
-        Assert.Contains(ContextSizeChatClient.RemovedMarker, ((FunctionResultContent)fitted[3].Contents[0]).Result!.ToString());
+        // Measured on a worker: shown its earlier write_file calls without their content, or with a placeholder in it, its
+        // next write_file had no content or the placeholder as its content, 15 times in 15.
+        FunctionCallContent[] calls = fitted.SelectMany(message => message.Contents).OfType<FunctionCallContent>().ToArray();
+        Assert.NotEmpty(calls);
+        Assert.All(calls, call =>
+        {
+            Assert.Equal(new string('w', 20_000), call.Arguments!["content"]);
+            Assert.DoesNotContain(call.Arguments.Values, value => value?.ToString()?.Contains("removed to keep", StringComparison.Ordinal) == true);
+        });
+        Assert.True(calls.Length < 3, "the oldest write is left out, with its result, instead of being shown without its content");
+        ContextSizeTests.AssertCallsAreWholeAndAnswered(fitted, conversation);
     }
 
     [Fact]
-    public void A_short_argument_of_an_old_call_is_kept()
+    public void A_long_old_result_that_stays_still_says_that_something_was_cut()
     {
         var conversation = new List<ChatMessage>
         {
             new(ChatRole.System, "x"),
             new(ChatRole.User, "task"),
-            new(ChatRole.Assistant, [new FunctionCallContent("c0", "edit_file",
-                new Dictionary<string, object?> { ["path"] = "src/a.ts", ["oldText"] = "short", ["newText"] = new string('n', 30_000) })]),
-            new(ChatRole.Tool, [new FunctionResultContent("c0", new string('r', 30_000))]),
+            new(ChatRole.Assistant, "I will look at the files first. " + new string('t', 3_000)),
+            new(ChatRole.Assistant, "More thinking. " + new string('u', 3_000)),
             new(ChatRole.Assistant, [new FunctionCallContent("c1", "run_command", new Dictionary<string, object?> { ["command"] = "npm test" })]),
             new(ChatRole.Tool, [new FunctionResultContent("c1", "ok")]),
             new(ChatRole.Assistant, [new FunctionCallContent("c2", "run_command", new Dictionary<string, object?> { ["command"] = "npm test" })]),
@@ -73,12 +75,10 @@ public sealed class WorkerFailureModeTests : IDisposable
             new(ChatRole.Tool, [new FunctionResultContent("c3", "ok")])
         };
 
-        IReadOnlyList<ChatMessage> fitted = ContextSizeChatClient.FitToWindow(conversation, null, 12_000, 1.0);
+        IReadOnlyList<ChatMessage> fitted = ContextSizeChatClient.FitToWindow(conversation, null, 1_500, 1.0);
 
-        var edit = (FunctionCallContent)fitted[2].Contents[0];
-        Assert.Equal("src/a.ts", edit.Arguments!["path"]);
-        Assert.Equal("short", edit.Arguments["oldText"]);
-        Assert.False(edit.Arguments.ContainsKey("newText"));
+        Assert.Contains(ContextSizeChatClient.RemovedMarker, fitted[2].Text); // an old long answer is cut, and says so
+        Assert.Equal("task", fitted[1].Text);
     }
 
     [Fact]

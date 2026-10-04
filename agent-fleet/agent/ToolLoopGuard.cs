@@ -50,6 +50,65 @@ internal static partial class ToolLoopGuard
         return false;
     }
 
+    /// <summary>The third call in a turn that leaves out a required argument ends the turn (see <see cref="InvokeAsync"/>).</summary>
+    public const int ArgumentFailureStopAt = 3;
+
+    [GeneratedRegex(@"required parameter '([^']+)'")]
+    private static partial Regex RequiredParameter();
+
+    /// <summary>
+    /// Runs a tool call. A call that leaves out an argument the tool needs (a small model's write_file without its content)
+    /// comes back to the model as an error it can read, like any other failed call, instead of as an exception: the exception
+    /// is rethrown after a few in a row and the whole round is lost (measured: five rounds of seven minutes each, then a
+    /// step parked). The third such call in a turn ends the turn, so the runner runs the step's check and the repair loop
+    /// takes over. Outside a plan step the exception is left alone.
+    /// </summary>
+    public static async Task<object?> InvokeAsync(FunctionInvocationContext context, bool fromRunner, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await context.Function.InvokeAsync(context.Arguments, cancellationToken);
+        }
+        catch (ArgumentException exception) when (fromRunner && MissingArgument(context.Function.Name, exception) is not null)
+        {
+            string message = MissingArgument(context.Function.Name, exception)!;
+            int failures = 1 + FailuresWithText(context.Messages, message);
+            if (failures >= ArgumentFailureStopAt)
+            {
+                context.Terminate = true;
+                return message + $"\n\n{Marker} {failures} calls in this turn left out a required argument, so the turn ends here. " +
+                       "The fleet will run the step's check and tell you what it prints.";
+            }
+
+            return message;
+        }
+    }
+
+    /// <summary>The error a model is given for a call that left out a required argument; null for any other exception.</summary>
+    public static string? MissingArgument(string tool, Exception exception)
+    {
+        if (exception is not ArgumentException || !exception.Message.Contains("missing a value for the required parameter", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        string parameter = RequiredParameter().Match(exception.Message) is { Success: true } match ? match.Groups[1].Value : "a required argument";
+        string hint = tool == "write_file" && parameter == "content"
+            ? ": `content` is the complete text of the file, written out in full"
+            : string.Empty;
+        return $"Error: {tool} was called without `{parameter}`, which it needs. Call {tool} again with every required argument{hint}.";
+    }
+
+    // How many results of this turn (everything after the latest user message) carry this same error text, whatever the call's arguments were.
+    private static int FailuresWithText(IEnumerable<ChatMessage> messages, string text)
+    {
+        ChatMessage[] list = messages.ToArray();
+        int start = Array.FindLastIndex(list, message => message.Role == ChatRole.User) + 1;
+        string wanted = Normalise(text);
+        return list.Skip(start).SelectMany(message => message.Contents).OfType<FunctionResultContent>()
+            .Count(result => result.Result?.ToString() is { } answer && IsError(answer) && Normalise(answer) == wanted);
+    }
+
     /// <summary>
     /// Looks at the call that just finished. After the third identical failure in this turn its result gets a note; the fifth
     /// also ends the turn. Returns the result to give back to the model.

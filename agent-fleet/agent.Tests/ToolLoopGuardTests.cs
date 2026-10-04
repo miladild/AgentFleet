@@ -173,4 +173,64 @@ public sealed class ToolLoopGuardTests
         Assert.Equal("other contents", results[3]);
         Assert.DoesNotContain(ToolLoopGuard.Marker, results[4]);
     }
+
+    // The wiring Program.cs gives the plan runner, for a write_file that needs a path and a content.
+    private static async Task<(string[] Results, int Written, RepeatingModel Model)> WriteWithoutContentAsync(bool fromRunner, int calls)
+    {
+        int written = 0;
+        AITool write = AIFunctionFactory.Create((string path, string content) => { written++; return $"Wrote {path}"; }, "write_file", "Writes a file.");
+        var model = new RepeatingModel(round => new FunctionCallContent("w" + round, "write_file", new Dictionary<string, object?> { ["path"] = round % 2 == 0 ? "src/a.js" : "test/a.test.js" }), calls);
+        IChatClient client = new ChatClientBuilder(model)
+            .UseFunctionInvocation(null, options =>
+            {
+                options.IncludeDetailedErrors = true;
+                options.MaximumIterationsPerRequest = 20;
+                options.MaximumConsecutiveErrorsPerRequest = 6;
+                options.FunctionInvoker = async (context, cancellationToken) =>
+                {
+                    object? result = await ToolLoopGuard.InvokeAsync(context, fromRunner, cancellationToken);
+                    return ToolLoopGuard.Apply(context, result);
+                };
+            })
+            .Build();
+
+        ChatResponse response = await client.GetResponseAsync("carry out the step", new ChatOptions { Tools = [write] });
+        string[] results = response.Messages.SelectMany(message => message.Contents).OfType<FunctionResultContent>()
+            .Select(content => content.Result?.ToString() ?? string.Empty).ToArray();
+        return (results, written, model);
+    }
+
+    [Fact]
+    public async Task A_write_without_its_content_comes_back_as_an_error_the_model_can_read_and_the_third_ends_the_turn()
+    {
+        // Measured on a worker: ten calls in a row without `content`, and the exception the sixth raised threw the round away.
+        (string[] results, int written, RepeatingModel model) = await WriteWithoutContentAsync(fromRunner: true, calls: 10);
+
+        Assert.Equal(0, written);
+        Assert.Equal(3, results.Length);
+        Assert.Equal(3, model.Requests); // the turn ended without asking again
+        Assert.All(results, result => Assert.StartsWith("Error: write_file was called without `content`", result));
+        Assert.Contains("complete text of the file", results[0]);
+        Assert.DoesNotContain(ToolLoopGuard.Marker, results[1]);
+        Assert.Contains("3 calls in this turn left out a required argument, so the turn ends here", results[2]);
+    }
+
+    [Fact]
+    public async Task Outside_a_plan_step_a_call_without_a_required_argument_is_left_to_the_function_invoker()
+    {
+        (string[] results, int written, _) = await WriteWithoutContentAsync(fromRunner: false, calls: 3);
+
+        Assert.Equal(0, written);
+        Assert.All(results, result => Assert.DoesNotContain("Error: write_file was called without", result));
+    }
+
+    [Theory]
+    [InlineData("The arguments dictionary is missing a value for the required parameter 'content'. (Parameter 'arguments')", "content")]
+    [InlineData("The arguments dictionary is missing a value for the required parameter 'oldText'. (Parameter 'arguments')", "oldText")]
+    public void Only_a_missing_required_argument_is_explained(string message, string parameter)
+    {
+        Assert.Contains($"`{parameter}`", ToolLoopGuard.MissingArgument("edit_file", new ArgumentException(message))!);
+        Assert.Null(ToolLoopGuard.MissingArgument("edit_file", new ArgumentException("The value must not be negative.")));
+        Assert.Null(ToolLoopGuard.MissingArgument("edit_file", new InvalidOperationException(message)));
+    }
 }

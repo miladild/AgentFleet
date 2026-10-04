@@ -195,15 +195,36 @@ public sealed class ContextSizeTests
 
         Assert.Equal(32768, inner.Sizes.Single());
         Assert.True(ContextSizeChatClient.EstimateTokens(sent, null) + 4096 <= 32768);
-        Assert.Equal(conversation.Count, sent.Count); // every call keeps its result
+        Assert.True(sent.Count < conversation.Count); // the oldest calls, each with its results, are left out
         Assert.Equal(task, sent[1].Text);
         Assert.Equal(new string('r', 4_000), ((FunctionResultContent)sent[^1].Contents[0]).Result); // the latest turns stay whole
-        Assert.Contains("removed to keep this conversation", ((FunctionResultContent)sent[3].Contents[0]).Result!.ToString());
-        Assert.Equal(new string('r', 4_000), ((FunctionResultContent)conversation[3].Contents[0]).Result); // the caller's list is untouched
+        AssertCallsAreWholeAndAnswered(sent, conversation);
+        Assert.Equal(42, conversation.Count); // the caller's list is untouched
+        Assert.Equal(new string('r', 4_000), ((FunctionResultContent)conversation[3].Contents[0]).Result);
+    }
+
+    // The model copies the shape of the calls it sees: a call that is kept is kept exactly, and has its results, and every
+    // result that is kept has its call.
+    internal static void AssertCallsAreWholeAndAnswered(IReadOnlyList<ChatMessage> sent, IReadOnlyList<ChatMessage> original)
+    {
+        Dictionary<string, FunctionCallContent> originalCalls = original.SelectMany(message => message.Contents).OfType<FunctionCallContent>().ToDictionary(call => call.CallId);
+        FunctionCallContent[] calls = sent.SelectMany(message => message.Contents).OfType<FunctionCallContent>().ToArray();
+        FunctionResultContent[] results = sent.SelectMany(message => message.Contents).OfType<FunctionResultContent>().ToArray();
+        Assert.NotEmpty(calls);
+        foreach (FunctionCallContent call in calls)
+        {
+            Assert.Equal(System.Text.Json.JsonSerializer.Serialize(originalCalls[call.CallId].Arguments), System.Text.Json.JsonSerializer.Serialize(call.Arguments));
+            Assert.Contains(results, result => result.CallId == call.CallId);
+        }
+
+        foreach (FunctionResultContent result in results)
+        {
+            Assert.Contains(calls, call => call.CallId == result.CallId);
+        }
     }
 
     [Fact]
-    public void Latest_turns_that_hold_whole_files_are_shortened_too_but_never_the_last_call_and_its_result()
+    public void Latest_turns_that_hold_whole_files_go_too_but_never_the_last_call_and_its_result()
     {
         string task = "Implement the holidays. " + new string('t', 2_000);
         List<ChatMessage> conversation = [new(ChatRole.System, "You carry out one plan step."), new(ChatRole.User, task)];
@@ -218,9 +239,36 @@ public sealed class ContextSizeTests
 
         Assert.True(ContextSizeChatClient.EstimateTokens(fitted, null) <= 28_672);
         Assert.Equal(task, fitted[1].Text);
-        Assert.Contains("removed to keep this conversation", ((FunctionResultContent)fitted[3].Contents[0]).Result!.ToString());
+        AssertCallsAreWholeAndAnswered(fitted, conversation);
         Assert.Equal(new string('w', 20_000), ((FunctionCallContent)fitted[^2].Contents[0]).Arguments!["content"]);
         Assert.Equal(new string('r', 20_000), ((FunctionResultContent)fitted[^1].Contents[0]).Result);
+    }
+
+    [Fact]
+    public void Calls_that_reach_into_the_latest_turns_stay_with_all_their_results()
+    {
+        List<ChatMessage> conversation = [new(ChatRole.System, "You carry out one plan step."), new(ChatRole.User, "Implement the cache.")];
+        for (int round = 0; round < 12; round++)
+        {
+            conversation.Add(new ChatMessage(ChatRole.Assistant, [new FunctionCallContent($"old{round}", "run_command", new Dictionary<string, object?> { ["command"] = "node --test" })]));
+            conversation.Add(new ChatMessage(ChatRole.Tool, [new FunctionResultContent($"old{round}", new string('r', 9_000))]));
+        }
+
+        // Two calls in one turn, each answered in a message of its own: the second answer is among the six latest messages.
+        conversation.Add(new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("a", "read_file", new Dictionary<string, object?> { ["path"] = "src/a.js" }), new FunctionCallContent("b", "read_file", new Dictionary<string, object?> { ["path"] = "src/b.js" })]));
+        conversation.Add(new ChatMessage(ChatRole.Tool, [new FunctionResultContent("a", "file a")]));
+        conversation.Add(new ChatMessage(ChatRole.Tool, [new FunctionResultContent("b", "file b")]));
+        for (int round = 0; round < 2; round++)
+        {
+            conversation.Add(new ChatMessage(ChatRole.Assistant, [new FunctionCallContent($"new{round}", "run_command", new Dictionary<string, object?> { ["command"] = "node --test" })]));
+            conversation.Add(new ChatMessage(ChatRole.Tool, [new FunctionResultContent($"new{round}", "ok")]));
+        }
+
+        IReadOnlyList<ChatMessage> fitted = ContextSizeChatClient.FitToWindow(conversation, null, 1_000, 1.0);
+
+        Assert.True(fitted.Count < conversation.Count);
+        Assert.Contains(fitted, message => message.Contents.OfType<FunctionCallContent>().Any(call => call.CallId == "a"));
+        AssertCallsAreWholeAndAnswered(fitted, conversation);
     }
 
     [Fact]
@@ -246,20 +294,16 @@ public sealed class ContextSizeTests
         IReadOnlyList<ChatMessage> fitted = ContextSizeChatClient.FitToWindow(conversation, null, 28_672, 1.0);
 
         Assert.True(ContextSizeChatClient.EstimateTokens(fitted, null) <= 28_672);
-        Assert.Equal(conversation.Count, fitted.Count); // nothing is dropped: every call keeps its result
-        Assert.Equal(toolResults, fitted.Count(message => message.Role == ChatRole.Tool));
+        Assert.True(fitted.Count < conversation.Count); // the oldest calls, each with its results, are left out
         Assert.Equal(task, fitted[1].Text); // the task stays whole
-        for (int index = fitted.Count - 6; index < fitted.Count; index++)
-        {
-            Assert.Equal(before[index], fitted[index].Text); // the latest turns stay whole
-            Assert.Equal(conversation[index].Contents.Count, fitted[index].Contents.Count);
-        }
-
+        AssertCallsAreWholeAndAnswered(fitted, conversation);
+        string[] after = fitted.Select(message => message.Text).ToArray();
+        Assert.Equal(before[^6..], after[^6..]); // the latest turns stay whole
         Assert.Equal(new string('r', 4_000), ((FunctionResultContent)fitted[^1].Contents[0]).Result?.ToString()![^4_000..]);
-        // The old follow-ups and the old tool output are what gave way.
-        ChatMessage oldFollowUp = fitted.First(message => message.Role == ChatRole.User && message.Text.StartsWith("Round 2:", StringComparison.Ordinal));
-        Assert.Contains("removed to keep this conversation", oldFollowUp.Text);
-        Assert.Contains("removed to keep this conversation", ((FunctionResultContent)fitted[3].Contents[0]).Result!.ToString());
+        // An old follow-up that is kept is shortened: the newer rounds say what is still failing.
+        ChatMessage[] followUps = fitted.Where(message => message.Role == ChatRole.User && message.Text.StartsWith("Round ", StringComparison.Ordinal)).ToArray();
+        Assert.NotEmpty(followUps);
+        Assert.Contains(followUps.SkipLast(1), message => message.Text.Contains("removed to keep this conversation", StringComparison.Ordinal));
         // A message that is not a plan's follow-up (a person's own long message in a chat) is not touched.
         List<ChatMessage> chat = [new(ChatRole.User, "first question"), .. conversation.Skip(2).Take(40), new(ChatRole.User, new string('p', 6_000)), .. conversation.Skip(42).Take(30)];
         Assert.Equal(new string('p', 6_000), ContextSizeChatClient.FitToWindow(chat, null, 20_000, 1.0).First(message => message.Role == ChatRole.User && message.Text.StartsWith("ppp", StringComparison.Ordinal)).Text);
