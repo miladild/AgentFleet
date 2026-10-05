@@ -1107,7 +1107,7 @@ internal sealed partial class PlanRunner
 
                 WorkChange change = await ChangedFilesSinceAsync(plan, model.WorkBefore, cancellationToken);
                 // A check that passes although the step changed nothing it names cannot show that the step's work is done.
-                lastUnverified = result.Done ? UnverifiedPassReason(plan, step, model, change.Files, isFinalValidation) : null;
+                lastUnverified = result.Done ? UnverifiedPassReason(plan, step, model, change.Files, isFinalValidation, result.Output ?? result.Message) : null;
                 if (lastUnverified is not null)
                 {
                     string unverified = UnverifiedPassMessage(step, lastUnverified);
@@ -1263,6 +1263,14 @@ internal sealed partial class PlanRunner
         string kept = best is null
             ? string.Empty
             : $" The project is left as it was after its best round (round {best.Round}, {best.Score.Describe()}).";
+        if (lastUnverified == UnverifiedNoTestsRan)
+        {
+            ParkStep(plan, step, $"Its check ran no test after {rounds}.", "no-tests-ran",
+                reason: $"Step {step.Id} ({step.Title}) was not done: after {rounds} its check still passed without running a single test (the test runner counted only a file, " +
+                        "which happens when the test file registers no test), so the check cannot show that the work is done. Retry it, or skip it if the work is already in place.");
+            return false;
+        }
+
         if (lastUnverified is not null)
         {
             bool testsOnly = lastUnverified == UnverifiedNoTest;
@@ -1694,6 +1702,7 @@ internal sealed partial class PlanRunner
 
     private const string UnverifiedNoChange = "no-change";
     private const string UnverifiedNoTest = "no-test";
+    private const string UnverifiedNoTestsRan = "no-tests-ran";
 
     /// <summary>
     /// Why a passing check does not show that the step's work is done, or null when it does. First: the step names files to
@@ -1702,8 +1711,15 @@ internal sealed partial class PlanRunner
     /// running the tests as they were, which say nothing about the new work. The last step of a longer plan is left out: it
     /// is the whole-project check, and its files are only the ones it may touch to fix what that check finds.
     /// </summary>
-    private string? UnverifiedPassReason(PlanRecord plan, PlanStep step, ModelAttemptResult model, IReadOnlyList<string> changedFiles, bool isFinalValidation)
+    private string? UnverifiedPassReason(PlanRecord plan, PlanStep step, ModelAttemptResult model, IReadOnlyList<string> changedFiles, bool isFinalValidation,
+        string? checkOutput)
     {
+        // A check that ran no test says nothing about the work, whatever the step names (see CheckVacuity).
+        if (CheckVacuity.NoTestsRan(checkOutput))
+        {
+            return UnverifiedNoTestsRan;
+        }
+
         if (step.Files.Count == 0 || (isFinalValidation && plan.Steps.Count > 1))
         {
             return null;
@@ -1746,8 +1762,12 @@ internal sealed partial class PlanRunner
     [GeneratedRegex(@"(^|/)(tests?|__tests__|specs?)(/|$)|[._-](test|spec)s?\.[^/.]+$|(?-i:[a-z0-9](Test|Tests|Spec)\.[^/.]+$)|(^|/)test[_-][^/]*$", RegexOptions.IgnoreCase)]
     private static partial Regex TestPath();
 
-    private static string UnverifiedPassMessage(PlanStep step, string reason) => reason == UnverifiedNoTest
-        ? $"Not accepted: this step names test files ({string.Join(", ", step.Files.Where(IsTestPath).Take(6))}), but none of them was changed. " +
+    private static string UnverifiedPassMessage(PlanStep step, string reason) => reason == UnverifiedNoTestsRan
+        ? "Not accepted: the check passed, but it ran no test. The test runner counted only a file as a test, which happens when the test file does not " +
+          "register any test with it: a script that prints its results does not fail when a result is wrong. Write the tests as test('name', () => { ... }) " +
+          "(or it(...)) from the test runner the project uses, each asserting with its assert module, in the test file the step names, and make the whole check pass."
+        : reason == UnverifiedNoTest
+            ? $"Not accepted: this step names test files ({string.Join(", ", step.Files.Where(IsTestPath).Take(6))}), but none of them was changed. " +
           "Its check passes on the tests as they were, so it cannot show that the new work behaves as the step asks. " +
           "Add or extend a test in one of those files that fails without your change and passes with it, and make the whole check pass."
         : $"Not accepted: this step names files to change ({string.Join(", ", step.Files.Take(6))}), but nothing was changed in them or anywhere else, " +
