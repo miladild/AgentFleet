@@ -153,6 +153,17 @@ public sealed class NodeHealthProbeAndThinkingTests : IDisposable
     }
 
     [Fact]
+    public async Task A_hub_model_that_is_loaded_but_reports_no_window_is_still_asked()
+    {
+        // An Ollama that does not say which window a loaded model has: loaded is loaded.
+        (FleetHealthMonitor monitor, FakeOllama ollama) = Monitor("{\"models\":[{\"name\":\"m:latest\"}]}");
+
+        Assert.True((await monitor.GetNodeAsync("hub", forceProbe: true)).Ready);
+
+        Assert.Single(ollama.Requests, r => r.Path == "/api/chat");
+    }
+
+    [Fact]
     public async Task A_forced_probe_after_an_outage_still_loads_the_hubs_model_and_a_worker_is_asked_even_when_idle()
     {
         (FleetHealthMonitor monitor, FakeOllama ollama) = Monitor("{\"models\":[]}");

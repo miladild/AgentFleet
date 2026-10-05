@@ -282,7 +282,7 @@ internal sealed class FleetHealthMonitor
             };
         }
 
-        (int? loadedWindow, bool otherModelLoaded) = await LoadedAsync(client, node, cancellationToken);
+        (int? loadedWindow, bool thisModelLoaded, bool otherModelLoaded) = await LoadedAsync(client, node, cancellationToken);
         if (loadedWindow is null && otherModelLoaded && !force)
         {
             return null;
@@ -291,7 +291,7 @@ internal sealed class FleetHealthMonitor
         // The hub's model is the largest on the fleet and sits on the owner's own machine: a routine probe does not load it. Measured: a probe
         // every five minutes against Ollama's five-minute keep-alive kept a 22 GB model resident, and the graphics memory full, all day
         // while nobody used it. It is asked when it is loaded anyway, and when a plan asks after an outage.
-        if (loadedWindow is null && node.Fallback && !force)
+        if (!thisModelLoaded && node.Fallback && !force)
         {
             return null;
         }
@@ -312,7 +312,7 @@ internal sealed class FleetHealthMonitor
 
     // What Ollama's /api/ps says is loaded: the window this node's model has right now (null when it is not loaded), and
     // whether some other model is loaded. Ollama that cannot say counts as nothing loaded.
-    private static async Task<(int? Window, bool OtherModelLoaded)> LoadedAsync(
+    private static async Task<(int? Window, bool ThisModelLoaded, bool OtherModelLoaded)> LoadedAsync(
         HttpClient client, FleetNodeDefinition node, CancellationToken cancellationToken)
     {
         try
@@ -320,17 +320,18 @@ internal sealed class FleetHealthMonitor
             using HttpResponseMessage response = await client.GetAsync(new Uri(node.OllamaRoot, "api/ps"), cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
-                return (null, false);
+                return (null, false, false);
             }
 
             using JsonDocument? loaded = await response.Content.ReadFromJsonAsync<JsonDocument>(cancellationToken: cancellationToken);
             if (loaded is null || !loaded.RootElement.TryGetProperty("models", out JsonElement models) || models.ValueKind != JsonValueKind.Array)
             {
-                return (null, false);
+                return (null, false, false);
             }
 
             string expected = NormalizeModelTag(node.Model);
             int? window = null;
+            bool thisLoaded = false;
             bool other = false;
             foreach (JsonElement model in models.EnumerateArray())
             {
@@ -340,19 +341,22 @@ internal sealed class FleetHealthMonitor
                 if (!string.Equals(NormalizeModelTag(name), expected, StringComparison.Ordinal))
                 {
                     other |= !string.IsNullOrEmpty(name);
+                    continue;
                 }
-                else if (model.TryGetProperty("context_length", out JsonElement length) && length.ValueKind == JsonValueKind.Number &&
-                         length.TryGetInt32(out int size) && size > 0)
+
+                thisLoaded = true;
+                if (model.TryGetProperty("context_length", out JsonElement length) && length.ValueKind == JsonValueKind.Number &&
+                    length.TryGetInt32(out int size) && size > 0)
                 {
                     window = size;
                 }
             }
 
-            return (window, other);
+            return (window, thisLoaded, other);
         }
         catch (Exception exception) when (exception is HttpRequestException or JsonException)
         {
-            return (null, false);
+            return (null, false, false);
         }
     }
 
