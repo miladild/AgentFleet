@@ -24,6 +24,17 @@ tests. Measure these separately when calibrating the light tier:
 .\bench\Invoke-Bench.ps1 -Tasks light-display-label,light-request-options -WorkerOnly -AutoRetries 0 -Repeat 3
 ```
 
+To measure the workers alone, so that the hub's large model is never loaded (it fills the hub machine's graphics memory and slows it),
+start the backend with `-NoHubModel` and run with `-WorkerOnly`. `-NoHubModel` points the copied configuration's hub node at a closed
+local port, so a plan that tries to use the hub fails at once instead of loading it; the backend's `/health` then says `unhealthy` (503)
+because of the hub node, while the workers are listed as ready. With `-WorkerOnly` the second opinion comes from the other worker, so run
+one machine's batch at a time and leave the other machine alone while it runs:
+
+```powershell
+.\bench\Start-BenchBackend.ps1 -NoHubModel
+.\bench\Invoke-Bench.ps1 -WorkerOnly -Tier standard -AutoRetries 0   # the standard-tier worker; -Tier light for the light-tier worker
+```
+
 `-AutoRetries 0` disables automatic retries of parked steps; the repair ladder still runs its rounds and conversations.
 Use the same explicit task list and settings for before/after comparisons. A partial run does not provide a completion
 rate for tasks it never reached. Forcing standard tasks to `light` measures a harder workload than these small repairs.
