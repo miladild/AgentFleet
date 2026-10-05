@@ -201,7 +201,8 @@ internal sealed class FleetHealthMonitor
             using HttpRequestMessage? request = await InferenceProbeRequestAsync(client, node, forceInferenceProbe, inferenceCancellation.Token);
             if (request is null)
             {
-                // Another model is working on this machine: loading this one just to ask would push it out.
+                // Loading this model just to ask is not worth it (another model is working on this machine, or this is the hub's model: see
+                // InferenceProbeRequestAsync): the node is taken to answer until a real request or a forced probe says it does not.
                 _inference[node.Name] = (now, true, null);
                 return new NodeHealthSnapshot(node.Name, node.Model, true, true, true, now, null);
             }
@@ -283,6 +284,14 @@ internal sealed class FleetHealthMonitor
 
         (int? loadedWindow, bool otherModelLoaded) = await LoadedAsync(client, node, cancellationToken);
         if (loadedWindow is null && otherModelLoaded && !force)
+        {
+            return null;
+        }
+
+        // The hub's model is the largest on the fleet and sits on the owner's own machine: a routine probe does not load it. Measured: a probe
+        // every five minutes against Ollama's five-minute keep-alive kept a 22 GB model resident, and the graphics memory full, all day
+        // while nobody used it. It is asked when it is loaded anyway, and when a plan asks after an outage.
+        if (loadedWindow is null && node.Fallback && !force)
         {
             return null;
         }
