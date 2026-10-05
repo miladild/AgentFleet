@@ -135,6 +135,38 @@ public sealed class NodeHealthProbeAndThinkingTests : IDisposable
     }
 
     [Fact]
+    public async Task A_routine_probe_does_not_load_the_hubs_own_model_but_asks_it_when_it_is_loaded_anyway()
+    {
+        // Measured: a probe every five minutes against Ollama's five-minute keep-alive kept the hub's 22 GB model resident all day.
+        (FleetHealthMonitor idle, FakeOllama idleOllama) = Monitor("{\"models\":[]}");
+
+        NodeHealthSnapshot snapshot = await idle.GetNodeAsync("hub", forceProbe: true);
+
+        Assert.True(snapshot.Ready);
+        Assert.Null(snapshot.Failure);
+        Assert.DoesNotContain(idleOllama.Requests, r => r.Method == HttpMethod.Post);
+
+        (FleetHealthMonitor busy, FakeOllama busyOllama) = Monitor("{\"models\":[{\"name\":\"m:latest\",\"context_length\":16384}]}");
+
+        Assert.True((await busy.GetNodeAsync("hub", forceProbe: true)).Ready);
+        Assert.Equal(16384, Json(Only(busyOllama, "/api/chat").Body).GetProperty("options").GetProperty("num_ctx").GetInt32());
+    }
+
+    [Fact]
+    public async Task A_forced_probe_after_an_outage_still_loads_the_hubs_model_and_a_worker_is_asked_even_when_idle()
+    {
+        (FleetHealthMonitor monitor, FakeOllama ollama) = Monitor("{\"models\":[]}");
+
+        Assert.True((await monitor.GetNodeAsync("hub", forceProbe: true, forceInferenceProbe: true)).Ready);
+        Assert.Equal(ContextSizeChatClient.SmallestSize, Json(Only(ollama, "/api/chat").Body).GetProperty("options").GetProperty("num_ctx").GetInt32());
+
+        (FleetHealthMonitor workerMonitor, FakeOllama workerOllama) = Monitor("{\"models\":[]}");
+
+        Assert.True((await workerMonitor.GetNodeAsync("worker-a", forceProbe: true)).Ready);
+        Assert.Single(workerOllama.Requests, r => r.Path == "/api/chat");
+    }
+
+    [Fact]
     public async Task A_forced_probe_after_an_outage_still_asks_the_model()
     {
         (FleetHealthMonitor monitor, FakeOllama ollama) = Monitor("{\"models\":[{\"name\":\"other:7b\",\"context_length\":8192}]}");

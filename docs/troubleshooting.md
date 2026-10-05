@@ -52,11 +52,16 @@ rules to the named peer IPs. `-RestrictOllamaRules` remains accepted for compati
   gets it, and every change of size makes Ollama reload the model (10 to 25 seconds). The fleet always asks for a size,
   and its own health checks now ask at the size already loaded. To make Ollama's default sane on a worker, set
   `OLLAMA_CONTEXT_LENGTH=32768` in that machine's Ollama environment and restart Ollama.
+- **The hub's large model stays loaded all day and slows the computer it runs on.** A routine health check never loads the hub's
+  own model (the node marked as the fallback): it asks only while the model is loaded anyway, or when a plan asks after an outage.
+  If `ollama ps` still shows the hub model with nobody using it, something else is asking it: another program, or a fleet backend
+  from an older build. Ollama unloads a model after five minutes unused (`OLLAMA_KEEP_ALIVE` changes that).
 - **A file the model wrote ends with "[the rest was removed to keep this conversation inside the model's window]".** That text
-  stands in for old output the fleet shortened when a conversation outgrew the model's window, and a small model can copy
-  it into a file. The fleet now drops the long arguments of old calls instead, and refuses a write that contains the text;
-  if you still see it, the conversation is too long for that machine's window: raise its `contextLength` or use a model
-  with a longer one.
+  stands in for old tool output the fleet shortened when a conversation outgrew the model's window, and a small model can copy
+  it into a file. The fleet refuses a write that contains the text, and it no longer changes the calls the model sees in its
+  own history (a model copies their shape: an old write shown without its content made the next write have none), leaving
+  out the oldest calls and their results instead. If you still see the text, the conversation is too long for that machine's
+  window: raise its `contextLength` or use a model with a longer one.
 - **A file called `nul` (or `con`, `aux`, `prn`, `com1`, `lpt1`) appears in a Linux worker's project.** The model ran a
   Windows command such as `> nul` on Linux. A Windows hub cannot hold such a file, so it is left on the worker and not
   synced; it does no harm and goes with the workspace.
