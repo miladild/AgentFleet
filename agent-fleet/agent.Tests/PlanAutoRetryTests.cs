@@ -285,6 +285,40 @@ public sealed class PlanAutoRetryTests : PlanTestBase
     }
 
     [Fact]
+    public async Task A_check_that_ran_no_test_does_not_get_a_step_accepted_and_the_model_is_told_why()
+    {
+        string srcPath = Path.Combine(ProjectDirectory, "src.js");
+        string testPath = Path.Combine(ProjectDirectory, "test", "a.test.js");
+        Directory.CreateDirectory(Path.Combine(ProjectDirectory, "test"));
+        File.WriteAllText(srcPath, "// source");
+        File.WriteAllText(testPath, "// test");
+
+        var step = new PlanStepInput("write code", "detail", ["src.js", "test/a.test.js"], "node --test test/a.test.js", "standard");
+        PlanRecord plan = OneStepPlan(step, autoRetries: 0);
+        int round = 0;
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            round++;
+            File.WriteAllText(srcPath, "// source " + round);
+            File.WriteAllText(testPath, "console.log('ERROR: one case is wrong');" + round);
+            return Task.FromResult("Wrote a script that prints its results.");
+        }, toolCalls: 1, editToolCalled: true);
+
+        // What node prints for a test file that registers no test: the file itself is the one test that passed.
+        await RepairRunner(agent, _ => "Exit code: 0\n--- stdout ---\nERROR: one case is wrong\n✔ test\\a.test.js (12.0ms)\nℹ tests 1\nℹ pass 1\n", roundsPerRung: 1)
+            .RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.NotEqual(PlanStatus.Done, after.Status);
+        Assert.Equal(StepStatus.Parked, after.Steps[0].Status);
+        Assert.Equal("no-tests-ran", after.Events!.First(e => e.Kind == RunEventKind.StepParked).FailureSignature);
+        Assert.Contains(after.Events!, e =>
+            (e.Kind is RunEventKind.CheckFailed or RunEventKind.FinalValidationFailed) && e.Detail is not null && e.Detail.Contains("ran no test", StringComparison.Ordinal));
+        Assert.True(agent.Calls.Count > 1, "the model was asked again with the reason");
+        Assert.Contains("ran no test", agent.Calls[1].Prompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task A_step_that_changes_the_test_file_it_names_is_accepted()
     {
         string srcPath = Path.Combine(ProjectDirectory, "src.cs");
