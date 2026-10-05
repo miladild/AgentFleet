@@ -13,6 +13,11 @@
 .PARAMETER Config
     The fleet.config.json to copy. Default: the one Find-FleetConfig finds (the installed copy).
 
+.PARAMETER NoHubModel
+    Points the copied configuration's hub node (the one marked fallback, which the configuration must have) at a closed local port,
+    so nothing in this backend can load or call the hub's model: a plan that tries to use it fails at once instead of filling the
+    hub machine's graphics memory. Use it for runs that must use only the workers; combine it with Invoke-Bench.ps1 -WorkerOnly.
+
 .PARAMETER WorkRoot
     Where the published backend, the copied configuration, the plans and the logs live.
 #>
@@ -22,6 +27,7 @@ param(
     [string]$Config,
     [string]$InstallRoot,
     [string]$WorkRoot = (Join-Path ([IO.Path]::GetTempPath()) 'agent-fleet-bench'),
+    [switch]$NoHubModel,
     [switch]$Stop
 )
 
@@ -54,6 +60,10 @@ if (-not $source) { throw 'No fleet.config.json found. Pass -Config <path>.' }
 $fleetConfig = Read-FleetConfig $source
 if ($fleetConfig.PSObject.Properties.Name -contains 'notifyUrl') { $fleetConfig.PSObject.Properties.Remove('notifyUrl') }
 $configCopy = Join-Path $WorkRoot 'fleet.config.json'
+if ($NoHubModel) {
+    foreach ($node in @($fleetConfig.nodes | Where-Object { $_.fallback -eq $true })) { $node.url = 'http://127.0.0.1:9/v1' }
+    Write-Ok 'The hub node of the copy points at a closed port: its model cannot be used by this backend.'
+}
 Write-FleetConfig $configCopy $fleetConfig
 Write-Ok "Configuration copied from $source"
 
@@ -80,7 +90,8 @@ Write-Step "Waiting for http://localhost:$Port/health"
 $up = $false
 for ($i = 0; $i -lt 90 -and -not $up; $i++) {
     Start-Sleep -Seconds 1
-    try { $null = Invoke-WebRequest "http://localhost:$Port/health" -UseBasicParsing -TimeoutSec 3; $up = $true } catch { }
+    # With the hub node closed off on purpose the endpoint says unhealthy (503) while the workers are fine: any answer means it is up.
+    try { $null = Invoke-WebRequest "http://localhost:$Port/health" -UseBasicParsing -TimeoutSec 3 -SkipHttpErrorCheck:$NoHubModel; $up = $true } catch { }
 }
 if (-not $up) { throw "The benchmark backend did not answer. See $WorkRoot\backend.err.log" }
 Write-Ok "Benchmark backend up on port $Port (pid $($process.Id)). Run: .\bench\Invoke-Bench.ps1 -BaseUrl http://localhost:$Port"
