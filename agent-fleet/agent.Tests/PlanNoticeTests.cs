@@ -167,6 +167,23 @@ public sealed class PlanNoticeTests : PlanTestBase
     }
 
     [Fact]
+    public void The_summary_identifies_each_currently_parked_step_without_exposing_its_output()
+    {
+        PlanRecord plan = NewPlan(Step("Base"), Step("Feature A"), Step("Feature B"));
+        Store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, 2, step => step with { Status = StepStatus.Parked }));
+        Store.AddEvent(plan.Id, 2, null, RunEventKind.StepParked, detail: "private check output", failureSignature: "environment");
+
+        PlanSummary summary = Store.List().Single(candidate => candidate.Id == plan.Id);
+        ParkedStepSummary parked = Assert.Single(summary.ParkedSteps!);
+
+        Assert.Equal(2, parked.StepId);
+        Assert.Equal("Feature A", parked.Title);
+        Assert.Equal("environment", parked.Cause);
+        Assert.NotNull(parked.ParkedAtUtc);
+        Assert.DoesNotContain("private check output", System.Text.Json.JsonSerializer.Serialize(summary), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void A_plan_file_can_say_what_a_step_depends_on()
     {
         string folder = Path.Combine(PlansDirectory, "plan-file");

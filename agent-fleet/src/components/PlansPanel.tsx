@@ -10,10 +10,20 @@ type PlanSummary = {
   stepsDone: number;
   stepsTotal: number;
   updatedUtc: string;
+  parkedSteps?: ParkedStepSummary[] | null;
+};
+
+type ParkedStepSummary = {
+  stepId: number;
+  title: string;
+  parkedAtUtc: string | null;
+  cause: string | null;
 };
 
 type PlanNotification = PlanSummary & {
   notificationKey: string;
+  notificationType: "result" | "parked";
+  parkedStep?: ParkedStepSummary;
 };
 
 const NOTIFICATION_STORAGE_KEY = "agent-fleet.seen-plan-notifications.v1";
@@ -54,10 +64,17 @@ export function PlansPanel() {
           if (stopped) return;
           const seen = readSeenNotifications();
           const cutoff = Date.now() - NOTIFICATION_MAX_AGE_MS;
-          const recent = data
+          const results = data
             .filter((plan) => plan.status === "done" || plan.status === "blocked")
             .filter((plan) => Date.parse(plan.updatedUtc) >= cutoff)
-            .map((plan) => ({ ...plan, notificationKey: `${plan.id}:${plan.status}:${plan.updatedUtc}` }))
+            .map((plan) => ({ ...plan, notificationType: "result" as const, notificationKey: `${plan.id}:${plan.status}:${plan.updatedUtc}` }));
+          const parked = data.flatMap((plan) => (plan.parkedSteps ?? []).map((step) => ({
+            ...plan,
+            notificationType: "parked" as const,
+            parkedStep: step,
+            notificationKey: `${plan.id}:parked:${step.stepId}:${step.parkedAtUtc ?? "unknown"}`,
+          })));
+          const recent = [...results, ...parked]
             .filter((plan) => !seen.has(plan.notificationKey));
           setNotifications((current) => {
             const existing = new Set(current.map((notice) => notice.notificationKey));
@@ -140,12 +157,14 @@ export function PlansPanel() {
             <div key={notice.notificationKey} className="rounded-lg border border-neutral-700 bg-neutral-900 p-4 text-neutral-100 shadow-xl">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <p className={`text-xs font-semibold uppercase tracking-wide ${notice.status === "done" ? "text-emerald-400" : "text-red-400"}`}>
-                    Plan {notice.status === "done" ? "finished" : "blocked"}
+                  <p className={`text-xs font-semibold uppercase tracking-wide ${notice.notificationType === "parked" ? "text-amber-400" : notice.status === "done" ? "text-emerald-400" : "text-red-400"}`}>
+                    {notice.notificationType === "parked" ? "Step parked" : `Plan ${notice.status === "done" ? "finished" : "blocked"}`}
                   </p>
                   <p className="mt-1 truncate text-sm font-medium" title={notice.title}>{notice.title}</p>
                   <p className="mt-1 text-xs text-neutral-400">
-                    {notice.stepsDone} of {notice.stepsTotal} steps - {new Date(notice.updatedUtc).toLocaleString()}
+                    {notice.notificationType === "parked" && notice.parkedStep
+                      ? `Step ${notice.parkedStep.stepId} (${notice.parkedStep.title}) needs attention${notice.parkedStep.cause ? ` · ${notice.parkedStep.cause}` : ""}. The plan continues.`
+                      : `${notice.stepsDone} of ${notice.stepsTotal} steps - ${new Date(notice.updatedUtc).toLocaleString()}`}
                   </p>
                 </div>
                 <button

@@ -240,7 +240,14 @@ internal sealed record PlanSummary(
     int StepsTotal,
     DateTimeOffset UpdatedUtc,
     string? ContextId = null,
-    int StepsParked = 0);
+    int StepsParked = 0,
+    IReadOnlyList<ParkedStepSummary>? ParkedSteps = null);
+
+internal sealed record ParkedStepSummary(
+    int StepId,
+    string Title,
+    DateTimeOffset? ParkedAtUtc,
+    string? Cause);
 
 /// <summary>What the model supplies for one step when it proposes a plan.</summary>
 internal sealed record PlanStepInput(

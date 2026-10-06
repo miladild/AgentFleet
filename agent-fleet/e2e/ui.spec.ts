@@ -309,6 +309,29 @@ test("loads the main fleet UI and machine status", async ({ page }) => {
   await expect(page.getByText("Recent activity", { exact: true })).toBeVisible();
 });
 
+test("notifies when a step parks while its plan keeps running", async ({ page }) => {
+  await page.route("**/api/plans", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify([{
+      id: parkedPlanId,
+      title: "Two features",
+      status: "running",
+      stepsDone: 1,
+      stepsTotal: 4,
+      updatedUtc: "2026-10-06T00:00:00.000Z",
+      parkedSteps: [{ stepId: 2, title: "Feature A", parkedAtUtc: "2026-10-06T00:00:00.000Z", cause: "check-kept-failing" }],
+    }]),
+  }));
+
+  await page.goto("/");
+
+  const notice = page.getByRole("complementary", { name: "Recent plan results" });
+  await expect(notice).toContainText("Step parked");
+  await expect(notice).toContainText("Step 2 (Feature A) needs attention · check-kept-failing. The plan continues.");
+  await expect(notice.getByRole("button", { name: "Open plan" })).toBeVisible();
+});
+
 test("keeps new errors visible while the Live view panels are collapsed", async ({ page }) => {
   await page.goto("/live/demo");
 
