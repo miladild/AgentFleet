@@ -221,7 +221,15 @@ internal sealed partial class FleetPlanStore
                     plan.Steps.Count,
                     plan.UpdatedUtc,
                     plan.ContextId,
-                    plan.Steps.Count(step => step.Status == StepStatus.Parked)))
+                    plan.Steps.Count(step => step.Status == StepStatus.Parked),
+                    plan.Steps.Where(step => step.Status == StepStatus.Parked)
+                        .Select(step =>
+                        {
+                            PlanRunEvent? parked = (plan.Events ?? []).LastOrDefault(runEvent =>
+                                runEvent.Kind == RunEventKind.StepParked && runEvent.StepId == step.Id);
+                            return new ParkedStepSummary(step.Id, step.Title, parked?.AtUtc, parked?.FailureSignature);
+                        })
+                        .ToList()))
                 .ToList();
         }
     }
