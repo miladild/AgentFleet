@@ -1,0 +1,69 @@
+{
+  "id": "csv-parse-split",
+  "goal": "Implement parseCsv(text) and toCsv(rows) in src/csv.js to correctly parse and serialize CSV text, export both with CommonJS, and add tests in test/csv.test.js.",
+  "steps": [
+    {
+      "id": 1,
+      "title": "Parse CSV rows and fields",
+      "detail": "Implement parseCsv(text) in src/csv.js. Fields are separated by commas; rows end at a line feed or a carriage return plus line feed; a final line ending does not create an extra row; the empty text gives []. Examples: parseCsv('a,b\\n1,2\\n') is [['a','b'],['1','2']]; parseCsv('a\\n\\nb') is [['a'],[''],['b']]; parseCsv('') is []; parseCsv('a,,c') is [['a','','c']]. Add or update focused tests in test/csv.test.js for row and field boundaries.",
+      "files": [
+        "src/csv.js",
+        "test/csv.test.js"
+      ],
+      "verify": "node --test test/csv.test.js",
+      "tier": "standard"
+    },
+    {
+      "id": 2,
+      "title": "Parse quoted CSV fields",
+      "detail": "Implement quoted fields in parseCsv(text): a field may be wrapped in double quotes, and inside quotes commas, line feeds and carriage returns are ordinary characters and a doubled double quote is one double quote; a quoted empty field is an empty string. Examples: parseCsv('a,\"b,c\"\\r\\n') is [['a','b,c']]; parseCsv('\"say \"\"hi\"\"\"') is [['say \"hi\"']]; parseCsv('x,\"line1\\nline2\",y') is [['x','line1\\nline2','y']]. Add or update focused tests in test/csv.test.js for quoted fields.",
+      "files": [
+        "src/csv.js",
+        "test/csv.test.js"
+      ],
+      "verify": "node --test test/csv.test.js",
+      "tier": "standard"
+    },
+    {
+      "id": 3,
+      "title": "Reject malformed quoted fields",
+      "detail": "Implement parseCsv validation for malformed quotes: a quote that is never closed throws a SyntaxError whose message starts with 'Unterminated quote'; any character between a closing quote and the next comma or line ending throws a SyntaxError whose message starts with 'Unexpected character'. Examples: parseCsv('\"abc') throws SyntaxError starting 'Unterminated quote'; parseCsv('\"a\"b,c') throws SyntaxError starting 'Unexpected character'. Add or update focused tests in test/csv.test.js for these errors.",
+      "files": [
+        "src/csv.js",
+        "test/csv.test.js"
+      ],
+      "verify": "node --test test/csv.test.js",
+      "tier": "standard"
+    },
+    {
+      "id": 4,
+      "title": "Preserve unquoted field content",
+      "detail": "Preserve non-delimiter characters in unquoted fields: spaces are kept exactly as written (no trimming); a double quote in the middle of an unquoted field is an ordinary character. Examples: parseCsv(' a , b ') is [[' a ',' b ']]; parseCsv('5\" nail,x') is [['5\" nail','x']]. Add or update focused tests in test/csv.test.js for these cases.",
+      "files": [
+        "src/csv.js",
+        "test/csv.test.js"
+      ],
+      "verify": "node --test test/csv.test.js",
+      "tier": "standard"
+    },
+    {
+      "id": 5,
+      "title": "Serialize CSV rows",
+      "detail": "Implement toCsv(rows). A field that contains a comma, a double quote, a line feed or a carriage return is wrapped in double quotes with inner double quotes doubled; other fields are written as they are; fields are joined by commas, rows by a line feed, and there is no line ending after the last row; toCsv([]) is the empty string. Examples: toCsv([['a','b,c'],['say \"hi\"','x']]) is 'a,\"b,c\"\\n\"say \"\"hi\"\"\",x'; parseCsv(toCsv(rows)) equals rows for rows [['a','b\\nc'],['',',']]. Add or update focused tests in test/csv.test.js for serialization and round-tripping.",
+      "files": [
+        "src/csv.js",
+        "test/csv.test.js"
+      ],
+      "verify": "node --test test/csv.test.js",
+      "tier": "standard"
+    },
+    {
+      "id": 6,
+      "title": "Run the whole test suite",
+      "detail": "Run npm test. Change nothing unless it fails; fix only failures that this plan's change caused.",
+      "files": [],
+      "verify": "npm test",
+      "tier": "standard"
+    }
+  ]
+}

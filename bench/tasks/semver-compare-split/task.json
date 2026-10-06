@@ -1,0 +1,69 @@
+{
+  "id": "semver-compare-split",
+  "goal": "Make compare(a, b) and sort(versions) in src/semver.js correct, export both with CommonJS, and add comprehensive tests in test/semver.test.js.",
+  "steps": [
+    {
+      "id": 1,
+      "title": "Parse versions and reject invalid input",
+      "detail": "Validate version strings in src/semver.js. Invalid versions passed to compare throw a TypeError whose message starts with 'Invalid version'. Invalid: '1.2', 'v1.2.3', '1.2.3.4', '01.2.3', empty string. Add or update focused tests in test/semver.test.js for invalid input.",
+      "files": [
+        "src/semver.js",
+        "test/semver.test.js"
+      ],
+      "verify": "node --test test/semver.test.js",
+      "tier": "standard"
+    },
+    {
+      "id": 2,
+      "title": "Compare numeric version components",
+      "detail": "Implement numeric comparison of major, minor, and patch in compare(a, b). Major, minor, patch compare as numbers (1.2.10 is greater than 1.2.9). Examples: compare('1.2.10','1.2.9') is 1; compare('1.0.0','1.0.0') is 0. Add or update focused tests in test/semver.test.js for numeric precedence.",
+      "files": [
+        "src/semver.js",
+        "test/semver.test.js"
+      ],
+      "verify": "node --test test/semver.test.js",
+      "tier": "standard"
+    },
+    {
+      "id": 3,
+      "title": "Compare prerelease identifiers",
+      "detail": "Implement prerelease precedence in compare(a, b). A version with a prerelease is lower than the same version without; prerelease identifiers (dot separated) compare left to right: two numeric identifiers compare as numbers, two non-numeric identifiers compare as text in ASCII order, a numeric identifier is lower than a non-numeric one, and when all shared identifiers are equal the version with fewer identifiers is lower. Examples in ascending order: 1.0.0-alpha, 1.0.0-alpha.1, 1.0.0-alpha.beta, 1.0.0-beta, 1.0.0-beta.2, 1.0.0-beta.11, 1.0.0-rc.1, 1.0.0. Add or update focused tests in test/semver.test.js for prerelease precedence.",
+      "files": [
+        "src/semver.js",
+        "test/semver.test.js"
+      ],
+      "verify": "node --test test/semver.test.js",
+      "tier": "standard"
+    },
+    {
+      "id": 4,
+      "title": "Ignore build metadata when comparing",
+      "detail": "Implement build-metadata comparison in compare(a, b). Build metadata is ignored (2.0.0+build.1 and 2.0.0+build.2 compare equal). Example: compare('2.0.0+build.1','2.0.0+build.2') is 0. Add or update focused tests in test/semver.test.js for build metadata.",
+      "files": [
+        "src/semver.js",
+        "test/semver.test.js"
+      ],
+      "verify": "node --test test/semver.test.js",
+      "tier": "standard"
+    },
+    {
+      "id": 5,
+      "title": "Sort versions without changing input",
+      "detail": "Implement sort(versions) so that it returns a NEW array in ascending order without changing the input. Invalid versions make sort throw a TypeError whose message starts with 'Invalid version'. Example: sort(['1.10.0','1.2.0','1.2.0-rc.1']) is ['1.2.0-rc.1','1.2.0','1.10.0']. Add or update focused tests in test/semver.test.js for sorting, invalid input, and input immutability.",
+      "files": [
+        "src/semver.js",
+        "test/semver.test.js"
+      ],
+      "verify": "node --test test/semver.test.js",
+      "tier": "standard"
+    },
+    {
+      "id": 6,
+      "title": "Run the whole test suite",
+      "detail": "Run npm test. Change nothing unless it fails; fix only failures that this plan's change caused.",
+      "files": [],
+      "verify": "npm test",
+      "tier": "standard"
+    }
+  ]
+}
