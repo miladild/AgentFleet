@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Channels;
@@ -182,6 +183,12 @@ internal sealed partial class PlanRunner
     /// </summary>
     public static readonly TimeSpan DefaultStepClock = TimeSpan.FromHours(4);
     private static readonly char[] LineBreaks = ['\r', '\n'];
+    private static readonly TimeSpan[] ReconnectPauses =
+    [
+        TimeSpan.FromSeconds(5),
+        TimeSpan.FromSeconds(20),
+        TimeSpan.FromSeconds(60)
+    ];
 
     private readonly FleetPlanStore _store;
     private readonly PlanTools _tools;
@@ -2312,32 +2319,50 @@ internal sealed partial class PlanRunner
         return false;
     }
 
-    private async Task SyncToHubWithReconnectAsync(IWorkerWorkspaceSession worker, CancellationToken cancellationToken)
-    {
-        try
-        {
-            await worker.SyncToHubAsync(cancellationToken);
-        }
-        catch (Exception exception) when (IsWorkerTransportFailure(exception))
-        {
-            _logger.LogWarning(exception, "Worker {Machine} lost its connection while syncing changes to the hub; reconnecting and retrying once.", worker.Machine);
-            await worker.ReconnectAsync(cancellationToken);
-            await worker.SyncToHubAsync(cancellationToken);
-        }
-    }
+    // Post-model syncs pass CancellationToken.None, so these retry pauses do not observe Stop.
+    internal Task SyncToHubWithReconnectAsync(IWorkerWorkspaceSession worker, CancellationToken cancellationToken) =>
+        RunWithReconnectsAsync(worker, worker.SyncToHubAsync, "syncing changes to the hub", cancellationToken);
 
-    private async Task RefreshFromHubWithReconnectAsync(IWorkerWorkspaceSession worker, CancellationToken cancellationToken)
+    // Post-model refreshes pass CancellationToken.None, so these retry pauses do not observe Stop.
+    internal Task RefreshFromHubWithReconnectAsync(IWorkerWorkspaceSession worker, CancellationToken cancellationToken) =>
+        RunWithReconnectsAsync(worker, worker.RefreshFromHubAsync, "refreshing from the hub", cancellationToken);
+
+    private async Task RunWithReconnectsAsync(
+        IWorkerWorkspaceSession worker,
+        Func<CancellationToken, Task> operation,
+        string operationName,
+        CancellationToken cancellationToken)
     {
+        Exception lastFailure;
         try
         {
-            await worker.RefreshFromHubAsync(cancellationToken);
+            await operation(cancellationToken);
+            return;
         }
         catch (Exception exception) when (IsWorkerTransportFailure(exception))
         {
-            _logger.LogWarning(exception, "Worker {Machine} lost its connection while refreshing from the hub; reconnecting and retrying once.", worker.Machine);
-            await worker.ReconnectAsync(cancellationToken);
-            await worker.RefreshFromHubAsync(cancellationToken);
+            lastFailure = exception;
         }
+
+        foreach (TimeSpan pause in ReconnectPauses)
+        {
+            _logger.LogWarning(lastFailure,
+                "Worker {Machine} lost its connection while {Operation}; waiting {Delay} before reconnecting.",
+                worker.Machine, operationName, Duration(pause));
+            await DelayBeforeRetryAsync(pause, cancellationToken);
+            try
+            {
+                await worker.ReconnectAsync(cancellationToken);
+                await operation(cancellationToken);
+                return;
+            }
+            catch (Exception exception) when (IsWorkerTransportFailure(exception))
+            {
+                lastFailure = exception;
+            }
+        }
+
+        ExceptionDispatchInfo.Capture(lastFailure).Throw();
     }
 
     private async Task<bool> RunParallelGroupAsync(PlanRecord plan, IReadOnlyList<PlanStep> steps, CancellationToken cancellationToken)
