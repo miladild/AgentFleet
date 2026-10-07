@@ -1091,7 +1091,24 @@ internal sealed partial class PlanRunner
                 catch (Exception exception) when (exception is not OperationCanceledException && model.Workspace is not null)
                 {
                     _logger.LogError(exception, "Worker verification or sync failed for plan {PlanId} step {StepId} on {Machine}.", plan.Id, step.Id, model.Machine);
-                    string failure = $"Worker workspace unavailable: verification or sync failed on {model.Machine}: {exception.Message}";
+                    IWorkerWorkspaceSession workspace = model.Workspace;
+                    bool sshTimedOut = false;
+                    for (Exception? cause = exception; cause is not null; cause = cause.InnerException)
+                    {
+                        if (cause is SshOperationTimeoutException) { sshTimedOut = true; break; }
+                    }
+
+                    string failure;
+                    if (sshTimedOut && await workspace.AnswersAsync(cancellationToken))
+                    {
+                        failure = $"Error: command exceeded the {workspace.CommandTimeout.TotalSeconds:0}s timeout and was killed.\n\n" +
+                            "The check never finished. A program or test that never ends is usually an infinite loop " +
+                            "(for example while (true) without a limit) or a wait that never completes. Make it finish.";
+                    }
+                    else
+                    {
+                        failure = $"Worker workspace unavailable: verification or sync failed on {model.Machine}: {exception.Message}";
+                    }
                     result = new StepCompletion(false, failure, failure);
                 }
                 finally

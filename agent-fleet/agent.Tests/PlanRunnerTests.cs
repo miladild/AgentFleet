@@ -204,18 +204,21 @@ public sealed partial class PlanRunnerTests : PlanTestBase
     {
         public List<string> StagedMachines { get; } = [];
         public int ResumeCalls { get; private set; }
+        public bool WorkerAnswers { get; set; } = true;
 
         public Task<IWorkerWorkspaceSession> StageAsync(PlanRecord plan, PlanStep step, string machine, CancellationToken cancellationToken)
         {
             StagedMachines.Add(machine);
-            return Task.FromResult<IWorkerWorkspaceSession>(new FakeWorkerWorkspaceSession(machine));
+            return Task.FromResult<IWorkerWorkspaceSession>(new FakeWorkerWorkspaceSession(machine) { Answers = WorkerAnswers });
         }
 
         public Task<WorkerWorkspaceResume> ResumeInterruptedAsync(PlanRecord plan, PlanStep step,
             WorkerWorkspaceBaseline baseline, CancellationToken cancellationToken)
         {
             ResumeCalls++;
-            return Task.FromResult(new WorkerWorkspaceResume(recovery.Safe ? new FakeWorkerWorkspaceSession(baseline.Machine) : null, recovery));
+            return Task.FromResult(new WorkerWorkspaceResume(recovery.Safe
+                ? new FakeWorkerWorkspaceSession(baseline.Machine) { Answers = WorkerAnswers }
+                : null, recovery));
         }
     }
 
@@ -223,6 +226,9 @@ public sealed partial class PlanRunnerTests : PlanTestBase
     {
         public string Machine => machine;
         public string Platform => "linux";
+        public TimeSpan CommandTimeout { get; set; } = TimeSpan.FromMinutes(2);
+        public bool Answers { get; set; } = true;
+        public Task<bool> AnswersAsync(CancellationToken cancellationToken) => Task.FromResult(Answers);
         public string SnapshotId() => "synthetic-snapshot";
         public Dictionary<string, string> BaselineHashes() => new(StringComparer.OrdinalIgnoreCase) { ["a.cs"] = "baseline" };
         public IDisposable Enter() => new NoopScope();
@@ -688,6 +694,56 @@ public sealed partial class PlanRunnerTests : PlanTestBase
         Assert.Contains(after.Events!, runEvent => runEvent.Kind == RunEventKind.WorkspaceReconciled && runEvent.Detail.Contains("match their saved staged baseline", StringComparison.Ordinal));
         Assert.Contains(after.Events!, runEvent => runEvent.Kind == RunEventKind.WorkspaceStaged && runEvent.Attempt == 1);
         Assert.Single(agent.Calls);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_worker_check_timeout_with_a_live_session_is_a_failed_check(bool wrapTimeout)
+    {
+        PlanRecord plan = InterruptedWorkerPlan(out _);
+        var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], [])) { WorkerAnswers = true };
+        var agent = Agent("I will make the check finish.");
+        Exception timeout = new Renci.SshNet.Common.SshOperationTimeoutException("Operation has timed out.");
+        if (wrapTimeout) timeout = new InvalidOperationException("wrapped timeout", timeout);
+        int checks = 0;
+
+        string Verify(string command)
+        {
+            if (command == "dotnet build" && checks++ == 0) throw timeout;
+            return Pass(command);
+        }
+
+        await Runner(agent, Verify, workerWorkspaces: workspaces).RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.Equal(2, checks);
+        Assert.Contains(agent.Calls.Skip(1), call => call.Prompt.Contains("The check never finished.", StringComparison.Ordinal));
+        Assert.Contains(agent.Calls.Skip(1), call => call.Prompt.Contains("Error: command exceeded the 120s timeout and was killed.", StringComparison.Ordinal));
+        Assert.Contains(after.Events!, runEvent => runEvent.Kind is RunEventKind.CheckFailed or RunEventKind.FinalValidationFailed);
+        Assert.DoesNotContain(after.Events!, runEvent => runEvent.Kind == RunEventKind.RoundClassified &&
+            runEvent.FailureClass == nameof(FailureClass.Environment));
+        Assert.DoesNotContain(after.Events!, runEvent => runEvent.Kind == RunEventKind.CheckHealed);
+    }
+
+    [Fact]
+    public async Task A_worker_check_timeout_with_a_dead_session_remains_an_environment_park()
+    {
+        PlanRecord plan = InterruptedWorkerPlan(out _);
+        var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], [])) { WorkerAnswers = false };
+        FakeStepAgent agent = Agent();
+
+        await Runner(agent, _ => throw new Renci.SshNet.Common.SshOperationTimeoutException("Operation has timed out."),
+            workerWorkspaces: workspaces).RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Blocked, after.Status);
+        Assert.Equal(StepStatus.Parked, after.Steps[0].Status);
+        PlanRunEvent parked = Assert.Single(after.Events!, runEvent => runEvent.Kind == RunEventKind.StepParked);
+        Assert.Equal("environment", parked.FailureSignature);
+        Assert.Contains("Worker workspace unavailable:", parked.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain(after.Events!, runEvent => runEvent.Kind == RunEventKind.CheckHealed);
     }
 
     [Fact]
