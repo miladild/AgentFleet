@@ -1,0 +1,23 @@
+{
+  "id": "hang-check",
+  "title": "Create a completion note",
+  "goal": "Create notes.txt in the project root with the single word done.",
+  "steps": [
+    {
+      "title": "Create notes.txt",
+      "detail": "Create the file notes.txt in the project root containing the single word done. This step's check is deliberately broken and never finishes; that is expected. Create the file, run the check once, then stop.",
+      "files": ["notes.txt"],
+      "verify": "node -e \"setInterval(()=>{},1000)\"",
+      "tier": "standard",
+      "retrySafe": true
+    },
+    {
+      "title": "Run the whole test suite",
+      "detail": "Run npm test. Change nothing unless it fails; fix only failures that this plan's change caused.",
+      "files": [],
+      "verify": "npm test",
+      "tier": "standard",
+      "retrySafe": true
+    }
+  ]
+}

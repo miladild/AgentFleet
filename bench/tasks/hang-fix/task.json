@@ -1,0 +1,23 @@
+{
+  "id": "hang-fix",
+  "title": "Fix a function that never ends",
+  "goal": "Fix firstEven(list) so it returns the first even number, or null when none exists.",
+  "steps": [
+    {
+      "title": "Fix firstEven so it always ends",
+      "detail": "src/loop.js exports firstEven(list), which must return the first even number in the array, or null when the array has none. Zero and negative even numbers count as even. It currently never ends when the array has no even number: fix it so that it always ends. Add tests in test/loop.test.js (node:test) that cover: an array with an even number, an empty array, an array with no even number (the call must return null and end), negative numbers, zero. Run the tests with npm test.",
+      "files": ["src/loop.js", "test/loop.test.js"],
+      "verify": "npm test",
+      "tier": "standard",
+      "retrySafe": true
+    },
+    {
+      "title": "Run the whole test suite",
+      "detail": "Run npm test. Change nothing unless it fails; fix only failures that this plan's change caused.",
+      "files": [],
+      "verify": "npm test",
+      "tier": "standard",
+      "retrySafe": true
+    }
+  ]
+}
