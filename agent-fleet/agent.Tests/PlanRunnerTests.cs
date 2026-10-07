@@ -264,13 +264,17 @@ public sealed partial class PlanRunnerTests : PlanTestBase
         public bool Answers { get; set; } = true;
         public Exception? SyncFailure { get; set; }
         public int SyncFailuresRemaining { get; set; }
+        public int SyncCalls { get; private set; }
         public int ReconnectCalls { get; private set; }
+        public Exception? ReconnectFailure { get; set; }
+        public int ReconnectFailuresRemaining { get; set; }
         public Task<bool> AnswersAsync(CancellationToken cancellationToken) => Task.FromResult(Answers);
         public string SnapshotId() => "synthetic-snapshot";
         public Dictionary<string, string> BaselineHashes() => new(StringComparer.OrdinalIgnoreCase) { ["a.cs"] = "baseline" };
         public IDisposable Enter() => new NoopScope();
         public Task SyncToHubAsync(CancellationToken cancellationToken)
         {
+            SyncCalls++;
             if (SyncFailuresRemaining > 0)
             {
                 SyncFailuresRemaining--;
@@ -283,6 +287,12 @@ public sealed partial class PlanRunnerTests : PlanTestBase
         public Task ReconnectAsync(CancellationToken cancellationToken)
         {
             ReconnectCalls++;
+            if (ReconnectFailuresRemaining > 0)
+            {
+                ReconnectFailuresRemaining--;
+                throw ReconnectFailure ?? new Renci.SshNet.Common.SshConnectionException("Reconnect failed.");
+            }
+
             return Task.CompletedTask;
         }
         public void Dispose() { }
@@ -819,7 +829,25 @@ public sealed partial class PlanRunnerTests : PlanTestBase
     }
 
     [Fact]
-    public async Task A_worker_sync_connection_failure_reconnects_and_retries_once()
+    public async Task A_worker_sync_that_fails_twice_uses_the_first_two_reconnect_pauses()
+    {
+        var delays = new List<TimeSpan>();
+        var worker = new FakeWorkerWorkspaceSession("worker-a")
+        {
+            SyncFailure = new Renci.SshNet.Common.SshConnectionException("Connection lost."),
+            SyncFailuresRemaining = 2
+        };
+
+        await Runner(Agent(), Pass, delayAsync: (delay, _) => { delays.Add(delay); return Task.CompletedTask; })
+            .SyncToHubWithReconnectAsync(worker, default);
+
+        Assert.Equal(3, worker.SyncCalls);
+        Assert.Equal(2, worker.ReconnectCalls);
+        Assert.Equal([5d, 20d], delays.Select(delay => delay.TotalSeconds));
+    }
+
+    [Fact]
+    public async Task A_worker_sync_connection_failure_reconnects_and_retries_in_the_plan()
     {
         var setup = NewWorkerSyncPlan();
         try
@@ -845,24 +873,49 @@ public sealed partial class PlanRunnerTests : PlanTestBase
     }
 
     [Fact]
+    public async Task A_transport_failure_from_reconnect_uses_the_next_pause()
+    {
+        var delays = new List<TimeSpan>();
+        var worker = new FakeWorkerWorkspaceSession("worker-a")
+        {
+            SyncFailure = new Renci.SshNet.Common.SshConnectionException("Connection lost."),
+            SyncFailuresRemaining = 1,
+            ReconnectFailure = new Renci.SshNet.Common.SshConnectionException("Reconnect failed."),
+            ReconnectFailuresRemaining = 1
+        };
+
+        await Runner(Agent(), Pass, delayAsync: (delay, _) => { delays.Add(delay); return Task.CompletedTask; })
+            .SyncToHubWithReconnectAsync(worker, default);
+
+        Assert.Equal(2, worker.SyncCalls);
+        Assert.Equal(2, worker.ReconnectCalls);
+        Assert.Equal([5d, 20d], delays.Select(delay => delay.TotalSeconds));
+    }
+
+    [Fact]
     public async Task A_worker_sync_connection_failure_that_repeats_parks_as_environment()
     {
         var setup = NewWorkerSyncPlan();
         try
         {
+            var delays = new List<TimeSpan>();
             var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []))
             {
                 SyncFailure = new Renci.SshNet.Common.SshConnectionException("Connection lost."),
-                SyncFailures = 2
+                SyncFailures = 4
             };
 
-            await Runner(Agent(), Pass, workerWorkspaces: workspaces, fleetOptions: setup.Options, healthMonitor: setup.Health)
+            await Runner(Agent(), Pass, delayAsync: (delay, _) => { delays.Add(delay); return Task.CompletedTask; },
+                    workerWorkspaces: workspaces, fleetOptions: setup.Options, healthMonitor: setup.Health)
                 .RunPlanAsync(setup.Plan.Id, default);
 
             PlanRecord after = Store.Get(setup.Plan.Id)!;
             Assert.Equal(PlanStatus.Blocked, after.Status);
             Assert.Equal(StepStatus.Parked, after.Steps[0].Status);
-            Assert.Equal(1, Assert.Single(workspaces.Sessions).ReconnectCalls);
+            FakeWorkerWorkspaceSession worker = Assert.Single(workspaces.Sessions);
+            Assert.Equal(4, worker.SyncCalls);
+            Assert.Equal(3, worker.ReconnectCalls);
+            Assert.Equal([5d, 20d, 60d], delays.Select(delay => delay.TotalSeconds));
             Assert.Equal("environment", Assert.Single(after.Events!, runEvent => runEvent.Kind == RunEventKind.StepParked).FailureSignature);
         }
         finally
@@ -877,19 +930,24 @@ public sealed partial class PlanRunnerTests : PlanTestBase
         var setup = NewWorkerSyncPlan();
         try
         {
+            var delays = new List<TimeSpan>();
             var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []))
             {
                 SyncFailure = new InvalidOperationException("Synthetic sync failure."),
                 SyncFailures = 1
             };
 
-            await Runner(Agent(), Pass, workerWorkspaces: workspaces, fleetOptions: setup.Options, healthMonitor: setup.Health)
+            await Runner(Agent(), Pass, delayAsync: (delay, _) => { delays.Add(delay); return Task.CompletedTask; },
+                    workerWorkspaces: workspaces, fleetOptions: setup.Options, healthMonitor: setup.Health)
                 .RunPlanAsync(setup.Plan.Id, default);
 
             PlanRecord after = Store.Get(setup.Plan.Id)!;
             Assert.Equal(PlanStatus.Blocked, after.Status);
             Assert.Equal(StepStatus.Parked, after.Steps[0].Status);
-            Assert.Equal(0, Assert.Single(workspaces.Sessions).ReconnectCalls);
+            FakeWorkerWorkspaceSession worker = Assert.Single(workspaces.Sessions);
+            Assert.Equal(1, worker.SyncCalls);
+            Assert.Equal(0, worker.ReconnectCalls);
+            Assert.DoesNotContain(delays, delay => delay != TimeSpan.Zero);
             Assert.Equal("environment", Assert.Single(after.Events!, runEvent => runEvent.Kind == RunEventKind.StepParked).FailureSignature);
         }
         finally
