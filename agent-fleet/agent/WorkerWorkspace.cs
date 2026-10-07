@@ -21,6 +21,8 @@ internal interface IWorkerWorkspaceSession : IDisposable
 {
     string Machine { get; }
     string Platform { get; }
+    TimeSpan CommandTimeout { get; }
+    Task<bool> AnswersAsync(CancellationToken cancellationToken);
     string SnapshotId();
     Dictionary<string, string> BaselineHashes();
     IDisposable Enter();
@@ -194,6 +196,7 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
 
     public string Machine { get; }
     public string Platform => _config.Platform;
+    public TimeSpan CommandTimeout => _commandTimeout;
     public string RemoteRoot { get; private set; }
     public string HubRoot => _hubRoot;
 
@@ -645,6 +648,18 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
         {
             _gate.Release();
         }
+    }
+
+    public async Task<bool> AnswersAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using SshCommand command = _ssh!.CreateCommand("echo fleet-alive");
+            command.CommandTimeout = TimeSpan.FromSeconds(10);
+            await command.ExecuteAsync(cancellationToken);
+            return command.Result.Contains("fleet-alive", StringComparison.Ordinal);
+        }
+        catch { return false; }
     }
 
     public async Task<string> RunCommandAsync(string command, string? workingDirectory, CancellationToken cancellationToken, string auditTool = "run_command")
