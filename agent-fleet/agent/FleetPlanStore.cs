@@ -441,7 +441,7 @@ internal sealed partial class FleetPlanStore
                 RecoveryScope = NormalizeRecoveryScope(recoveryScope) ?? NormalizeRecoveryScope(plan.RecoveryScope) ?? PlanRecoveryScope.AllowHubRescue,
                 HealChecks = NormalizeHealChecks(healChecks) ?? NormalizeHealChecks(plan.HealChecks) ?? PlanHealChecks.Auto,
                 AutoRetries = Math.Clamp(autoRetries ?? plan.AutoRetries ?? PlanAutoRetry.Default, 0, PlanAutoRetry.Max),
-                Review = PlanSecondOpinion.Normalize(review) ?? PlanSecondOpinion.Normalize(plan.Review) ?? PlanSecondOpinion.Auto,
+                Review = PlanSecondOpinion.Normalize(review) ?? PlanSecondOpinion.Normalize(plan.Review) ?? PlanSecondOpinion.Off,
                 Steps = steps
             };
             if (exportToProject)
