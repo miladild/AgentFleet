@@ -223,6 +223,9 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
 
         _sftp = new SftpClient(_config.Host, _config.Port, _config.User, new PrivateKeyFile(keyPath));
         _ssh = new SshClient(_config.Host, _config.Port, _config.User, new PrivateKeyFile(keyPath));
+        _sftp.OperationTimeout = TimeSpan.FromMinutes(2);
+        _sftp.KeepAliveInterval = TimeSpan.FromSeconds(30);
+        _ssh.KeepAliveInterval = TimeSpan.FromSeconds(30);
         _sftp.ConnectionInfo.Timeout = TimeSpan.FromSeconds(15);
         _ssh.ConnectionInfo.Timeout = TimeSpan.FromSeconds(15);
         SandboxSsh.Guard(_sftp, _config.HostKey, null);
