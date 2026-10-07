@@ -25,18 +25,32 @@ function Invoke-HiddenOn([string]$Project, [string]$HiddenDir) {
     $target = Join-Path $Project '.bench-hidden'
     New-Item -ItemType Directory -Path $target -Force | Out-Null
     Copy-Item (Join-Path $HiddenDir '*') $target -Recurse -Force
-    $passed = 0; $failed = 0; $ok = $true
+    $passed = 0; $failed = 0; $ok = $true; $timedOut = $false
     Push-Location $Project
     try {
         foreach ($file in Get-ChildItem $target -Filter '*.test.js') {
-            $output = (& node --test --test-reporter=tap ".bench-hidden/$($file.Name)" 2>&1 | Out-String)
-            if ($LASTEXITCODE -ne 0) { $ok = $false }
+            $stdout = [IO.Path]::GetTempFileName()
+            $stderr = [IO.Path]::GetTempFileName()
+            try {
+                $p = Start-Process -FilePath 'node' -ArgumentList @('--test', '--test-reporter=tap', '--test-timeout=60000', ".bench-hidden/$($file.Name)") -WorkingDirectory $Project -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
+                $null = $p.Handle
+                try { $p.PriorityClass = 'BelowNormal' } catch { }
+                if (-not $p.WaitForExit(120000)) {
+                    $timedOut = $true
+                    $ok = $false
+                    & taskkill.exe /F /T /PID $p.Id | Out-Null
+                    $p.WaitForExit()
+                }
+                if ($p.ExitCode -ne 0) { $ok = $false }
+                $output = (Get-Content -LiteralPath $stdout -Raw -ErrorAction SilentlyContinue) + (Get-Content -LiteralPath $stderr -Raw -ErrorAction SilentlyContinue)
+            }
+            finally { Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue }
             if ($output -match '(?m)^#\s*pass (\d+)') { $passed += [int]$Matches[1] }
             if ($output -match '(?m)^#\s*fail (\d+)') { $failed += [int]$Matches[1] }
         }
     }
     finally { Pop-Location }
-    return [pscustomobject]@{ Ok = ($ok -and $passed -gt 0); Passed = $passed; Failed = $failed }
+    return [pscustomobject]@{ Ok = ($ok -and $passed -gt 0); Passed = $passed; Failed = $failed; TimedOut = $timedOut }
 }
 
 try {
