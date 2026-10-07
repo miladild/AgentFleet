@@ -1082,7 +1082,7 @@ internal sealed partial class PlanRunner
 
                     if (model.Workspace is not null)
                     {
-                        await model.Workspace.SyncToHubAsync(cancellationToken);
+                        await SyncToHubWithReconnectAsync(model.Workspace, cancellationToken);
                         _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.WorkspaceSynced, tier, model.Machine,
                             "Synced the worker project after verification; the checked changes are now in the hub checkout.",
                             modelNode: model.ModelNode, workspaceNode: model.Machine);
@@ -1650,13 +1650,13 @@ internal sealed partial class PlanRunner
                         modelNode: staged.ModelNode, workspaceNode: baseline.Machine);
                 check = await _tools.TryCompleteStepAsync(plan.Id, step.Id,
                     "Recovered worker edits after a backend restart.", cancellationToken, FilesToCreate(plan, step), deferCommit: true);
-                await session.SyncToHubAsync(cancellationToken);
+                await SyncToHubWithReconnectAsync(session, cancellationToken);
             }
             _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.WorkspaceSynced, step.Tier, baseline.Machine,
                 "Synced the reconciled worker workspace after restart verification.",
                 modelNode: staged.ModelNode, workspaceNode: baseline.Machine);
             _store.DeleteWorkerBaseline(plan.Id, step.Id, attempt);
-            await session.RefreshFromHubAsync(cancellationToken);
+            await RefreshFromHubWithReconnectAsync(session, cancellationToken);
 
             var recoveredAttempt = new ModelAttemptResult(step.Id, "Recovered worker edits after a backend restart.", null,
                 ShouldVerify: true, Machine: baseline.Machine, ModelNode: staged.ModelNode,
@@ -2312,6 +2312,34 @@ internal sealed partial class PlanRunner
         return false;
     }
 
+    private async Task SyncToHubWithReconnectAsync(IWorkerWorkspaceSession worker, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await worker.SyncToHubAsync(cancellationToken);
+        }
+        catch (Exception exception) when (IsWorkerTransportFailure(exception))
+        {
+            _logger.LogWarning(exception, "Worker {Machine} lost its connection while syncing changes to the hub; reconnecting and retrying once.", worker.Machine);
+            await worker.ReconnectAsync(cancellationToken);
+            await worker.SyncToHubAsync(cancellationToken);
+        }
+    }
+
+    private async Task RefreshFromHubWithReconnectAsync(IWorkerWorkspaceSession worker, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await worker.RefreshFromHubAsync(cancellationToken);
+        }
+        catch (Exception exception) when (IsWorkerTransportFailure(exception))
+        {
+            _logger.LogWarning(exception, "Worker {Machine} lost its connection while refreshing from the hub; reconnecting and retrying once.", worker.Machine);
+            await worker.ReconnectAsync(cancellationToken);
+            await worker.RefreshFromHubAsync(cancellationToken);
+        }
+    }
+
     private async Task<bool> RunParallelGroupAsync(PlanRecord plan, IReadOnlyList<PlanStep> steps, CancellationToken cancellationToken)
     {
         // Only the first model attempt runs concurrently. The runner waits for every edit to finish,
@@ -2682,7 +2710,7 @@ internal sealed partial class PlanRunner
                 // verification and any retry see the same project state as the canonical checkout.
                 if (worker is not null)
                 {
-                    await worker.SyncToHubAsync(CancellationToken.None);
+                    await SyncToHubWithReconnectAsync(worker, CancellationToken.None);
                     _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.WorkspaceSynced, tier, machine,
                         "Synced worker file changes to the hub checkout before verification.",
                         modelNode: result.ModelNode ?? modelMachine, workspaceNode: machine);
@@ -2703,7 +2731,7 @@ internal sealed partial class PlanRunner
 
                 if (worker is not null)
                 {
-                    await worker.RefreshFromHubAsync(CancellationToken.None);
+                    await RefreshFromHubWithReconnectAsync(worker, CancellationToken.None);
                     result = result with { Workspace = worker };
                 }
             }
