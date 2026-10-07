@@ -28,6 +28,7 @@ internal interface IWorkerWorkspaceSession : IDisposable
     IDisposable Enter();
     Task SyncToHubAsync(CancellationToken cancellationToken);
     Task RefreshFromHubAsync(CancellationToken cancellationToken);
+    Task ReconnectAsync(CancellationToken cancellationToken);
 }
 
 internal sealed class WorkerCommandTimeoutException(string message, Exception innerException)
@@ -236,6 +237,17 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
         _sftp.Connect();
         _ssh.Connect();
         ValidateWorkerAccount();
+    }
+
+    public Task ReconnectAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        try { _sftp?.Dispose(); } catch { }
+        try { _ssh?.Dispose(); } catch { }
+        _sftp = null;
+        _ssh = null;
+        Connect();
+        return Task.CompletedTask;
     }
 
     private void ValidateWorkerAccount()

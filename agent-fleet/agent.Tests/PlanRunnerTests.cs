@@ -135,9 +135,10 @@ public sealed partial class PlanRunnerTests : PlanTestBase
 
     private PlanRunner Runner(FakeStepAgent agent, Func<string, string> verify, TimeSpan? timeout = null, ISleepGuard? sleepGuard = null,
         Func<int, TimeSpan>? transientDelay = null, Func<TimeSpan, CancellationToken, Task>? delayAsync = null,
-        IWorkerWorkspaceManager? workerWorkspaces = null, Func<DateTimeOffset>? utcNow = null, IPlanNotifier? notifier = null) =>
+        IWorkerWorkspaceManager? workerWorkspaces = null, Func<DateTimeOffset>? utcNow = null, IPlanNotifier? notifier = null,
+        FleetOptions? fleetOptions = null, FleetHealthMonitor? healthMonitor = null) =>
         new(Store, new PlanTools(Store, Valid, (command, _, _) => Task.FromResult(verify(command))), agent, NullLogger.Instance, timeout,
-            transientDelay: transientDelay ?? (_ => TimeSpan.Zero), sleepGuard: sleepGuard,
+            transientDelay: transientDelay ?? (_ => TimeSpan.Zero), sleepGuard: sleepGuard, fleetOptions: fleetOptions, healthMonitor: healthMonitor,
             workerWorkspaces: workerWorkspaces, delayAsync: delayAsync ?? ((_, _) => Task.CompletedTask), utcNow: utcNow, notifier: notifier);
 
     private static string Pass(string _) => "Exit code: 0\n--- stdout ---\nok";
@@ -181,6 +182,24 @@ public sealed partial class PlanRunnerTests : PlanTestBase
         return FleetOptions.Load(configuration, configStore);
     }
 
+    private (PlanRecord Plan, FleetOptions Options, FleetHealthMonitor Health, string Project) NewWorkerSyncPlan()
+    {
+        string project = Path.Combine(Path.GetTempPath(), "fleet-sync-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(project);
+        File.WriteAllText(Path.Combine(project, "a.cs"), "class Sample { }\n");
+        var worker = new FleetNodeConfig("worker-a", "http://worker.example.test/v1", "m", "worker", "standard",
+            Workspace: new FleetWorkerWorkspaceConfig("worker.example.test", "worker", "C:/fleet-test/worker-key.pem",
+                "SHA256:synthetic-host-key", "/tmp/fleet-test/workspaces", "linux"));
+        FleetOptions options = OptionsWithNodes(worker);
+        var health = new FleetHealthMonitor(options, new HealthyNodeFactory());
+        PlanRecord plan = NewPlan(Step("sync worker edits", tier: "standard"));
+        plan = Store.Update(plan.Id, current => current with { WorkingDirectory = project })!;
+        plan = Store.SelectMachine(plan.Id, 1, "worker-a", out string? selectionError)!;
+        Assert.Null(selectionError);
+        plan = Store.Approve(plan.Id, autoRetries: 0)!;
+        return (plan, options, health, project);
+    }
+
     private sealed class HealthyNodeHandler : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -203,13 +222,28 @@ public sealed partial class PlanRunnerTests : PlanTestBase
     private sealed class FakeWorkerWorkspaceManager(WorkerWorkspaceRecoveryAnalysis recovery) : IWorkerWorkspaceManager
     {
         public List<string> StagedMachines { get; } = [];
+        public List<FakeWorkerWorkspaceSession> Sessions { get; } = [];
         public int ResumeCalls { get; private set; }
         public bool WorkerAnswers { get; set; } = true;
+        public Exception? SyncFailure { get; set; }
+        public int SyncFailures { get; set; }
+
+        private FakeWorkerWorkspaceSession CreateSession(string machine)
+        {
+            var session = new FakeWorkerWorkspaceSession(machine)
+            {
+                Answers = WorkerAnswers,
+                SyncFailure = SyncFailure,
+                SyncFailuresRemaining = SyncFailures
+            };
+            Sessions.Add(session);
+            return session;
+        }
 
         public Task<IWorkerWorkspaceSession> StageAsync(PlanRecord plan, PlanStep step, string machine, CancellationToken cancellationToken)
         {
             StagedMachines.Add(machine);
-            return Task.FromResult<IWorkerWorkspaceSession>(new FakeWorkerWorkspaceSession(machine) { Answers = WorkerAnswers });
+            return Task.FromResult<IWorkerWorkspaceSession>(CreateSession(machine));
         }
 
         public Task<WorkerWorkspaceResume> ResumeInterruptedAsync(PlanRecord plan, PlanStep step,
@@ -217,7 +251,7 @@ public sealed partial class PlanRunnerTests : PlanTestBase
         {
             ResumeCalls++;
             return Task.FromResult(new WorkerWorkspaceResume(recovery.Safe
-                ? new FakeWorkerWorkspaceSession(baseline.Machine) { Answers = WorkerAnswers }
+                ? CreateSession(baseline.Machine)
                 : null, recovery));
         }
     }
@@ -228,12 +262,29 @@ public sealed partial class PlanRunnerTests : PlanTestBase
         public string Platform => "linux";
         public TimeSpan CommandTimeout { get; set; } = TimeSpan.FromMinutes(2);
         public bool Answers { get; set; } = true;
+        public Exception? SyncFailure { get; set; }
+        public int SyncFailuresRemaining { get; set; }
+        public int ReconnectCalls { get; private set; }
         public Task<bool> AnswersAsync(CancellationToken cancellationToken) => Task.FromResult(Answers);
         public string SnapshotId() => "synthetic-snapshot";
         public Dictionary<string, string> BaselineHashes() => new(StringComparer.OrdinalIgnoreCase) { ["a.cs"] = "baseline" };
         public IDisposable Enter() => new NoopScope();
-        public Task SyncToHubAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task SyncToHubAsync(CancellationToken cancellationToken)
+        {
+            if (SyncFailuresRemaining > 0)
+            {
+                SyncFailuresRemaining--;
+                throw SyncFailure ?? new InvalidOperationException("Synthetic sync failure.");
+            }
+
+            return Task.CompletedTask;
+        }
         public Task RefreshFromHubAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task ReconnectAsync(CancellationToken cancellationToken)
+        {
+            ReconnectCalls++;
+            return Task.CompletedTask;
+        }
         public void Dispose() { }
 
         private sealed class NoopScope : IDisposable
@@ -765,6 +816,86 @@ public sealed partial class PlanRunnerTests : PlanTestBase
         Assert.Equal("environment", parked.FailureSignature);
         Assert.Contains("Worker workspace unavailable:", parked.Detail, StringComparison.Ordinal);
         Assert.DoesNotContain("The check never finished.", parked.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_worker_sync_connection_failure_reconnects_and_retries_once()
+    {
+        var setup = NewWorkerSyncPlan();
+        try
+        {
+            var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []))
+            {
+                SyncFailure = new Renci.SshNet.Common.SshConnectionException("Connection lost."),
+                SyncFailures = 1
+            };
+
+            await Runner(Agent(), Pass, workerWorkspaces: workspaces, fleetOptions: setup.Options, healthMonitor: setup.Health)
+                .RunPlanAsync(setup.Plan.Id, default);
+
+            PlanRecord after = Store.Get(setup.Plan.Id)!;
+            Assert.Equal(PlanStatus.Done, after.Status);
+            Assert.Equal(1, Assert.Single(workspaces.Sessions).ReconnectCalls);
+            Assert.DoesNotContain(after.Events!, runEvent => runEvent.Kind == RunEventKind.StepParked);
+        }
+        finally
+        {
+            Directory.Delete(setup.Project, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task A_worker_sync_connection_failure_that_repeats_parks_as_environment()
+    {
+        var setup = NewWorkerSyncPlan();
+        try
+        {
+            var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []))
+            {
+                SyncFailure = new Renci.SshNet.Common.SshConnectionException("Connection lost."),
+                SyncFailures = 2
+            };
+
+            await Runner(Agent(), Pass, workerWorkspaces: workspaces, fleetOptions: setup.Options, healthMonitor: setup.Health)
+                .RunPlanAsync(setup.Plan.Id, default);
+
+            PlanRecord after = Store.Get(setup.Plan.Id)!;
+            Assert.Equal(PlanStatus.Blocked, after.Status);
+            Assert.Equal(StepStatus.Parked, after.Steps[0].Status);
+            Assert.Equal(1, Assert.Single(workspaces.Sessions).ReconnectCalls);
+            Assert.Equal("environment", Assert.Single(after.Events!, runEvent => runEvent.Kind == RunEventKind.StepParked).FailureSignature);
+        }
+        finally
+        {
+            Directory.Delete(setup.Project, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task A_non_transport_worker_sync_failure_does_not_reconnect()
+    {
+        var setup = NewWorkerSyncPlan();
+        try
+        {
+            var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []))
+            {
+                SyncFailure = new InvalidOperationException("Synthetic sync failure."),
+                SyncFailures = 1
+            };
+
+            await Runner(Agent(), Pass, workerWorkspaces: workspaces, fleetOptions: setup.Options, healthMonitor: setup.Health)
+                .RunPlanAsync(setup.Plan.Id, default);
+
+            PlanRecord after = Store.Get(setup.Plan.Id)!;
+            Assert.Equal(PlanStatus.Blocked, after.Status);
+            Assert.Equal(StepStatus.Parked, after.Steps[0].Status);
+            Assert.Equal(0, Assert.Single(workspaces.Sessions).ReconnectCalls);
+            Assert.Equal("environment", Assert.Single(after.Events!, runEvent => runEvent.Kind == RunEventKind.StepParked).FailureSignature);
+        }
+        finally
+        {
+            Directory.Delete(setup.Project, recursive: true);
+        }
     }
 
     [Fact]
