@@ -21,6 +21,7 @@ param(
     [string]$BaseUrl = 'http://localhost:8010',
     [string]$OutDir,
     [int]$TimeoutMinutes = 120,
+    [ValidateRange(0.01, 10000)][double]$MaxHours = 4,
     [ValidateSet('auto', 'off')][string]$Review = 'auto',
     [switch]$WorkerOnly,
     [int]$AutoRetries = -1,
@@ -40,24 +41,76 @@ function Get-TaskIds {
     return $Tasks
 }
 
-function Invoke-Hidden([string]$Project, [string]$HiddenDir) {
+function Get-AsleepMinutes([datetime]$Start, [datetime]$End) {
+    if ($End -le $Start) { return 0.0 }
+    try {
+        $events = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-Kernel-Power'; Id = 506, 507; StartTime = $Start; EndTime = $End } -ErrorAction Stop | Sort-Object TimeCreated)
+        $pending = $null
+        $minutes = 0.0
+        foreach ($event in $events) {
+            if ($event.Id -eq 506) { $pending = $event.TimeCreated; continue }
+            if ($event.Id -eq 507 -and $null -ne $pending) {
+                $from = if ($pending -gt $Start) { $pending } else { $Start }
+                $to = if ($event.TimeCreated -lt $End) { $event.TimeCreated } else { $End }
+                if ($to -gt $from) { $minutes += ($to - $from).TotalMinutes }
+                $pending = $null
+            }
+        }
+        if ($null -ne $pending) {
+            $from = if ($pending -gt $Start) { $pending } else { $Start }
+            if ($End -gt $from) { $minutes += ($End - $from).TotalMinutes }
+        }
+        return [Math]::Round($minutes, 1)
+    }
+    catch { return 0.0 }
+}
+
+function Get-BatchAwakeMinutes([datetime]$Start, [datetime]$End) {
+    $asleep = Get-AsleepMinutes $Start $End
+    return [Math]::Round([Math]::Max(0, ($End - $Start).TotalMinutes - $asleep), 1)
+}
+
+function Test-MaxHours([double]$AwakeMinutes, [double]$Hours) {
+    return ($AwakeMinutes -gt ($Hours * 60))
+}
+
+function Invoke-Hidden([string]$Project, [string]$HiddenDir, [string]$EvidenceDir) {
     # The hidden tests are copied in only now, after the fleet is finished, and never leave this machine.
     $target = Join-Path $Project '.bench-hidden'
     if (Test-Path $target) { Remove-Item $target -Recurse -Force }
     New-Item -ItemType Directory -Path $target | Out-Null
     Copy-Item (Join-Path $HiddenDir '*') $target -Recurse
-    $passed = 0; $failed = 0; $ok = $true
+    if ($EvidenceDir) { $EvidenceDir = (New-Item -ItemType Directory -Path $EvidenceDir -Force).FullName }
+    $passed = 0; $failed = 0; $ok = $true; $timedOut = $false
     Push-Location $Project
     try {
         foreach ($file in Get-ChildItem $target -Filter '*.test.js') {
-            $output = (& node --test --test-reporter=tap ".bench-hidden/$($file.Name)" 2>&1 | Out-String)
-            if ($LASTEXITCODE -ne 0) { $ok = $false }
+            $stdout = [IO.Path]::GetTempFileName()
+            $stderr = [IO.Path]::GetTempFileName()
+            try {
+                $p = Start-Process -FilePath 'node' -ArgumentList @('--test', '--test-reporter=tap', '--test-timeout=60000', ".bench-hidden/$($file.Name)") -WorkingDirectory $Project -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
+                $null = $p.Handle
+                try { $p.PriorityClass = 'BelowNormal' } catch { }
+                if (-not $p.WaitForExit(120000)) {
+                    $timedOut = $true
+                    $ok = $false
+                    & taskkill.exe /F /T /PID $p.Id | Out-Null
+                    $p.WaitForExit()
+                }
+                if ($p.ExitCode -ne 0) { $ok = $false }
+                $output = (Get-Content -LiteralPath $stdout -Raw -ErrorAction SilentlyContinue) + (Get-Content -LiteralPath $stderr -Raw -ErrorAction SilentlyContinue)
+            }
+            finally {
+                Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
+            }
             if ($output -match '(?m)^#\s*pass (\d+)') { $passed += [int]$Matches[1] }
             if ($output -match '(?m)^#\s*fail (\d+)') { $failed += [int]$Matches[1] }
+            if ($EvidenceDir) { $output | Set-Content -LiteralPath (Join-Path $EvidenceDir "$($file.Name).tap.txt") -Encoding utf8 }
         }
     }
     finally { Pop-Location }
-    return [pscustomobject]@{ Ok = ($ok -and $passed -gt 0); Passed = $passed; Failed = $failed }
+    $summary = if ($timedOut) { 'timed out after 120 s (an infinite loop?)' } else { "pass $passed, fail $failed" }
+    return [pscustomobject]@{ Ok = ($ok -and $passed -gt 0); Passed = $passed; Failed = $failed; TimedOut = $timedOut; Summary = $summary }
 }
 
 function Invoke-Run([string]$Id, [int]$Number) {
@@ -74,7 +127,7 @@ function Invoke-Run([string]$Id, [int]$Number) {
     finally { Pop-Location }
 
     $result = [ordered]@{ task = $Id; run = $Number; planId = $null; status = 'not-started'; hiddenPass = $false; hiddenSummary = ''
-        falseAccept = $false; completed = $false; timedOut = $false; minutes = 0; stepsDone = 0; stepsParked = 0; rounds = 0; maxRung = 1
+        falseAccept = $false; completed = $false; timedOut = $false; hiddenTimedOut = $false; asleepMinutes = 0; minutes = 0; stepsDone = 0; stepsParked = 0; rounds = 0; maxRung = 1
         autoRetries = 0; reviewFailed = 0; reviewPassed = 0; parkCauses = ''; models = ''; blockedReason = ''; error = '' }
     $started = Get-Date
     try {
@@ -84,24 +137,24 @@ function Invoke-Run([string]$Id, [int]$Number) {
             $steps = @($task.steps | ForEach-Object { $copy = $_ | ConvertTo-Json -Depth 6 | ConvertFrom-Json; $copy.tier = $Tier; $copy })
         }
         $body = @{ title = "bench $Id #$Number"; goal = $task.goal; workingDirectory = $project; steps = $steps; source = 'bench' } | ConvertTo-Json -Depth 8
-        $created = Invoke-RestMethod -Uri "$BaseUrl/api/plans" -Method Post -ContentType 'application/json' -Body $body
+        $created = Invoke-RestMethod -Uri "$BaseUrl/api/plans" -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 30
         $result.planId = $created.id
         $approval = @{ review = $Review }
         if ($WorkerOnly) { $approval.recoveryScope = 'worker-only' }
         if ($AutoRetries -ge 0) { $approval.autoRetries = $AutoRetries }
-        $null = Invoke-RestMethod -Uri "$BaseUrl/api/plans/$($created.id)/approve" -Method Post -ContentType 'application/json' -Body ($approval | ConvertTo-Json)
+        $null = Invoke-RestMethod -Uri "$BaseUrl/api/plans/$($created.id)/approve" -Method Post -ContentType 'application/json' -Body ($approval | ConvertTo-Json) -TimeoutSec 30
 
         $deadline = $started.AddMinutes($TimeoutMinutes)
         $plan = $null
         while ((Get-Date) -lt $deadline) {
             Start-Sleep -Seconds 15
-            $plan = Invoke-RestMethod "$BaseUrl/api/plans/$($created.id)"
+            $plan = Invoke-RestMethod -Uri "$BaseUrl/api/plans/$($created.id)" -TimeoutSec 30
             if ($plan.status -in 'done', 'blocked', 'rejected') { break }
         }
         if ($plan.status -notin 'done', 'blocked', 'rejected') {
             $result.timedOut = $true
-            try { $null = Invoke-RestMethod -Uri "$BaseUrl/api/plans/$($created.id)/stop" -Method Post } catch { }
-            $plan = Invoke-RestMethod "$BaseUrl/api/plans/$($created.id)"
+            try { $null = Invoke-RestMethod -Uri "$BaseUrl/api/plans/$($created.id)/stop" -Method Post -TimeoutSec 30 } catch { }
+            $plan = Invoke-RestMethod -Uri "$BaseUrl/api/plans/$($created.id)" -TimeoutSec 30
         }
 
         $events = @($plan.events)
@@ -125,17 +178,24 @@ function Invoke-Run([string]$Id, [int]$Number) {
     catch { $result.error = $_.Exception.Message }
     $result.minutes = [Math]::Round(((Get-Date) - $started).TotalMinutes, 1)
 
-    $hidden = Invoke-Hidden $project (Join-Path $tasksRoot "$Id\hidden")
+    $hidden = Invoke-Hidden $project (Join-Path $tasksRoot "$Id\hidden") (Join-Path $OutDir "$Id-$Number\hidden")
     $result.hiddenPass = $hidden.Ok
-    $result.hiddenSummary = "pass $($hidden.Passed), fail $($hidden.Failed)"
+    $result.hiddenTimedOut = $hidden.TimedOut
+    $result.hiddenSummary = $hidden.Summary
     $result.falseAccept = ($result.status -eq 'done' -and -not $hidden.Ok)
     $result.completed = ($result.status -eq 'done' -and $hidden.Ok)
+    $result.asleepMinutes = Get-AsleepMinutes $started (Get-Date)
     return [pscustomobject]$result
 }
 
+$batchStarted = Get-Date
+$stopReason = ''
 $results = @()
 foreach ($id in Get-TaskIds) {
     for ($run = 1; $run -le $Repeat; $run++) {
+        $now = Get-Date
+        $awakeMinutes = Get-BatchAwakeMinutes $batchStarted $now
+        if (Test-MaxHours $awakeMinutes $MaxHours) { $stopReason = 'stopped: MaxHours'; break }
         Write-Host ("[{0}] {1} run {2} ..." -f (Get-Date -Format 'HH:mm:ss'), $id, $run)
         $r = Invoke-Run $id $run
         $results += $r
@@ -143,6 +203,7 @@ foreach ($id in Get-TaskIds) {
         Write-Host ("        {0}: plan {1}, hidden tests {2} ({3}), {4} min, {5} rounds, {6} auto retries, {7} reviews failed" -f
             $id, $r.status, $(if ($r.hiddenPass) { 'PASS' } else { 'FAIL' }), $r.hiddenSummary, $r.minutes, $r.rounds, $r.autoRetries, $r.reviewFailed)
     }
+    if ($stopReason) { break }
 }
 
 $results | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $OutDir 'results.json') -Encoding utf8
@@ -150,7 +211,7 @@ $results | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $OutDir
 $n = $results.Count
 $completed = @($results | Where-Object completed).Count
 $falseAccepts = @($results | Where-Object falseAccept)
-$stuck = @($results | Where-Object { $_.timedOut -or ($_.status -eq 'blocked' -and -not $_.blockedReason) -or $_.error })
+$stuck = @($results | Where-Object { $_.timedOut -or $_.hiddenTimedOut -or ($_.status -eq 'blocked' -and -not $_.blockedReason) -or $_.error })
 $environment = @($results | Where-Object { $_.parkCauses -match 'environment' })
 $rate = if ($n) { [Math]::Round(100.0 * $completed / $n, 0) } else { 0 }
 
@@ -159,11 +220,17 @@ $lines += "# Benchmark results ($n runs, $(Get-Date -Format 'yyyy-MM-dd HH:mm'))
 $lines += ''
 $lines += "Backend $BaseUrl; steps $(if ($Tier -eq 'as-written') { 'at the tiers specified by each task' } else { "all at the $Tier tier" }); second opinion $Review; $(if ($WorkerOnly) { 'worker only' } else { 'hub rescue allowed' }); automatic retries $(if ($AutoRetries -ge 0) { $AutoRetries } else { 'default' })."
 $lines += ''
-$lines += '| task | run | plan | hidden tests | minutes | rounds | rung | retries | reviews failed | parked causes | models |'
-$lines += '|---|---|---|---|---|---|---|---|---|---|---|'
+$lines += '| task | run | plan | hidden tests | minutes | asleep minutes | rounds | rung | retries | reviews failed | parked causes | models |'
+$lines += '|---|---|---|---|---:|---:|---:|---:|---:|---:|---|---|'
 foreach ($r in $results) {
-    $lines += "| $($r.task) | $($r.run) | $($r.status)$(if ($r.timedOut) { ' (timed out)' }) | $(if ($r.hiddenPass) { 'PASS' } else { 'FAIL' }) ($($r.hiddenSummary)) | $($r.minutes) | $($r.rounds) | $($r.maxRung) | $($r.autoRetries) | $($r.reviewFailed) | $($r.parkCauses) | $($r.models) |"
+    $lines += "| $($r.task) | $($r.run) | $($r.status)$(if ($r.timedOut) { ' (timed out)' }) | $(if ($r.hiddenPass) { 'PASS' } else { 'FAIL' }) ($($r.hiddenSummary)) | $($r.minutes) | $($r.asleepMinutes) | $($r.rounds) | $($r.maxRung) | $($r.autoRetries) | $($r.reviewFailed) | $($r.parkCauses) | $($r.models) |"
 }
+$batchEnded = Get-Date
+$batchAsleepMinutes = Get-AsleepMinutes $batchStarted $batchEnded
+$batchAwakeMinutes = Get-BatchAwakeMinutes $batchStarted $batchEnded
+$lines += ''
+$lines += "Batch awake time: $batchAwakeMinutes min (wall time $( [Math]::Round(($batchEnded - $batchStarted).TotalMinutes, 1) ) min; asleep $batchAsleepMinutes min)."
+if ($stopReason) { $lines += "Batch stopped: $stopReason" }
 $gate = @(
     @{ Name = 'No false accept (done while the hidden tests fail)'; Ok = ($falseAccepts.Count -eq 0); Detail = "$($falseAccepts.Count) of $n" },
     @{ Name = 'At least 80% done with the hidden tests passing'; Ok = ($rate -ge 80); Detail = "$completed of $n ($rate%)" },
