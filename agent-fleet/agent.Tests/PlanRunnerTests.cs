@@ -704,7 +704,8 @@ public sealed partial class PlanRunnerTests : PlanTestBase
         PlanRecord plan = InterruptedWorkerPlan(out _);
         var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], [])) { WorkerAnswers = true };
         var agent = Agent("I will make the check finish.");
-        Exception timeout = new Renci.SshNet.Common.SshOperationTimeoutException("Operation has timed out.");
+        Exception timeout = new WorkerCommandTimeoutException("Operation has timed out.",
+            new Renci.SshNet.Common.SshOperationTimeoutException("Operation has timed out."));
         if (wrapTimeout) timeout = new InvalidOperationException("wrapped timeout", timeout);
         int checks = 0;
 
@@ -734,7 +735,8 @@ public sealed partial class PlanRunnerTests : PlanTestBase
         var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], [])) { WorkerAnswers = false };
         FakeStepAgent agent = Agent();
 
-        await Runner(agent, _ => throw new Renci.SshNet.Common.SshOperationTimeoutException("Operation has timed out."),
+        await Runner(agent, _ => throw new WorkerCommandTimeoutException("Operation has timed out.",
+                new Renci.SshNet.Common.SshOperationTimeoutException("Operation has timed out.")),
             workerWorkspaces: workspaces).RunPlanAsync(plan.Id, default);
 
         PlanRecord after = Store.Get(plan.Id)!;
@@ -744,6 +746,25 @@ public sealed partial class PlanRunnerTests : PlanTestBase
         Assert.Equal("environment", parked.FailureSignature);
         Assert.Contains("Worker workspace unavailable:", parked.Detail, StringComparison.Ordinal);
         Assert.DoesNotContain(after.Events!, runEvent => runEvent.Kind == RunEventKind.CheckHealed);
+    }
+
+    [Fact]
+    public async Task A_plain_ssh_timeout_with_a_live_worker_remains_an_environment_park()
+    {
+        PlanRecord plan = InterruptedWorkerPlan(out _);
+        var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], [])) { WorkerAnswers = true };
+        FakeStepAgent agent = Agent();
+
+        await Runner(agent, _ => throw new Renci.SshNet.Common.SshOperationTimeoutException("Operation has timed out."),
+            workerWorkspaces: workspaces).RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Blocked, after.Status);
+        Assert.Equal(StepStatus.Parked, after.Steps[0].Status);
+        PlanRunEvent parked = Assert.Single(after.Events!, runEvent => runEvent.Kind == RunEventKind.StepParked);
+        Assert.Equal("environment", parked.FailureSignature);
+        Assert.Contains("Worker workspace unavailable:", parked.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("The check never finished.", parked.Detail, StringComparison.Ordinal);
     }
 
     [Fact]

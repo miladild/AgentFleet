@@ -1092,14 +1092,14 @@ internal sealed partial class PlanRunner
                 {
                     _logger.LogError(exception, "Worker verification or sync failed for plan {PlanId} step {StepId} on {Machine}.", plan.Id, step.Id, model.Machine);
                     IWorkerWorkspaceSession workspace = model.Workspace;
-                    bool sshTimedOut = false;
+                    bool commandTimedOut = false;
                     for (Exception? cause = exception; cause is not null; cause = cause.InnerException)
                     {
-                        if (cause is SshOperationTimeoutException) { sshTimedOut = true; break; }
+                        if (cause is WorkerCommandTimeoutException) { commandTimedOut = true; break; }
                     }
 
                     string failure;
-                    if (sshTimedOut && await workspace.AnswersAsync(cancellationToken))
+                    if (commandTimedOut && await workspace.AnswersAsync(cancellationToken))
                     {
                         failure = $"Error: command exceeded the {workspace.CommandTimeout.TotalSeconds:0}s timeout and was killed.\n\n" +
                             "The check never finished. A program or test that never ends is usually an infinite loop " +
