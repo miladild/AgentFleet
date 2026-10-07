@@ -61,17 +61,17 @@ internal static class PlanHealChecks
 /// </summary>
 /// <summary>
 /// Whether a model that did not write a step's code reads it against the step's text before the step is accepted on a
-/// passing check. On by default: a check the same model wrote the tests for only shows that the model agrees with itself.
+/// passing check. Off by default because C12 showed no benefit while B1 and C10 showed added cost; opt in with Auto.
 /// </summary>
 internal static class PlanSecondOpinion
 {
     public const string Auto = "auto";
     public const string Off = "off";
 
-    public static bool IsOn(PlanRecord plan) => !string.Equals(plan.Review, Off, StringComparison.OrdinalIgnoreCase);
+    public static bool IsOn(PlanRecord plan) => string.Equals(plan.Review, Auto, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>A step's own choice, when it has one, wins over the plan's.</summary>
-    public static bool IsOn(PlanRecord plan, PlanStep step) => !string.Equals(step.Review ?? plan.Review, Off, StringComparison.OrdinalIgnoreCase);
+    public static bool IsOn(PlanRecord plan, PlanStep step) => string.Equals(step.Review ?? plan.Review, Auto, StringComparison.OrdinalIgnoreCase);
 
     internal static string? Normalize(string? mode) =>
         mode?.Trim().ToLowerInvariant() switch

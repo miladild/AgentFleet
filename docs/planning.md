@@ -34,7 +34,7 @@ steps, and checks each step with a real command instead of trusting itself.
    their saved recovery scope. **Broken checks** decides what happens when a step's check is itself broken rather than
    failing (see below): **Fix automatically**, the default, or **Ask me first**. **Second opinion** chooses whether a model
    that did not write the code reads each step's changed files against the step's text, and answers pass or fail, before
-   the step is accepted: **A second model reads each step**, the default, or **Off**. The reviewer is the hub model when
+   the step is accepted: **Off**, the default, or **A second model reads each step**. The reviewer is the hub model when
    hub rescue is allowed and the hub did not do the work, otherwise another machine; it can only read. It costs one extra
    model call per step and is skipped when the step names no files, nothing it changed could be read, or no independent
    machine is available. If the reviewer times out or cannot answer, the step is accepted on its check. On fail, the

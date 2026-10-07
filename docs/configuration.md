@@ -32,7 +32,7 @@ fallback, found 2."
   "mcpServers": { ... },
   "sandbox": { ... },
   "history": { "deleteAfterDays": 90 },
-  "notifyUrl": "http://192.168.1.50:8080/fleet"
+  "notifyUrl": "http://192.0.2.10:8080/fleet"
 }
 ```
 
@@ -199,7 +199,7 @@ The backend answers these on port 8000. They are what the web UI and the VS Code
 | `GET /api/fleet-config/models?url=` | Models installed at an Ollama address |
 | `GET`, `POST /api/fleet-mode`, `/api/plan-mode` | The two switches |
 | `GET /api/plans`, `/api/plans/{id}`, `/api/plans/{id}/markdown`, `/api/plans/{id}/report` | Plans, a readable copy, and the run report |
-| `POST /api/plans/{id}/approve`, `/reject`, `/stop` | Act on a plan. Approve accepts `recoveryScope` (`allow-hub-rescue`, the default, or `worker-only`), `healChecks` (`auto`, the default, or `ask`), `autoRetries` (0 to 5, default 2: how many times a parked step is retried by the fleet itself before it waits for you), and `review` (`auto` or `off`, default `auto`: whether a second opinion reviewer reads each step's changed files) |
+| `POST /api/plans/{id}/approve`, `/reject`, `/stop` | Act on a plan. Approve accepts `recoveryScope` (`allow-hub-rescue`, the default, or `worker-only`), `healChecks` (`auto`, the default, or `ask`), `autoRetries` (0 to 5, default 2: how many times a parked step is retried by the fleet itself before it waits for you), and `review` (`auto` or `off`, default `off`: whether a second opinion reviewer reads each step's changed files) |
 | `POST /api/plans/{id}/retry?step=`, `/skip?step=` | Try one parked or stopped step again with a fresh repair ladder, or count it as done without its check; the rest of the plan is left alone |
 | `POST /api/plans` | Save a plan written elsewhere (the VS Code extension's Copilot tool uses it): `title`, `goal`, `workingDirectory` and `steps` as in `propose_plan`; each step may also include optional `retries` (0 to 5), `rescue` (`worker-only` or `allow-hub-rescue`), and `review` (`off` or `auto`) to override the plan's settings for that step only; unknown values are ignored. `dryRun` only reviews it, `approve` starts it. A plan that would fail is refused with its `problems` |
 | `GET`, `PUT`, `DELETE /api/sessions[/{id}]` | Saved conversations (the visible chats of the durable record) |

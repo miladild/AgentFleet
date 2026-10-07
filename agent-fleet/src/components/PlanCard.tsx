@@ -274,7 +274,7 @@ export function PlanCard({ planId }: { planId: string }) {
           recoveryScope: recoveryChoice ?? plan?.recoveryScope ?? "allow-hub-rescue",
           healChecks: healChoice ?? plan?.healChecks ?? "auto",
           autoRetries: retryChoice ?? plan?.autoRetries ?? 2,
-          review: reviewChoice ?? plan?.review ?? "auto",
+          review: reviewChoice ?? plan?.review ?? "off",
         }),
       });
       if (!res.ok) {
@@ -520,7 +520,7 @@ export function PlanCard({ planId }: { planId: string }) {
               <span>Second opinion</span>
               <select
                 aria-label="Second opinion on each step"
-                value={reviewChoice ?? plan.review ?? "auto"}
+                value={reviewChoice ?? plan.review ?? "off"}
                 onChange={(event) => setReviewChoice(event.target.value)}
                 disabled={busy}
                 title="A passing check only shows that the code and the tests the same model wrote agree. With this on, a model that did not write the code reads it against the step's text before the step is accepted, and sends it back if a requirement is unmet."

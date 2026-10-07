@@ -202,11 +202,12 @@ public sealed class PlanSecondOpinionTests : PlanTestBase
     }
 
     [Fact]
-    public async Task With_the_second_opinion_off_no_reviewer_is_asked()
+    public async Task Approval_without_a_review_choice_defaults_off_and_does_not_ask_a_reviewer()
     {
         (FleetOptions options, FleetHealthMonitor health) = HubFleet();
         PlanRecord plan = CreateOneStepPlan("test.txt", PlanRecoveryScope.AllowHubRescue);
-        Store.Approve(plan.Id, recoveryScope: PlanRecoveryScope.AllowHubRescue, autoRetries: 0, review: PlanSecondOpinion.Off);
+        PlanRecord approved = Store.Approve(plan.Id, recoveryScope: PlanRecoveryScope.AllowHubRescue, autoRetries: 0)!;
+        Assert.Equal(PlanSecondOpinion.Off, approved.Review);
 
         var agent = new FakeStepAgent((_, _, _) =>
         {
@@ -220,6 +221,29 @@ public sealed class PlanSecondOpinionTests : PlanTestBase
         Assert.Equal(PlanStatus.Done, after.Status);
         Assert.Empty(agent.Audits);
         Assert.Empty(after.Events!.Where(e => e.Kind == RunEventKind.StepReview));
+    }
+
+    [Fact]
+    public async Task A_saved_plan_with_no_review_setting_does_not_ask_a_reviewer()
+    {
+        (FleetOptions options, FleetHealthMonitor health) = HubFleet();
+        PlanRecord plan = CreateOneStepPlan("test.txt", PlanRecoveryScope.AllowHubRescue);
+        Store.Approve(plan.Id, recoveryScope: PlanRecoveryScope.AllowHubRescue, autoRetries: 0, review: PlanSecondOpinion.Auto);
+        Store.Update(plan.Id, saved => saved with { Review = null });
+
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            File.WriteAllText(Path.Combine(ProjectDirectory, "test.txt"), "version 1");
+            return Task.FromResult("Done.");
+        })
+        {
+            Auditor = _ => new StepAgentReply("PASS\nLooks good.", 0, false)
+        };
+
+        await RepairRunner(agent, _ => Pass("check"), options, health).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+        Assert.Empty(agent.Audits.Where(a => a.Role == PlanRunnerToolPolicy.StepReviewRole));
     }
 
     [Fact]
