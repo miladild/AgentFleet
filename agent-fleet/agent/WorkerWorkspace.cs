@@ -30,6 +30,9 @@ internal interface IWorkerWorkspaceSession : IDisposable
     Task RefreshFromHubAsync(CancellationToken cancellationToken);
 }
 
+internal sealed class WorkerCommandTimeoutException(string message, Exception innerException)
+    : TimeoutException(message, innerException);
+
 internal interface IWorkerWorkspaceManager
 {
     Task<IWorkerWorkspaceSession> StageAsync(PlanRecord plan, PlanStep step, string machine, CancellationToken cancellationToken);
@@ -674,7 +677,14 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
             : $"cd {QuotePosix(directory)} && {command}";
         using SshCommand remote = _ssh!.CreateCommand(remoteCommand);
         remote.CommandTimeout = _commandTimeout;
-        await remote.ExecuteAsync(cancellationToken);
+        try
+        {
+            await remote.ExecuteAsync(cancellationToken);
+        }
+        catch (SshOperationTimeoutException exception)
+        {
+            throw new WorkerCommandTimeoutException(exception.Message, exception);
+        }
         string stdout = remote.Result;
         string result = $"Exit code: {remote.ExitStatus}\n--- stdout ---\n{stdout}";
         if (!string.IsNullOrWhiteSpace(remote.Error)) result += $"\n--- stderr ---\n{remote.Error}";
