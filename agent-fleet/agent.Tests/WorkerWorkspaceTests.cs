@@ -1,7 +1,52 @@
+using System.Net;
+using System.Net.Sockets;
+using System.Reflection;
+using System.Security.Cryptography;
+using Microsoft.Extensions.Logging.Abstractions;
+using Renci.SshNet;
+
 namespace AgentFleet.Tests;
 
 public sealed class WorkerWorkspaceTests : PlanTestBase
 {
+    [Fact]
+    public async Task Connect_configures_sftp_timeout_and_keep_alives_before_connecting()
+    {
+        string keyPath = Path.Combine(Path.GetTempPath(), $"fleet-test-{Guid.NewGuid():N}.pem");
+        using RSA rsa = RSA.Create(2048);
+        File.WriteAllText(keyPath, rsa.ExportRSAPrivateKeyPem());
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        Task accepted = Task.Run(async () =>
+        {
+            using TcpClient client = await listener.AcceptTcpClientAsync();
+        });
+        using var session = new WorkerWorkspaceSession("worker-a",
+            new FleetWorkerWorkspaceConfig("localhost", "fleet-test", keyPath, "SHA256:synthetic-host-key",
+                "/tmp/fleet-test/workspaces", "linux", Port: port),
+            "C:/fleet-test/project", NullLogger.Instance, TimeSpan.FromSeconds(1));
+
+        try
+        {
+            Assert.ThrowsAny<Exception>(session.Connect);
+            await accepted;
+
+            var sftp = Assert.IsType<SftpClient>(typeof(WorkerWorkspaceSession)
+                .GetField("_sftp", BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(session));
+            var ssh = Assert.IsType<SshClient>(typeof(WorkerWorkspaceSession)
+                .GetField("_ssh", BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(session));
+            Assert.Equal(TimeSpan.FromMinutes(2), sftp.OperationTimeout);
+            Assert.Equal(TimeSpan.FromSeconds(30), sftp.KeepAliveInterval);
+            Assert.Equal(TimeSpan.FromSeconds(30), ssh.KeepAliveInterval);
+        }
+        finally
+        {
+            listener.Stop();
+            File.Delete(keyPath);
+        }
+    }
+
     [Fact]
     public void Windows_sftp_link_checks_skip_the_drive_pseudo_directory()
     {
