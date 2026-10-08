@@ -502,16 +502,14 @@ public sealed class MafContextWindowFitterTests
             $"Expected at least 2 numbered lines for the tool calls. Got {numberedLines.Count}.");
 
         // Check that the merged message has NOT been fragmented by embedded newlines.
+        // The plan specifies: "the merged message has NO line other than the header that does not start with its number".
         // If whitespace was NOT flattened, we'd have many non-numbered lines from the embedded
-        // newlines in the tool results. Count them.
+        // newlines in the tool results. Every line after the header must start with its number.
         var nonNumberedLines = lines.Skip(1)
             .Where(l => !string.IsNullOrWhiteSpace(l) && (!char.IsDigit(l[0]) || !l.Contains(". ")))
             .ToList();
 
-        // If flattening is applied, we should have few or no non-numbered lines.
-        // Without flattening, we would have 8+ non-numbered lines from the result strings.
-        Assert.True(nonNumberedLines.Count <= 3,
-            $"Found {nonNumberedLines.Count} non-numbered lines, suggesting whitespace was not flattened. " +
-            $"Lines: {string.Join("|", nonNumberedLines)}");
+        // Assert that all non-empty lines start with a number (no fragmentation).
+        Assert.Empty(nonNumberedLines);
     }
 }
