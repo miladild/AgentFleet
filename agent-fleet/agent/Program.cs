@@ -68,7 +68,7 @@ var app = builder.Build();
 
 // The context-window fitting policy: how to shorten conversations that exceed the model's window.
 ILoggerFactory fitLoggers = app.Services.GetRequiredService<ILoggerFactory>();
-Microsoft.Extensions.Logging.ILogger fitLog = fitLoggers.CreateLogger("AgentFleet.ContextFit");
+var fitLog = fitLoggers.CreateLogger("AgentFleet.ContextFit");
 IContextWindowFitter contextFitter = ContextWindowFitters.FromSetting(builder.Configuration["FLEET_CONTEXT_FIT"], fitLog);
 
 // Log a warning if a non-default context-window fitting policy is in use.
