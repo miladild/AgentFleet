@@ -18,18 +18,30 @@ namespace AgentFleet;
 internal sealed class MafContextWindowFitter : IContextWindowFitter
 {
     private int _fallbackCount = 0;
+    private int _fallbackLogged = 0;
     private readonly bool _collapseToolResults;
     private readonly ILogger _logger;
+    private readonly Func<CompactionStrategy, IEnumerable<ChatMessage>, ILogger, CancellationToken, Task<IEnumerable<ChatMessage>>> _compactAsync;
 
     public string Name => _collapseToolResults ? "maf-collapse" : "maf-truncate";
 
     /// <summary>Incremented when MAF throws and we fall back to the classic policy.</summary>
     internal int FallbackCount => _fallbackCount;
 
-    public MafContextWindowFitter(bool collapseToolResults, ILogger? logger = null)
+    /// <summary>
+    /// For testing: inject a custom compaction function (defaults to CompactionProvider.CompactAsync).
+    /// Allows tests to force failures to verify fallback behavior.
+    /// </summary>
+    public Func<CompactionStrategy, IEnumerable<ChatMessage>, ILogger, CancellationToken, Task<IEnumerable<ChatMessage>>>? CompactAsyncOverride { get; init; }
+
+    public MafContextWindowFitter(
+        bool collapseToolResults,
+        ILogger? logger = null)
     {
         _collapseToolResults = collapseToolResults;
         _logger = logger ?? NullLogger.Instance;
+        _compactAsync = (strategy, messages, log, ct) =>
+            CompactionProvider.CompactAsync(strategy, messages, log, ct);
     }
 
     public async ValueTask<IReadOnlyList<ChatMessage>> FitAsync(
@@ -88,8 +100,8 @@ internal sealed class MafContextWindowFitter : IContextWindowFitter
                     new TruncationCompactionStrategy(over, minimumPreservedGroups: 3, target: enough))
                 : new TruncationCompactionStrategy(over, minimumPreservedGroups: 3, target: enough);
 
-            IEnumerable<ChatMessage> compactedBody = await CompactionProvider.CompactAsync(
-                strategy, body, _logger, cancellationToken);
+            var compact = CompactAsyncOverride ?? _compactAsync;
+            IEnumerable<ChatMessage> compactedBody = await compact(strategy, body, _logger, cancellationToken);
 
             List<ChatMessage> result = head.Concat(compactedBody).ToList();
 
@@ -105,7 +117,10 @@ internal sealed class MafContextWindowFitter : IContextWindowFitter
         {
             // MAF is experimental; if it throws, fall back to classic.
             Interlocked.Increment(ref _fallbackCount);
-            _logger.LogWarning(ex, "MAF compaction failed; falling back to classic policy.");
+            if (Interlocked.CompareExchange(ref _fallbackLogged, 1, 0) == 0)
+            {
+                _logger.LogWarning(ex, "MAF compaction failed; falling back to classic policy.");
+            }
             return await ClassicContextWindowFitter.Instance.FitAsync(messages, options, budgetTokens, scale, cancellationToken);
         }
     }
@@ -118,14 +133,34 @@ internal sealed class MafContextWindowFitter : IContextWindowFitter
     }
 
     /// <summary>
-    /// Format a collapsed tool call group as a single line with minimal detail:
-    /// [earlier tool call] tool_name(args up to 160 chars); ...
+    /// Format a collapsed tool call group as a single line with minimal detail.
+    /// Each tool call is paired with its result: "name(args) -> result".
+    /// Arguments are cut at 160 chars with "...", results at 200 chars.
+    /// RemovedMarker is added at most once per group.
+    /// Unpaired results are shown on their own.
     /// </summary>
     private static string FormatCollapsed(CompactionMessageGroup group)
     {
         var lines = new List<string>();
+        bool needsMarker = false;
 
-        // Extract tool calls from this group.
+        // Build a map of call IDs to their results for pairing
+        var results = new Dictionary<string, string>();
+        foreach (ChatMessage message in group.Messages)
+        {
+            foreach (var content in message.Contents.OfType<FunctionResultContent>())
+            {
+                string resultText = content.Result?.ToString() ?? "";
+                if (resultText.Length > 200)
+                {
+                    resultText = resultText[..200];
+                    needsMarker = true;
+                }
+                results[content.CallId] = resultText;
+            }
+        }
+
+        // Pair calls with results
         foreach (ChatMessage message in group.Messages)
         {
             foreach (var content in message.Contents.OfType<FunctionCallContent>())
@@ -134,33 +169,41 @@ internal sealed class MafContextWindowFitter : IContextWindowFitter
                     ? JsonSerializer.Serialize(content.Arguments)
                     : "";
 
-                // Truncate arguments to 160 characters.
                 if (args.Length > 160)
                 {
-                    args = args[..160];
+                    args = args[..160] + "...";
                 }
 
-                lines.Add($"{content.Name}({args})");
-            }
-        }
-
-        // Extract results from this group.
-        foreach (ChatMessage message in group.Messages)
-        {
-            foreach (var content in message.Contents.OfType<FunctionResultContent>())
-            {
-                string resultText = content.Result?.ToString() ?? "";
-
-                // Truncate result to 200 characters.
-                if (resultText.Length > 200)
+                if (results.TryGetValue(content.CallId, out string? resultText))
                 {
-                    resultText = resultText[..200] + " " + ContextSizeChatClient.RemovedMarker;
+                    lines.Add($"{content.Name}({args}) -> {resultText}");
                 }
-
-                lines.Add(resultText);
+                else
+                {
+                    lines.Add($"{content.Name}({args})");
+                }
             }
         }
 
-        return "[earlier tool call] " + string.Join("; ", lines);
+        // Add any unpaired results
+        var pairedIds = group.Messages
+            .SelectMany(m => m.Contents.OfType<FunctionCallContent>())
+            .Select(c => c.CallId)
+            .ToHashSet();
+
+        foreach (var result in results)
+        {
+            if (!pairedIds.Contains(result.Key))
+            {
+                lines.Add(result.Value);
+            }
+        }
+
+        string content_str = "[earlier tool call] " + string.Join("; ", lines);
+        if (needsMarker && !content_str.Contains(ContextSizeChatClient.RemovedMarker))
+        {
+            content_str += " " + ContextSizeChatClient.RemovedMarker;
+        }
+        return content_str;
     }
 }
