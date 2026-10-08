@@ -133,6 +133,8 @@ public sealed class PlanSecondOpinionTests : PlanTestBase
         PlanRunEvent[] reviews = after.Events!.Where(e => e.Kind == RunEventKind.StepReview && e.FailureClass == "Passed").ToArray();
         Assert.Single(reviews);
         Assert.Contains("Reviewed by hub", reviews[0].Detail);
+        PlanRunEvent stepDone = Assert.Single(after.Events!, e => e.Kind == RunEventKind.StepDone);
+        Assert.Contains("Evidence: own check and a second opinion agreed.", stepDone.Detail);
     }
 
     [Fact]
@@ -221,6 +223,39 @@ public sealed class PlanSecondOpinionTests : PlanTestBase
         Assert.Equal(PlanStatus.Done, after.Status);
         Assert.Empty(agent.Audits);
         Assert.Empty(after.Events!.Where(e => e.Kind == RunEventKind.StepReview));
+    }
+
+    [Fact]
+    public async Task A_two_step_plan_without_review_labels_each_check_and_reports_zero_reviews()
+    {
+        string project = ProjectDirectory;
+        File.WriteAllText(Path.Combine(project, "first.txt"), "initial");
+        File.WriteAllText(Path.Combine(project, "second.txt"), "initial");
+        PlanStepInput[] steps =
+        [
+            new("first", "Write the first file", ["first.txt"], "check", "standard"),
+            new("second", "Write the second file", ["second.txt"], "check", "standard")
+        ];
+        PlanRecord plan = Store.Create("Plan", "goal", project, ["a"], ["q?"], ["r"], null, null,
+            steps, PlanRecoveryScope.WorkerOnly);
+        Store.SelectMachine(plan.Id, 1, "worker-a", out _);
+        Store.Approve(plan.Id, recoveryScope: PlanRecoveryScope.WorkerOnly, autoRetries: 0);
+
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            File.WriteAllText(Path.Combine(project, "first.txt"), "updated");
+            File.WriteAllText(Path.Combine(project, "second.txt"), "updated");
+            return Task.FromResult("Done.");
+        });
+
+        await RepairRunner(agent, _ => Pass("check")).RunPlanAsync(plan.Id, default);
+
+        PlanRunEvent[] stepDone = Store.Get(plan.Id)!.Events!
+            .Where(e => e.Kind == RunEventKind.StepDone).ToArray();
+        Assert.Equal(2, stepDone.Length);
+        Assert.All(stepDone, e => Assert.Contains("Evidence: own check only; no independent review.", e.Detail));
+        PlanRunEvent planDone = Assert.Single(Store.Get(plan.Id)!.Events!, e => e.Kind == RunEventKind.PlanDone);
+        Assert.Equal("Every step passed its check. Independent review: 0 of 2 steps.", planDone.Detail);
     }
 
     [Fact]

@@ -530,7 +530,11 @@ internal sealed partial class PlanRunner
             PlanRecord finished = _store.Get(planId)!;
             if (finished.Steps.All(candidate => candidate.Status == StepStatus.Done))
             {
-                _store.AddEvent(planId, null, null, RunEventKind.PlanDone, detail: "Every step passed its check.");
+                int reviewedSteps = finished.Steps.Count(step =>
+                    finished.Events?.Where(e => e.Kind == RunEventKind.StepDone && e.StepId == step.Id)
+                        .LastOrDefault() is { Attempt: int attempt } && HasPassedReview(finished, step.Id, attempt));
+                _store.AddEvent(planId, null, null, RunEventKind.PlanDone,
+                    detail: $"Every step passed its check. Independent review: {reviewedSteps} of {finished.Steps.Count} steps.");
                 FinishInContext(planId, PlanStatus.Done, "Every step passed its check.");
                 Notify(finished, "plan-done");
             }
@@ -1181,7 +1185,8 @@ internal sealed partial class PlanRunner
                             node: model.ModelNode ?? model.Machine, detail: $"`{step.Verify}` passed on the final synced checkout.",
                             modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round);
                     }
-                    _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.StepDone, tier, detail: JoinNotes(StrayDetail(plan, step), result.Restored));
+                    _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.StepDone, tier,
+                        detail: StepDoneDetail(plan, step, attempt, result.Restored));
                     RecordStepDone(plan, step, verification, model.ModelNode ?? model.Machine);
                     return true;
                 }
@@ -1698,7 +1703,7 @@ internal sealed partial class PlanRunner
                         detail: $"`{step.Verify}` passed on the reconciled worker snapshot.",
                         modelNode: staged.ModelNode, workspaceNode: baseline.Machine);
                 _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.StepDone, step.Tier,
-                    detail: JoinNotes(StrayDetail(plan, step), check.Restored));
+                    detail: StepDoneDetail(plan, step, attempt, check.Restored));
                 RecordStepDone(plan, step, verification, staged.ModelNode ?? baseline.Machine);
                 return null;
             }
@@ -2568,7 +2573,8 @@ internal sealed partial class PlanRunner
             {
                 _store.AddEvent(plan.Id, step.Id, 1, RunEventKind.CheckPassed, step.Tier,
                     detail: step.Verify is null ? "No automatic check for this step." : $"`{step.Verify}` passed.");
-                _store.AddEvent(plan.Id, step.Id, 1, RunEventKind.StepDone, step.Tier, detail: JoinNotes(StrayDetail(plan, step), check.Restored));
+                _store.AddEvent(plan.Id, step.Id, 1, RunEventKind.StepDone, step.Tier,
+                    detail: StepDoneDetail(plan, step, 1, check.Restored, allowReview: false));
                 RecordStepDone(plan, step, verification, ViaNode(attempt.Summary));
             }
             else
@@ -2915,6 +2921,18 @@ internal sealed partial class PlanRunner
 
     private static string JoinNotes(string first, string? second) =>
         string.IsNullOrWhiteSpace(second) ? first : string.IsNullOrWhiteSpace(first) ? second : $"{first} {second}";
+
+    private string StepDoneDetail(PlanRecord plan, PlanStep step, int attempt, string? restored, bool allowReview = true)
+    {
+        string evidence = allowReview && HasPassedReview(_store.Get(plan.Id)!, step.Id, attempt)
+            ? "Evidence: own check and a second opinion agreed."
+            : "Evidence: own check only; no independent review.";
+        return JoinNotes(JoinNotes(StrayDetail(plan, step), restored), evidence);
+    }
+
+    private static bool HasPassedReview(PlanRecord plan, int stepId, int attempt) =>
+        plan.Events?.Any(e => e.Kind == RunEventKind.StepReview && e.StepId == stepId &&
+            e.Attempt == attempt && e.FailureClass == "Passed") == true;
 
     private string StrayDetail(PlanRecord plan, PlanStep step)
     {
