@@ -64,7 +64,18 @@ builder.Services.AddHostedService(services => services.GetRequiredService<Contex
 // How much conversation each model sees, when a machine does not set its own (see OllamaNodeClient).
 int defaultContextLength = OllamaNodeClient.ConfiguredDefault(builder.Configuration["FLEET_CONTEXT_LENGTH"]);
 
+// The context-window fitting policy: how to shorten conversations that exceed the model's window.
+IContextWindowFitter contextFitter = ContextWindowFitters.FromSetting(builder.Configuration["FLEET_CONTEXT_FIT"], null);
+
 var app = builder.Build();
+
+// Log a warning if a non-default context-window fitting policy is in use.
+if (contextFitter.Name != "classic")
+{
+    app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("AgentFleet.ContextFit").LogWarning(
+        "Context-window policy \"{Name}\" is experimental; unset FLEET_CONTEXT_FIT to return to the default.", contextFitter.Name);
+}
+
 RequestGuard.Use(app, RequestGuard.ParseAllowedNames(builder.Configuration["FLEET_ALLOWED_HOSTS"]));
 FleetHealthMonitor healthMonitor = app.Services.GetRequiredService<FleetHealthMonitor>();
 FleetModeService modeService = app.Services.GetRequiredService<FleetModeService>();
@@ -114,7 +125,8 @@ FleetRoutingChatClient BuildRouter(FleetConfig config)
                 node.ContextLength ?? defaultContextLength,
                 fleetOptions.NetworkTimeout,
                 loggerFactory.CreateLogger($"AgentFleet.Node.{node.Name}"),
-                node.Thinking),
+                node.Thinking,
+                fitter: contextFitter),
             node,
             healthMonitor,
             loggerFactory.CreateLogger($"AgentFleet.Node.{node.Name}"),
