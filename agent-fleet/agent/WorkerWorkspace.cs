@@ -34,6 +34,8 @@ internal interface IWorkerWorkspaceSession : IDisposable
 internal sealed class WorkerCommandTimeoutException(string message, Exception innerException)
     : TimeoutException(message, innerException);
 
+internal sealed class WorkerPathRefusedException(string message) : Exception(message);
+
 internal interface IWorkerWorkspaceManager
 {
     Task<IWorkerWorkspaceSession> StageAsync(PlanRecord plan, PlanStep step, string machine, CancellationToken cancellationToken);
@@ -915,14 +917,18 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
         if (string.IsNullOrWhiteSpace(path)) return RemoteRoot;
         string relative = WorkerWorkspacePath.RelativeToProject(path, _hubRoot, RemoteRoot);
         string resolved = JoinRemote(RemoteRoot, relative);
-        EnsureNoLinkComponents(resolved);
+        try { EnsureNoLinkComponents(resolved); }
+        catch (UnauthorizedAccessException exception) when (exception.Message != "Worker tool paths must be absolute on the remote machine.")
+        {
+            throw new WorkerPathRefusedException(exception.Message);
+        }
         return resolved;
     }
 
     private string LocalRelativePath(string path)
     {
         try { return WorkerWorkspacePath.RelativeToProject(path, _hubRoot); }
-        catch (UnauthorizedAccessException) { return string.Empty; }
+        catch (WorkerPathRefusedException) { return string.Empty; }
     }
 
     private bool IsNamedByStep(string relative)
@@ -1229,19 +1235,26 @@ internal static class WorkerWorkspacePath
 
     public static string RelativeToProject(string path, string hubRoot, string? remoteRoot = null)
     {
-        string normalized = path.Trim().Replace('\\', '/');
-        string hub = hubRoot.Replace('\\', '/').TrimEnd('/');
-        if (normalized.StartsWith(hub + "/", StringComparison.OrdinalIgnoreCase)) normalized = normalized[(hub.Length + 1)..];
-        else if (string.Equals(normalized, hub, StringComparison.OrdinalIgnoreCase)) normalized = string.Empty;
-        else if (remoteRoot is not null)
+        string normalized = NormalizePath(path);
+        string[] roots = remoteRoot is null ? [NormalizePath(hubRoot)] : [NormalizePath(hubRoot), NormalizePath(remoteRoot)];
+        foreach (string root in roots)
         {
-            string remote = remoteRoot.TrimEnd('/');
-            if (normalized.StartsWith(remote + "/", StringComparison.Ordinal)) normalized = normalized[(remote.Length + 1)..];
-            else if (string.Equals(normalized, remote, StringComparison.Ordinal)) normalized = string.Empty;
+            StringComparison comparison = IsDriveRoot(root) ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            if (string.Equals(normalized, root, comparison))
+            {
+                normalized = string.Empty;
+                break;
+            }
+
+            if (normalized.StartsWith(root + "/", comparison))
+            {
+                normalized = normalized[(root.Length + 1)..];
+                break;
+            }
         }
 
         if (Regex.IsMatch(normalized, "^[A-Za-z]:/") || normalized.StartsWith("/", StringComparison.Ordinal))
-            throw new UnauthorizedAccessException("Absolute paths outside the staged project are not available to worker tools.");
+            throw new WorkerPathRefusedException("Absolute paths outside the staged project are not available to worker tools.");
 
         var parts = new List<string>();
         foreach (string part in normalized.Split('/', StringSplitOptions.RemoveEmptyEntries))
@@ -1249,7 +1262,7 @@ internal static class WorkerWorkspacePath
             if (part == ".") continue;
             if (part == "..")
             {
-                if (parts.Count == 0) throw new UnauthorizedAccessException("Path escapes the worker project workspace.");
+                if (parts.Count == 0) throw new WorkerPathRefusedException("Path escapes the worker project workspace.");
                 parts.RemoveAt(parts.Count - 1);
             }
             else parts.Add(part);
@@ -1257,6 +1270,16 @@ internal static class WorkerWorkspacePath
 
         return string.Join('/', parts);
     }
+
+    private static string NormalizePath(string path)
+    {
+        string normalized = path.Trim().Replace('\\', '/').TrimEnd('/');
+        return Regex.IsMatch(normalized, "^/[A-Za-z]:($|/)", RegexOptions.CultureInvariant)
+            ? normalized[1..]
+            : normalized;
+    }
+
+    private static bool IsDriveRoot(string path) => Regex.IsMatch(path, "^[A-Za-z]:($|/)", RegexOptions.CultureInvariant);
 }
 
 /// <summary>One dispatch point keeps normal chat on the hub and approved plan tools on their selected worker.</summary>

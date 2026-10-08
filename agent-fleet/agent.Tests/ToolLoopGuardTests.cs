@@ -283,6 +283,57 @@ public sealed class ToolLoopGuardTests
         Assert.All(results, result => Assert.DoesNotContain("Error: write_file was called without", result));
     }
 
+    private static async Task<string[]> RunRefusedPathAsync(bool fromRunner, int calls)
+    {
+        string Read(string path) => throw new WorkerPathRefusedException("Absolute paths outside the staged project are not available to worker tools.");
+        AITool read = AIFunctionFactory.Create((Func<string, string>)Read, "read_file", "Reads a file.");
+        var model = new RepeatingModel(round => Call("p" + round), calls);
+        IChatClient client = new ChatClientBuilder(model)
+            .UseFunctionInvocation(null, options =>
+            {
+                options.MaximumIterationsPerRequest = 40;
+                options.FunctionInvoker = async (context, cancellationToken) =>
+                {
+                    object? result = await ToolLoopGuard.InvokeAsync(context, fromRunner, cancellationToken);
+                    return ToolLoopGuard.Apply(context, result);
+                };
+            })
+            .Build();
+
+        ChatResponse response = await client.GetResponseAsync("carry out the step", new ChatOptions { Tools = [read] });
+        return response.Messages.SelectMany(message => message.Contents).OfType<FunctionResultContent>()
+            .Select(content => content.Result?.ToString() ?? string.Empty).ToArray();
+    }
+
+    [Fact]
+    public async Task A_refused_path_is_returned_to_the_runner_with_a_relative_path_hint()
+    {
+        string[] results = await RunRefusedPathAsync(fromRunner: true, calls: 1);
+
+        Assert.Single(results);
+        Assert.StartsWith("Error: Absolute paths outside the staged project", results[0]);
+        Assert.Contains("Use a path relative to the project folder", results[0]);
+    }
+
+    [Fact]
+    public async Task A_refused_path_is_left_to_the_function_invoker_outside_the_runner()
+    {
+        string[] results = await RunRefusedPathAsync(fromRunner: false, calls: 1);
+
+        Assert.Single(results);
+        Assert.DoesNotContain("Use a path relative to the project folder", results[0]);
+    }
+
+    [Fact]
+    public async Task Five_identical_refused_paths_get_a_nudge_on_three_and_end_the_turn_on_five()
+    {
+        string[] results = await RunRefusedPathAsync(fromRunner: true, calls: 8);
+
+        Assert.Equal(5, results.Length);
+        Assert.Contains("failed the same way 3 times in this turn", results[2]);
+        Assert.Contains("failed the same way 5 times in this turn, so the turn ends here", results[4]);
+    }
+
     [Theory]
     [InlineData("The arguments dictionary is missing a value for the required parameter 'content'. (Parameter 'arguments')", "content")]
     [InlineData("The arguments dictionary is missing a value for the required parameter 'oldText'. (Parameter 'arguments')", "oldText")]

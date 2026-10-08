@@ -109,6 +109,8 @@ internal static partial class PlanFailure
         int filesChanged = 0,
         bool editToolCalled = false)
     {
+        if (exception is WorkerPathRefusedException) return FailureClass.Unknown;
+
         string evidence = string.Join('\n', new[] { exception?.ToString(), checkOutput }.Where(value => !string.IsNullOrWhiteSpace(value)));
         if (EnvironmentFailure().IsMatch(evidence)) return FailureClass.Environment;
         if (IsInfrastructure(exception, evidence))
