@@ -48,7 +48,8 @@ internal static class OllamaNodeClient
         TimeSpan networkTimeout,
         ILogger logger,
         string thinking = NodeThinking.Off,
-        HttpMessageHandler? handler = null)
+        HttpMessageHandler? handler = null,
+        IContextWindowFitter? fitter = null)
     {
         IChatClient raw;
         if (string.Equals(api, "openai", StringComparison.OrdinalIgnoreCase))
@@ -65,7 +66,7 @@ internal static class OllamaNodeClient
                 ? new HttpClient { BaseAddress = root, Timeout = networkTimeout }
                 : new HttpClient(handler) { BaseAddress = root, Timeout = networkTimeout };
             raw = new ContextSizeChatClient(new OllamaApiClient(http, model), http, model, contextLength, logger,
-                thinkingOff: NodeThinking.Normalize(thinking) == NodeThinking.Off);
+                thinkingOff: NodeThinking.Normalize(thinking) == NodeThinking.Off, fitter: fitter);
         }
 
         // Works around a known, open Ollama bug (ollama/ollama#18530, #18563) where its qwen3-coder tool-call parser can
@@ -81,7 +82,7 @@ internal static class OllamaNodeClient
 /// to the processor at 32K and takes minutes per call). A size, once used, is kept for twenty minutes so a conversation
 /// that grows does not make Ollama reload the model at every step down and up.
 /// </summary>
-internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, string model, int maximum, ILogger logger, bool thinkingOff = false) : DelegatingChatClient(inner)
+internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, string model, int maximum, ILogger logger, bool thinkingOff = false, IContextWindowFitter? fitter = null) : DelegatingChatClient(inner)
 {
     /// <summary>The smallest window a request asks for; the health probe asks for it when nothing is loaded.</summary>
     internal const int SmallestSize = 8192;
@@ -105,6 +106,7 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
     private int _kept;
     private DateTimeOffset _keptUntil;
     private double _scale = 1.0;
+    private readonly IContextWindowFitter _fitter = fitter ?? ClassicContextWindowFitter.Instance;
 
     // The latest turns stay whole when a conversation is shortened to fit: the model is in the middle of them.
     internal const int KeepRecentMessages = 6;
@@ -222,15 +224,16 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
         int estimate = EstimateTokens(messages, options);
         if (estimate * scale + 4096 > ceiling)
         {
-            IReadOnlyList<ChatMessage> fitted = FitToWindow(messages, options, ceiling - 4096, scale);
+            IReadOnlyList<ChatMessage> fitted = await _fitter.FitAsync(messages, options, ceiling - 4096, scale, cancellationToken);
             if (!ReferenceEquals(fitted, messages))
             {
                 int before = estimate;
                 messages = fitted;
                 estimate = EstimateTokens(messages, options);
+                string policy = _fitter.Name == "classic" ? "" : $" using {_fitter.Name}";
                 logger.LogInformation(
-                    "A conversation with {Model} outgrew its {Ceiling}-token window: left out its oldest tool calls and shortened old output, from about {Before} to {After} tokens, keeping the task and the latest turns.",
-                    model, ceiling, (int)(before * scale), (int)(estimate * scale));
+                    "A conversation with {Model} outgrew its {Ceiling}-token window: left out its oldest tool calls and shortened old output, from about {Before} to {After} tokens, keeping the task and the latest turns.{Policy}",
+                    model, ceiling, (int)(before * scale), (int)(estimate * scale), policy);
             }
         }
 
