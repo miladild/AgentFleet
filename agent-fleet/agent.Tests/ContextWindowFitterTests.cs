@@ -33,105 +33,6 @@ public sealed class ContextWindowFitterTests
         }
     }
 
-    private static ContextSizeChatClient Client(string showJson, int wanted, IContextWindowFitter? fitter = null)
-    {
-        var http = new HttpClient(new Show(showJson)) { BaseAddress = new Uri("http://node:11434/") };
-        return new ContextSizeChatClient(new Nothing(), http, "m", wanted, NullLogger.Instance, fitter: fitter);
-    }
-
-    private static IReadOnlyList<ChatMessage> Text(int characters) => [new ChatMessage(ChatRole.User, new string('x', characters))];
-
-    [Fact]
-    public void Classic_fitter_name_is_classic()
-    {
-        Assert.Equal("classic", ClassicContextWindowFitter.Instance.Name);
-    }
-
-    [Fact]
-    public async Task Classic_fitter_returns_same_instance_when_conversation_fits()
-    {
-        IReadOnlyList<ChatMessage> messages = Text(1_000);
-        IReadOnlyList<ChatMessage> fitted = await ClassicContextWindowFitter.Instance.FitAsync(messages, null, 10_000, 1.0, CancellationToken.None);
-
-        Assert.Same(fitted, messages);
-    }
-
-    [Fact]
-    public void Classic_fitter_with_context_size_client_behaves_as_before()
-    {
-        string task = "Implement the holidays. " + new string('t', 2_000);
-        List<ChatMessage> conversation =
-        [
-            new(ChatRole.System, "You carry out one plan step."),
-            new(ChatRole.User, task)
-        ];
-        for (int round = 0; round < 20; round++)
-        {
-            conversation.Add(new ChatMessage(ChatRole.Assistant, [new FunctionCallContent($"c{round}", "write_file", new Dictionary<string, object?> { ["path"] = "src/a.ts", ["content"] = new string('w', 3_000) })]));
-            conversation.Add(new ChatMessage(ChatRole.Tool, [new FunctionResultContent($"c{round}", new string('r', 4_000))]));
-        }
-
-        var inner = new Reports(10_000);
-        ContextSizeChatClient client = new(inner, new HttpClient(new Show("{}")) { BaseAddress = new Uri("http://node:11434/") }, "m", 32768, NullLogger.Instance, fitter: ClassicContextWindowFitter.Instance);
-        IReadOnlyList<ChatMessage> sent = null!;
-        inner.Seen = messages => sent = messages;
-
-        var task_ct = client.GetResponseAsync(conversation);
-        task_ct.Wait();
-
-        Assert.Single(inner.Sizes);
-        Assert.True(ContextSizeChatClient.EstimateTokens(sent, null) + 4096 <= 32768);
-        Assert.True(sent.Count < conversation.Count); // the oldest calls, each with its results, are left out
-        Assert.Equal(task, sent[1].Text);
-        ContextSizeTests.AssertCallsAreWholeAndAnswered(sent, conversation);
-    }
-
-    [Fact]
-    public void Context_fitter_parser_recognizes_classic()
-    {
-        Assert.Same(ClassicContextWindowFitter.Instance, ContextWindowFitters.FromSetting("classic", null));
-        Assert.Same(ClassicContextWindowFitter.Instance, ContextWindowFitters.FromSetting("CLASSIC", null));
-        Assert.Same(ClassicContextWindowFitter.Instance, ContextWindowFitters.FromSetting("   classic   ", null));
-    }
-
-    [Fact]
-    public void Context_fitter_parser_handles_null_and_empty()
-    {
-        Assert.Same(ClassicContextWindowFitter.Instance, ContextWindowFitters.FromSetting(null, null));
-        Assert.Same(ClassicContextWindowFitter.Instance, ContextWindowFitters.FromSetting("", null));
-        Assert.Same(ClassicContextWindowFitter.Instance, ContextWindowFitters.FromSetting("   ", null));
-    }
-
-    [Fact]
-    public void Context_fitter_parser_defaults_unknown_to_classic_with_warning()
-    {
-        var logger = new CollectingLogger();
-        IContextWindowFitter fitter = ContextWindowFitters.FromSetting("unknown-fitter", logger);
-
-        Assert.Same(ClassicContextWindowFitter.Instance, fitter);
-        Assert.NotEmpty(logger.Warnings);
-        Assert.Contains("unknown-fitter", logger.Warnings[0]);
-    }
-
-    // Helper for collecting log messages.
-    private sealed class CollectingLogger : Microsoft.Extensions.Logging.ILogger
-    {
-        public List<string> Warnings { get; } = [];
-
-        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
-
-        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
-
-        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
-        {
-            if (logLevel == Microsoft.Extensions.Logging.LogLevel.Warning)
-            {
-                Warnings.Add(formatter(state, exception));
-            }
-        }
-    }
-
-    // Answers with a prompt size the way Ollama reports it.
     private sealed class Reports(params long[] promptTokens) : IChatClient
     {
         public readonly List<int> Sizes = [];
@@ -158,5 +59,102 @@ public sealed class ContextWindowFitterTests
         public void Dispose()
         {
         }
+    }
+
+    private static IReadOnlyList<ChatMessage> Text(int characters) => [new ChatMessage(ChatRole.User, new string('x', characters))];
+
+    [Fact]
+    public void Classic_fitter_name_is_classic()
+    {
+        Assert.Equal("classic", ClassicContextWindowFitter.Instance.Name);
+    }
+
+    [Fact]
+    public async Task Classic_fitter_returns_same_instance_when_conversation_fits()
+    {
+        IReadOnlyList<ChatMessage> messages = Text(1_000);
+        IReadOnlyList<ChatMessage> fitted = await ClassicContextWindowFitter.Instance.FitAsync(messages, null, 10_000, 1.0, CancellationToken.None);
+
+        Assert.Same(fitted, messages);
+    }
+
+    [Fact]
+    public async Task Classic_fitter_with_context_size_client_behaves_as_before()
+    {
+        string task = "Implement the holidays. " + new string('t', 2_000);
+        List<ChatMessage> conversation =
+        [
+            new(ChatRole.System, "You carry out one plan step."),
+            new(ChatRole.User, task)
+        ];
+        for (int round = 0; round < 20; round++)
+        {
+            conversation.Add(new ChatMessage(ChatRole.Assistant, [new FunctionCallContent($"c{round}", "write_file", new Dictionary<string, object?> { ["path"] = "src/a.ts", ["content"] = new string('w', 3_000) })]));
+            conversation.Add(new ChatMessage(ChatRole.Tool, [new FunctionResultContent($"c{round}", new string('r', 4_000))]));
+        }
+
+        var inner = new Reports(10_000);
+        ContextSizeChatClient client = new(inner, new HttpClient(new Show("{}")) { BaseAddress = new Uri("http://node:11434/") }, "m", 32768, NullLogger.Instance, fitter: ClassicContextWindowFitter.Instance);
+        IReadOnlyList<ChatMessage> sent = null!;
+        inner.Seen = messages => sent = messages;
+
+        await client.GetResponseAsync(conversation);
+
+        Assert.Single(inner.Sizes);
+        Assert.True(ContextSizeChatClient.EstimateTokens(sent, null) + 4096 <= 32768);
+        Assert.True(sent.Count < conversation.Count); // the oldest calls, each with its results, are left out
+        Assert.Equal(task, sent[1].Text);
+        ContextSizeTests.AssertCallsAreWholeAndAnswered(sent, conversation);
+    }
+
+    [Fact]
+    public void Context_fitter_parser_recognizes_classic()
+    {
+        Assert.Same(ClassicContextWindowFitter.Instance, ContextWindowFitters.FromSetting("classic", null));
+        Assert.Same(ClassicContextWindowFitter.Instance, ContextWindowFitters.FromSetting("CLASSIC", null));
+        Assert.Same(ClassicContextWindowFitter.Instance, ContextWindowFitters.FromSetting("   classic   ", null));
+    }
+
+    [Fact]
+    public void Context_fitter_parser_handles_null_and_empty()
+    {
+        Assert.Same(ClassicContextWindowFitter.Instance, ContextWindowFitters.FromSetting(null, null));
+        Assert.Same(ClassicContextWindowFitter.Instance, ContextWindowFitters.FromSetting("", null));
+        Assert.Same(ClassicContextWindowFitter.Instance, ContextWindowFitters.FromSetting("   ", null));
+    }
+
+    [Fact]
+    public void Context_fitter_parser_recognizes_maf_truncate()
+    {
+        IContextWindowFitter fitter1 = ContextWindowFitters.FromSetting("maf-truncate", null);
+        IContextWindowFitter fitter2 = ContextWindowFitters.FromSetting("MAF-TRUNCATE", null);
+        IContextWindowFitter fitter3 = ContextWindowFitters.FromSetting("  maf-truncate  ", null);
+
+        Assert.Equal("maf-truncate", fitter1.Name);
+        Assert.Equal("maf-truncate", fitter2.Name);
+        Assert.Equal("maf-truncate", fitter3.Name);
+    }
+
+    [Fact]
+    public void Context_fitter_parser_recognizes_maf_collapse()
+    {
+        IContextWindowFitter fitter1 = ContextWindowFitters.FromSetting("maf-collapse", null);
+        IContextWindowFitter fitter2 = ContextWindowFitters.FromSetting("MAF-COLLAPSE", null);
+        IContextWindowFitter fitter3 = ContextWindowFitters.FromSetting("  maf-collapse  ", null);
+
+        Assert.Equal("maf-collapse", fitter1.Name);
+        Assert.Equal("maf-collapse", fitter2.Name);
+        Assert.Equal("maf-collapse", fitter3.Name);
+    }
+
+    [Fact]
+    public void Context_fitter_parser_defaults_unknown_to_classic_with_warning()
+    {
+        var logger = new ContextWindowTestHelper.CollectingLogger();
+        IContextWindowFitter fitter = ContextWindowFitters.FromSetting("unknown-fitter", logger);
+
+        Assert.Same(ClassicContextWindowFitter.Instance, fitter);
+        Assert.NotEmpty(logger.Warnings);
+        Assert.Contains("unknown-fitter", logger.Warnings[0]);
     }
 }

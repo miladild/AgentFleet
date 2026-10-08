@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
 
 namespace AgentFleet.Tests;
 
@@ -8,6 +9,24 @@ namespace AgentFleet.Tests;
 /// </summary>
 internal static class ContextWindowTestHelper
 {
+    /// <summary>Helper for collecting log messages in tests.</summary>
+    internal sealed class CollectingLogger : ILogger
+    {
+        public List<string> Warnings { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == LogLevel.Warning)
+            {
+                Warnings.Add(formatter(state, exception));
+            }
+        }
+    }
+
     /// <summary>
     /// Creates a byte-significant signature of a message for comparison by value (not reference).
     /// </summary>
