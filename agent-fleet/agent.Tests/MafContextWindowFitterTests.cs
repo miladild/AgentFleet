@@ -438,4 +438,80 @@ public sealed class MafContextWindowFitterTests
 
         Assert.Equal(0, mergedCount);
     }
+
+    // H1: Whitespace flattening - collapsed lines contain newlines and tabs which must be flattened to spaces.
+    [Fact]
+    public async Task H1_whitespace_flattening_collapsed_lines()
+    {
+        var fitter = new MafContextWindowFitter(collapseToolResults: true);
+
+        // Build a conversation with a large number of rounds to trigger compaction
+        List<ChatMessage> input = ContextWindowTestHelper.BuildConversation(35);
+
+        // Insert tool calls with results containing newlines, carriage returns, and tabs
+        // Insert at index 2, right after the system and task messages
+        input.Insert(2, new ChatMessage(ChatRole.Assistant,
+            [new FunctionCallContent("call1", "write_file",
+                new Dictionary<string, object?> { ["path"] = "file.txt", ["content"] = "hello world" })]));
+        input.Insert(3, new ChatMessage(ChatRole.Tool,
+            [new FunctionResultContent("call1", "File written:\nLine 1\r\nLine 2\twith\ttabs")]));
+
+        input.Insert(4, new ChatMessage(ChatRole.Assistant,
+            [new FunctionCallContent("call2", "read_file",
+                new Dictionary<string, object?> { ["path"] = "file.txt" })]));
+        input.Insert(5, new ChatMessage(ChatRole.Tool,
+            [new FunctionResultContent("call2", "Content:\nMultiple\n\nlines\r\nwith\r\rwhitespace")]));
+
+        // Fit with a tight budget to trigger collapse
+        IReadOnlyList<ChatMessage> fitted = await fitter.FitAsync(input, null, 20_000, 1.0, CancellationToken.None);
+
+        // Find the merged message (should have header "[earlier tool calls, shortened]")
+        var mergedMessages = fitted
+            .Where(m => m.Role == ChatRole.Assistant &&
+                        m.Contents.Count == 1 &&
+                        m.Contents[0] is TextContent t &&
+                        t.Text.StartsWith("[earlier tool calls, shortened]"))
+            .ToList();
+
+        // Must have at least one merged message
+        Assert.NotEmpty(mergedMessages);
+
+        var mergedText = ((TextContent)mergedMessages[0].Contents[0]).Text;
+
+        // Check precondition: if whitespace is NOT flattened, the merged text would contain
+        // the original newlines, carriage returns, and tabs from the tool results.
+        // The result strings are:
+        //   "File written:\nLine 1\r\nLine 2\twith\ttabs"
+        //   "Content:\nMultiple\n\nlines\r\nwith\r\rwhitespace"
+        // These contain 5 embedded \n + 3 embedded \r + 2 embedded \t = 10 embedded whitespace chars
+
+        // When split by '\n', without flattening we'd get many more array elements.
+        // With flattening, each tool result becomes one line: "File written: Line 1 Line 2 with tabs" (space-separated).
+        var lines = mergedText.Split('\n');
+
+        // First line is the header
+        Assert.Equal("[earlier tool calls, shortened]", lines[0]);
+
+        // Count of numbered lines: each should start with a digit and contain ". "
+        var numberedLines = lines.Skip(1)
+            .Where(l => !string.IsNullOrWhiteSpace(l) && char.IsDigit(l[0]) && l.Contains(". "))
+            .ToList();
+
+        // Must have at least 2 numbered lines for our 2 tool calls
+        Assert.True(numberedLines.Count >= 2,
+            $"Expected at least 2 numbered lines for the tool calls. Got {numberedLines.Count}.");
+
+        // Check that the merged message has NOT been fragmented by embedded newlines.
+        // If whitespace was NOT flattened, we'd have many non-numbered lines from the embedded
+        // newlines in the tool results. Count them.
+        var nonNumberedLines = lines.Skip(1)
+            .Where(l => !string.IsNullOrWhiteSpace(l) && (!char.IsDigit(l[0]) || !l.Contains(". ")))
+            .ToList();
+
+        // If flattening is applied, we should have few or no non-numbered lines.
+        // Without flattening, we would have 8+ non-numbered lines from the result strings.
+        Assert.True(nonNumberedLines.Count <= 3,
+            $"Found {nonNumberedLines.Count} non-numbered lines, suggesting whitespace was not flattened. " +
+            $"Lines: {string.Join("|", nonNumberedLines)}");
+    }
 }

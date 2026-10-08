@@ -17,6 +17,9 @@ namespace AgentFleet;
 /// </summary>
 internal sealed class MafContextWindowFitter : IContextWindowFitter
 {
+    private const string EarlierToolCallPrefix = "[earlier tool call] ";
+    private const string EarlierToolCallsHeader = "[earlier tool calls, shortened]";
+
     private int _fallbackCount = 0;
     private int _fallbackLogged = 0;
     private readonly bool _collapseToolResults;
@@ -151,6 +154,7 @@ internal sealed class MafContextWindowFitter : IContextWindowFitter
     /// <summary>
     /// Format a collapsed tool call group as a single line with minimal detail.
     /// Each tool call is paired with its result: "name(args) -> result".
+    /// Whitespace is flattened to single spaces before length cuts.
     /// Arguments are cut at 160 chars with "...", results at 200 chars.
     /// RemovedMarker is added at most once per group.
     /// Unpaired results are shown on their own.
@@ -167,6 +171,8 @@ internal sealed class MafContextWindowFitter : IContextWindowFitter
             foreach (var content in message.Contents.OfType<FunctionResultContent>())
             {
                 string resultText = content.Result?.ToString() ?? "";
+                // Flatten whitespace before applying length cut
+                resultText = FlattenWhitespace(resultText);
                 if (resultText.Length > 200)
                 {
                     resultText = resultText[..200];
@@ -184,6 +190,8 @@ internal sealed class MafContextWindowFitter : IContextWindowFitter
                 string args = content.Arguments is not null
                     ? JsonSerializer.Serialize(content.Arguments)
                     : "";
+                // Flatten whitespace before applying length cut
+                args = FlattenWhitespace(args);
 
                 if (args.Length > 160)
                 {
@@ -215,7 +223,7 @@ internal sealed class MafContextWindowFitter : IContextWindowFitter
             }
         }
 
-        string content_str = "[earlier tool call] " + string.Join("; ", lines);
+        string content_str = EarlierToolCallPrefix + string.Join("; ", lines);
         if (needsMarker && !content_str.Contains(ContextSizeChatClient.RemovedMarker))
         {
             content_str += " " + ContextSizeChatClient.RemovedMarker;
@@ -224,9 +232,17 @@ internal sealed class MafContextWindowFitter : IContextWindowFitter
     }
 
     /// <summary>
+    /// Flatten every run of whitespace (spaces, tabs, CR, LF) to a single space.
+    /// </summary>
+    private static string FlattenWhitespace(string text)
+    {
+        return System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ");
+    }
+
+    /// <summary>
     /// Merge consecutive collapsed messages into one per run.
-    /// A collapsed message is: role Assistant, one TextContent starting with "[earlier tool call] ".
-    /// Merges into: "[earlier tool calls, shortened]\n1. line1\n2. line2\n..."
+    /// A collapsed message is: role Assistant, one TextContent starting with EarlierToolCallPrefix.
+    /// Merges into: EarlierToolCallsHeader + "\n1. line1\n2. line2\n..."
     /// </summary>
     private static List<ChatMessage> MergeCollapsed(IEnumerable<ChatMessage> messages)
     {
@@ -238,7 +254,7 @@ internal sealed class MafContextWindowFitter : IContextWindowFitter
             bool isCollapsed = msg.Role == ChatRole.Assistant &&
                 msg.Contents.Count == 1 &&
                 msg.Contents[0] is TextContent textContent &&
-                textContent.Text.StartsWith("[earlier tool call] ", StringComparison.Ordinal);
+                textContent.Text.StartsWith(EarlierToolCallPrefix, StringComparison.Ordinal);
 
             if (isCollapsed)
             {
@@ -267,7 +283,7 @@ internal sealed class MafContextWindowFitter : IContextWindowFitter
 
     private static ChatMessage CreateMergedMessage(List<ChatMessage> collapsed)
     {
-        var lines = new List<string> { "[earlier tool calls, shortened]" };
+        var lines = new List<string> { EarlierToolCallsHeader };
         int lineNum = 1;
 
         foreach (var msg in collapsed)
@@ -275,10 +291,9 @@ internal sealed class MafContextWindowFitter : IContextWindowFitter
             var textContent = (TextContent)msg.Contents[0];
             string originalText = textContent.Text;
 
-            // Remove "[earlier tool call] " prefix
-            string prefix = "[earlier tool call] ";
-            string withoutPrefix = originalText.StartsWith(prefix, StringComparison.Ordinal)
-                ? originalText[prefix.Length..]
+            // Remove EarlierToolCallPrefix
+            string withoutPrefix = originalText.StartsWith(EarlierToolCallPrefix, StringComparison.Ordinal)
+                ? originalText[EarlierToolCallPrefix.Length..]
                 : originalText;
 
             lines.Add($"{lineNum}. {withoutPrefix}");
