@@ -63,9 +63,25 @@ public sealed class HubFileSystemToolsTests : IDisposable
 
         Assert.Contains("not found", await HubFileSystemTools.EditFileAsync(file, "absent", "x", null, default));
         Assert.StartsWith("Error: file not found", await HubFileSystemTools.EditFileAsync(Path.Combine(_root, "nope.txt"), "a", "b", null, default));
-        Assert.Contains("identical", await HubFileSystemTools.EditFileAsync(file, "hello", "hello", null, default));
+        Assert.Equal(
+            $"Unchanged: this edit changes nothing in {file} (oldText and newText are the same, or the file already contains the new text). The file is as it was. Run the tests with run_command to see what actually fails, or read the file and change something else.",
+            await HubFileSystemTools.EditFileAsync(file, "hello", "hello", null, default));
         Assert.Contains("must not be empty", await HubFileSystemTools.EditFileAsync(file, "", "x", null, default));
         Assert.Equal("hello\n", File.ReadAllText(file));
+    }
+
+    [Fact]
+    public async Task WriteFile_with_the_same_content_reports_unchanged_without_touching_the_file()
+    {
+        string file = Write("same.txt", "same content\n");
+        DateTime lastWrite = new(2001, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        File.SetLastWriteTimeUtc(file, lastWrite);
+
+        string result = await HubFileSystemTools.WriteFileAsync(file, "same content\n", default);
+
+        Assert.Equal($"Unchanged: {file} already has exactly this content; nothing was written. Run the tests with run_command to see what actually fails.", result);
+        Assert.Equal(lastWrite, File.GetLastWriteTimeUtc(file));
+        Assert.Equal("same content\n", File.ReadAllText(file));
     }
 
     [Fact]

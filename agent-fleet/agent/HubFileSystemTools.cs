@@ -70,6 +70,11 @@ internal static class HubFileSystemTools
     public static async Task<string> WriteFileAsync(string path, string content, CancellationToken cancellationToken)
     {
         string resolved = ResolvePath(path);
+        if (File.Exists(resolved) && await File.ReadAllTextAsync(resolved, cancellationToken) == content)
+        {
+            return $"Unchanged: {path} already has exactly this content; nothing was written. Run the tests with run_command to see what actually fails.";
+        }
+
         string? directory = Path.GetDirectoryName(resolved);
         if (!string.IsNullOrEmpty(directory))
         {
@@ -99,11 +104,6 @@ internal static class HubFileSystemTools
         if (string.IsNullOrEmpty(oldText))
         {
             return "Error: oldText must not be empty. Use write_file to create or fully replace a file.";
-        }
-
-        if (oldText == newText)
-        {
-            return "Error: oldText and newText are identical, so there is nothing to change.";
         }
 
         byte[] bytes = await File.ReadAllBytesAsync(resolved, cancellationToken);
@@ -137,18 +137,23 @@ internal static class HubFileSystemTools
                 "line breaks. Use read_file (with startLine and endLine) to copy the current text.";
         }
 
-        if (count > 1 && replaceAll != true)
-        {
-            return $"Error: oldText matches {count} places in {resolved}. Include more surrounding lines so it is " +
-                "unique, or set replaceAll to true to change every match.";
-        }
-
         int firstIndex = content.IndexOf(oldText, StringComparison.Ordinal);
         int firstLine = content.AsSpan(0, firstIndex).Count('\n') + 1;
 
         string updated = replaceAll == true
             ? content.Replace(oldText, newText, StringComparison.Ordinal)
             : string.Concat(content.AsSpan(0, firstIndex), newText, content.AsSpan(firstIndex + oldText.Length));
+
+        if (updated == content)
+        {
+            return $"Unchanged: this edit changes nothing in {path} (oldText and newText are the same, or the file already contains the new text). The file is as it was. Run the tests with run_command to see what actually fails, or read the file and change something else.";
+        }
+
+        if (count > 1 && replaceAll != true)
+        {
+            return $"Error: oldText matches {count} places in {resolved}. Include more surrounding lines so it is " +
+                "unique, or set replaceAll to true to change every match.";
+        }
 
         await File.WriteAllTextAsync(resolved, updated, encoding, cancellationToken);
         return count == 1

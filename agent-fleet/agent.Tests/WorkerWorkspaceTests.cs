@@ -9,6 +9,56 @@ namespace AgentFleet.Tests;
 
 public sealed class WorkerWorkspaceTests : PlanTestBase
 {
+    private sealed class FakeFileAccess : IWorkerWorkspaceFileAccess
+    {
+        public Dictionary<string, string> Files { get; } = new(StringComparer.Ordinal);
+        public int Writes { get; private set; }
+        public bool Exists(string path) => Files.ContainsKey(path);
+        public Task<string> ReadTextAsync(string path, CancellationToken cancellationToken) => Task.FromResult(Files[path]);
+        public void CreateDirectoryTree(string path) { }
+        public Task WriteTextAsync(string path, string content, CancellationToken cancellationToken)
+        {
+            Writes++;
+            Files[path] = content;
+            return Task.CompletedTask;
+        }
+    }
+
+    private static WorkerWorkspaceSession FakeSession(FakeFileAccess files) => new("worker-test",
+        new FleetWorkerWorkspaceConfig("worker.example.test", "fleet-test", "C:/fleet-test/key", "SHA256:synthetic-host-key",
+            "/tmp/fleet-test/workspaces", "linux"),
+        "C:/fleet-test/project", NullLogger.Instance, TimeSpan.FromSeconds(1), fileAccess: files);
+
+    [Fact]
+    public async Task Worker_edit_that_changes_nothing_returns_unchanged_without_writing()
+    {
+        var files = new FakeFileAccess();
+        using WorkerWorkspaceSession session = FakeSession(files);
+        string remote = session.RemoteRoot + "/src/app.js";
+        files.Files[remote] = "const answer = 42;\n";
+
+        string result = await session.EditFileAsync("src/app.js", "const answer = 42;", "const answer = 42;", null, default);
+
+        Assert.Equal("Unchanged: this edit changes nothing in src/app.js (oldText and newText are the same, or the file already contains the new text). The file is as it was. Run the tests with run_command to see what actually fails, or read the file and change something else.", result);
+        Assert.Equal(0, files.Writes);
+        Assert.Equal("const answer = 42;\n", files.Files[remote]);
+    }
+
+    [Fact]
+    public async Task Worker_write_with_the_same_content_returns_unchanged_without_writing()
+    {
+        var files = new FakeFileAccess();
+        using WorkerWorkspaceSession session = FakeSession(files);
+        string remote = session.RemoteRoot + "/src/app.js";
+        files.Files[remote] = "const answer = 42;\n";
+
+        string result = await session.WriteFileAsync("src/app.js", "const answer = 42;\n", default);
+
+        Assert.Equal("Unchanged: src/app.js already has exactly this content; nothing was written. Run the tests with run_command to see what actually fails.", result);
+        Assert.Equal(0, files.Writes);
+        Assert.Equal("const answer = 42;\n", files.Files[remote]);
+    }
+
     [Fact]
     public async Task Connect_configures_sftp_timeout_and_keep_alives_before_connecting()
     {
