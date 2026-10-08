@@ -67,13 +67,14 @@ int defaultContextLength = OllamaNodeClient.ConfiguredDefault(builder.Configurat
 var app = builder.Build();
 
 // The context-window fitting policy: how to shorten conversations that exceed the model's window.
-ILoggerFactory contextFitLogger = app.Services.GetRequiredService<ILoggerFactory>();
-IContextWindowFitter contextFitter = ContextWindowFitters.FromSetting(builder.Configuration["FLEET_CONTEXT_FIT"], contextFitLogger.CreateLogger("AgentFleet.ContextFit"));
+ILoggerFactory fitLoggers = app.Services.GetRequiredService<ILoggerFactory>();
+Microsoft.Extensions.Logging.ILogger fitLog = fitLoggers.CreateLogger("AgentFleet.ContextFit");
+IContextWindowFitter contextFitter = ContextWindowFitters.FromSetting(builder.Configuration["FLEET_CONTEXT_FIT"], fitLog);
 
 // Log a warning if a non-default context-window fitting policy is in use.
 if (contextFitter.Name != "classic")
 {
-    contextFitLogger.CreateLogger("AgentFleet.ContextFit").LogWarning(
+    fitLog.LogWarning(
         "Context-window policy \"{Name}\" is experimental; unset FLEET_CONTEXT_FIT to return to the default.", contextFitter.Name);
 }
 

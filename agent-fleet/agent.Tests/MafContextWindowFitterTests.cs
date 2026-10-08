@@ -252,4 +252,124 @@ public sealed class MafContextWindowFitterTests
         Assert.Equal(ContextWindowTestHelper.Signature(fitted[^2]), ContextWindowTestHelper.Signature(input[^2]));
         Assert.Equal(ContextWindowTestHelper.Signature(fitted[^1]), ContextWindowTestHelper.Signature(input[^1]));
     }
+
+    // Fallback seam tests using CompactAsyncOverride.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Fallback_seam_injected_exception_triggers_fallback(bool collapse)
+    {
+        var warnings = new ContextWindowTestHelper.CollectingLogger();
+        var fitter = new MafContextWindowFitter(collapse, warnings)
+        {
+            CompactAsyncOverride = (_, _, _, _) => throw new InvalidOperationException("boom")
+        };
+        List<ChatMessage> input = ContextWindowTestHelper.BuildConversation(35);
+        var classic = ClassicContextWindowFitter.Instance;
+
+        // Call FitAsync twice
+        IReadOnlyList<ChatMessage> result1 = await fitter.FitAsync(input, null, 20_000, 1.0, CancellationToken.None);
+        IReadOnlyList<ChatMessage> result2 = await fitter.FitAsync(input, null, 20_000, 1.0, CancellationToken.None);
+
+        // Check fallback count
+        Assert.Equal(2, fitter.FallbackCount);
+
+        // Check exactly one warning
+        Assert.Single(warnings.Warnings);
+
+        // Check results match ClassicContextWindowFitter
+        IReadOnlyList<ChatMessage> classicResult = await classic.FitAsync(input, null, 20_000, 1.0, CancellationToken.None);
+        var result1Sigs = result1.Select(ContextWindowTestHelper.Signature).ToList();
+        var result2Sigs = result2.Select(ContextWindowTestHelper.Signature).ToList();
+        var classicSigs = classicResult.Select(ContextWindowTestHelper.Signature).ToList();
+
+        Assert.Equal(classicSigs, result1Sigs);
+        Assert.Equal(classicSigs, result2Sigs);
+        Assert.NotSame(result1, input);
+        Assert.NotSame(result2, input);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Fallback_seam_cancellation_not_caught(bool collapse)
+    {
+        var warnings = new ContextWindowTestHelper.CollectingLogger();
+        var fitter = new MafContextWindowFitter(collapse, warnings)
+        {
+            CompactAsyncOverride = (_, _, _, _) => throw new OperationCanceledException()
+        };
+        List<ChatMessage> input = ContextWindowTestHelper.BuildConversation(35);
+
+        await Assert.ThrowsAsync<OperationCanceledException>(
+            async () => await fitter.FitAsync(input, null, 20_000, 1.0, CancellationToken.None));
+
+        Assert.Equal(0, fitter.FallbackCount);
+    }
+
+    // I6b: Floor test - tight budget leaves only preserved parts.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task I6b_only_preserved_parts_remain_under_tight_budget(bool collapse)
+    {
+        var fitter = new MafContextWindowFitter(collapse);
+        List<ChatMessage> input = ContextWindowTestHelper.BuildConversation(30);
+        var head = input.Take(2).ToList();
+        int budget = ContextSizeChatClient.EstimateTokens(head, null) + 1_000;
+
+        IReadOnlyList<ChatMessage> fitted = await fitter.FitAsync(input, null, budget, 1.0, CancellationToken.None);
+
+        Assert.Equal(0, fitter.FallbackCount);
+        Assert.NotSame(fitted, input);
+
+        // First two messages match
+        Assert.Equal(ContextWindowTestHelper.Signature(fitted[0]), ContextWindowTestHelper.Signature(input[0]));
+        Assert.Equal(ContextWindowTestHelper.Signature(fitted[1]), ContextWindowTestHelper.Signature(input[1]));
+
+        // Last six messages match (last three groups)
+        Assert.True(fitted.Count >= 8);
+        for (int i = 0; i < 6; i++)
+        {
+            Assert.Equal(
+                ContextWindowTestHelper.Signature(fitted[fitted.Count - 6 + i]),
+                ContextWindowTestHelper.Signature(input[input.Count - 6 + i]));
+        }
+
+        // For maf-truncate, should be 2 + 6
+        if (!collapse)
+        {
+            Assert.Equal(8, fitted.Count);
+        }
+    }
+
+    // Head pin edge test: system + assistant text + user task.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Head_pin_system_assistant_user(bool collapse)
+    {
+        var fitter = new MafContextWindowFitter(collapse);
+
+        // Build conversation: System + Assistant text + User task + 35 rounds
+        var base35 = ContextWindowTestHelper.BuildConversation(35, withSystem: false, withUser: false);
+        var input = new List<ChatMessage>
+        {
+            new(ChatRole.System, "You are helpful."),
+            new(ChatRole.Assistant, "Hello, how can I help?"),
+            new(ChatRole.User, "TASK: implement compare and sort. " + new string('t', 1500))
+        };
+        input.AddRange(base35);
+
+        IReadOnlyList<ChatMessage> fitted = await fitter.FitAsync(input, null, 20_000, 1.0, CancellationToken.None);
+
+        Assert.NotSame(fitted, input);
+
+        // Task message at index 2, present and unchanged
+        Assert.True(fitted.Count > 2);
+        Assert.Equal(ChatRole.User, fitted[2].Role);
+        Assert.Equal(
+            ContextWindowTestHelper.Signature(fitted[2]),
+            ContextWindowTestHelper.Signature(input[2]));
+    }
 }
