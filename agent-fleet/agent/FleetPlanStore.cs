@@ -377,7 +377,9 @@ internal sealed partial class FleetPlanStore
         IReadOnlyList<string>? changedFiles = null,
         int? durationSeconds = null,
         string? checkBefore = null,
-        string? checkAfter = null)
+        string? checkAfter = null,
+        string? model = null,
+        int? contextCeiling = null)
     {
         string text = detail ?? string.Empty;
         int limit = kind == RunEventKind.FilesChanged ? MaxFilesChangedCharacters : MaxEventDetailCharacters;
@@ -389,7 +391,7 @@ internal sealed partial class FleetPlanStore
         var entry = new PlanRunEvent(DateTimeOffset.UtcNow, stepId, attempt, kind, tier, node, text, modelNode, workspaceNode,
             failureClass, failureSignature, failureSignatureSize, filesChanged, toolCalls, editToolCalled, rung, round,
             changedFiles is { Count: > 0 } ? changedFiles.Take(MaxChangedFilesPerEvent).ToList() : null, durationSeconds,
-            Shorten(checkBefore), Shorten(checkAfter));
+            Shorten(checkBefore), Shorten(checkAfter), model, contextCeiling);
         return Update(id, plan =>
         {
             List<PlanRunEvent> events = [.. plan.Events ?? [], entry];

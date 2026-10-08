@@ -35,6 +35,8 @@ export type PlanRunEvent = {
   tier: string | null;
   node: string | null;
   modelNode?: string | null;
+  model?: string | null;
+  contextCeiling?: number | null;
   workspaceNode?: string | null;
   failureClass?: string | null;
   failureSignature?: string | null;
@@ -223,6 +225,9 @@ function RunLog({ planId, events }: { planId: string; events: PlanRunEvent[] }) 
               <span className="text-neutral-500">{where}</span>{" "}
               <span className={EVENT_STYLE[e.kind] ?? "text-neutral-300"}>{e.kind.replace(/-/g, " ")}</span>
               {via && <span className="text-neutral-600"> ({via})</span>}
+              {e.kind === "round-classified" && (
+                <span className="text-neutral-600"> (model: {e.model ?? "not recorded"}; context: {e.contextCeiling ?? "not recorded"})</span>
+              )}
               {e.detail && (
                 <div className="font-mono text-[10px] text-neutral-400 whitespace-pre-wrap break-words pl-3 max-h-24 overflow-y-auto">
                   {e.detail}

@@ -519,6 +519,24 @@ public sealed partial class PlanRunnerTests : PlanTestBase
     }
 
     [Fact]
+    public async Task Round_classified_events_record_the_configured_model_and_context_ceiling()
+    {
+        FleetNodeConfig worker = new("worker-a", "http://worker.example.test/v1", "model-example:latest", "worker", "standard",
+            ContextLength: 16_384);
+        FleetOptions options = OptionsWithNodes(worker);
+        PlanRecord plan = NewPlan(Step("build it", tier: "standard"));
+        plan = Store.SelectMachine(plan.Id, 1, "worker-a", out string? selectionError)!;
+        Assert.Null(selectionError);
+        plan = Store.Approve(plan.Id, autoRetries: 0)!;
+
+        await Runner(Agent(), Pass, fleetOptions: options).RunPlanAsync(plan.Id, default);
+
+        PlanRunEvent round = Assert.Single(Store.Get(plan.Id)!.Events!, runEvent => runEvent.Kind == RunEventKind.RoundClassified);
+        Assert.Equal("model-example:latest", round.Model);
+        Assert.Equal(16_384, round.ContextCeiling);
+    }
+
+    [Fact]
     public async Task When_no_machine_answers_the_step_waits_without_spending_its_attempts()
     {
         PlanRecord plan = ApprovedPlan(Step("during a reboot", tier: "standard"));
