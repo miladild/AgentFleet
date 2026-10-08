@@ -28,6 +28,8 @@ test('splitAmount: parts must be a positive integer', () => {
 });
 
 test('splitAmount: cents must be an integer', () => {
+  assert.equal(typeof splitAmount, 'function');
+  assert.deepEqual(splitAmount(100, 3), [34, 33, 33]);
   assert.throws(() => splitAmount(1.5, 2), TypeError);
   assert.throws(() => splitAmount(10.1, 3), TypeError);
   assert.throws(() => splitAmount(NaN, 2), TypeError);

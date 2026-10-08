@@ -61,6 +61,8 @@ test('sort complex prerelease ordering', () => {
 });
 
 test('invalid version formats throw TypeError', () => {
+  assert.equal(typeof compare, 'function');
+  assert.equal(compare('1.0.0', '1.0.0'), 0);
   assert.throws(() => compare('1.2', '1.0.0'), TypeError);
   assert.throws(() => compare('v1.2.3', '1.0.0'), TypeError);
   assert.throws(() => compare('1.2.3.4', '1.0.0'), TypeError);
@@ -69,6 +71,8 @@ test('invalid version formats throw TypeError', () => {
 });
 
 test('invalid versions throw TypeError in sort', () => {
+  assert.equal(typeof sort, 'function');
+  assert.deepEqual(sort(['1.0.0']), ['1.0.0']);
   assert.throws(() => sort(['1.2.3', '1.2']), TypeError);
   assert.throws(() => sort(['v1.2.3']), TypeError);
 });
@@ -83,6 +87,8 @@ test('error message starts with "Invalid version"', () => {
 });
 
 test('leading zeros in version numbers are invalid', () => {
+  assert.equal(typeof compare, 'function');
+  assert.equal(compare('1.0.0', '1.0.0'), 0);
   assert.throws(() => compare('01.0.0', '1.0.0'), TypeError);
   assert.throws(() => compare('1.01.0', '1.0.0'), TypeError);
   assert.throws(() => compare('1.0.01', '1.0.0'), TypeError);
