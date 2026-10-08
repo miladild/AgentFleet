@@ -49,14 +49,21 @@ internal sealed class MafContextWindowFitter : IContextWindowFitter
         try
         {
             // Pin the head: system messages plus the first user message (the task).
+            // If there is no user message, the head is only the leading System messages.
             int headCount = 0;
             for (int i = 0; i < messages.Count; i++)
             {
-                headCount = i + 1;
                 if (messages[i].Role == ChatRole.User)
                 {
+                    headCount = i + 1;
                     break;
                 }
+                if (messages[i].Role != ChatRole.System)
+                {
+                    // Hit a non-system, non-user message; head is all system messages so far.
+                    break;
+                }
+                headCount = i + 1;
             }
 
             List<ChatMessage> head = new(messages.Take(headCount));
