@@ -187,7 +187,11 @@ internal sealed partial class PlanRunner
     [
         TimeSpan.FromSeconds(5),
         TimeSpan.FromSeconds(20),
-        TimeSpan.FromSeconds(60)
+        TimeSpan.FromSeconds(60),
+        TimeSpan.FromMinutes(2),
+        TimeSpan.FromMinutes(5),
+        TimeSpan.FromMinutes(10),
+        TimeSpan.FromMinutes(15)
     ];
 
     private readonly FleetPlanStore _store;
@@ -1010,8 +1014,10 @@ internal sealed partial class PlanRunner
                         if (roundClass == FailureClass.Infra)
                         {
                             failedModels.Add(model.ModelNode ?? string.Empty);
-                            string? route = await RouteFailedModelAsync(plan, step, tier, model.ModelNode, model.Machine,
-                                attempt, cancellationToken, recentlyFailed: failedModels);
+                            string? route = IsWorkerTransportFailure(model.FailureException)
+                                ? null
+                                : await RouteFailedModelAsync(plan, step, tier, model.ModelNode, model.Machine,
+                                    attempt, cancellationToken, recentlyFailed: failedModels);
                             if (route is not null)
                             {
                                 modelOverride = route;
@@ -1034,7 +1040,8 @@ internal sealed partial class PlanRunner
 
                         failedModels.Clear();
                         (modelOverride, waits) = await WaitForInfrastructureRecoveryAsync(plan, step, tier,
-                            model.ModelNode, model.Machine, attempt, model.Failure, waits, cancellationToken);
+                            model.ModelNode, model.Machine, attempt, model.Failure, waits, cancellationToken,
+                            allowRoute: !IsWorkerTransportFailure(model.FailureException));
                         continue;
                     }
 
@@ -1077,7 +1084,14 @@ internal sealed partial class PlanRunner
 
                     // A check that cannot run or finish, or a machine without the project's own dependencies, is repaired here and
                     // the check runs again in the same workspace, so it costs no round.
-                    CheckRun run = await RunCheckWithRepairsAsync(plan, step, attempt, tier, rung, round, model, cancellationToken);
+                    CheckRun run = model.Workspace is null
+                        ? await RunCheckWithRepairsAsync(plan, step, attempt, tier, rung, round, model, cancellationToken)
+                        : await RunWithReconnectsAsync(
+                            model.Workspace,
+                            token => RunCheckWithRepairsAsync(plan, step, attempt, tier, rung, round, model, token),
+                            "running the check", cancellationToken, cancellationToken,
+                            plan, step, attempt, tier,
+                            (exception, token) => IsWorkerCheckTransportFailureAsync(exception, model.Workspace, token));
                     result = run.Result;
                     checkNote = run.Note;
                     parkReason = run.ParkReason;
@@ -1089,7 +1103,7 @@ internal sealed partial class PlanRunner
 
                     if (model.Workspace is not null)
                     {
-                        await SyncToHubWithReconnectAsync(model.Workspace, cancellationToken);
+                        await SyncToHubWithReconnectAsync(plan, step, attempt, model.Workspace, cancellationToken, cancellationToken);
                         _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.WorkspaceSynced, tier, model.Machine,
                             "Synced the worker project after verification; the checked changes are now in the hub checkout.",
                             modelNode: model.ModelNode, workspaceNode: model.Machine);
@@ -1657,13 +1671,13 @@ internal sealed partial class PlanRunner
                         modelNode: staged.ModelNode, workspaceNode: baseline.Machine);
                 check = await _tools.TryCompleteStepAsync(plan.Id, step.Id,
                     "Recovered worker edits after a backend restart.", cancellationToken, FilesToCreate(plan, step), deferCommit: true);
-                await SyncToHubWithReconnectAsync(session, cancellationToken);
+                await SyncToHubWithReconnectAsync(plan, step, attempt, session, cancellationToken, cancellationToken);
             }
             _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.WorkspaceSynced, step.Tier, baseline.Machine,
                 "Synced the reconciled worker workspace after restart verification.",
                 modelNode: staged.ModelNode, workspaceNode: baseline.Machine);
             _store.DeleteWorkerBaseline(plan.Id, step.Id, attempt);
-            await RefreshFromHubWithReconnectAsync(session, cancellationToken);
+            await RefreshFromHubWithReconnectAsync(plan, step, attempt, session, cancellationToken, cancellationToken);
 
             var recoveredAttempt = new ModelAttemptResult(step.Id, "Recovered worker edits after a backend restart.", null,
                 ShouldVerify: true, Machine: baseline.Machine, ModelNode: staged.ModelNode,
@@ -1960,7 +1974,8 @@ internal sealed partial class PlanRunner
         int attempt,
         string? failure,
         int waits,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool allowRoute = true)
     {
         while (true)
         {
@@ -1996,8 +2011,11 @@ internal sealed partial class PlanRunner
 
             if (plan.RunDeadlineUtc is { } afterProbeDeadline && _utcNow() >= afterProbeDeadline)
                 return (null, waits);
-            string? route = await RouteFailedModelAsync(plan, step, tier, failedModel, workspace, attempt, cancellationToken);
-            if (route is not null) return (route, waits);
+            if (allowRoute)
+            {
+                string? route = await RouteFailedModelAsync(plan, step, tier, failedModel, workspace, attempt, cancellationToken);
+                if (route is not null) return (route, waits);
+            }
         }
     }
 
@@ -2306,11 +2324,17 @@ internal sealed partial class PlanRunner
         reason.StartsWith("the required ", StringComparison.OrdinalIgnoreCase) &&
         reason.Contains(" executable is missing", StringComparison.OrdinalIgnoreCase);
 
-    private static bool IsWorkerTransportFailure(Exception exception)
+    private static bool IsWorkerTransportFailure(Exception? exception)
     {
         for (Exception? current = exception; current is not null; current = current.InnerException)
         {
-            if (current is SshException or System.Net.Sockets.SocketException or TimeoutException)
+            if (current is Renci.SshNet.Common.SshAuthenticationException)
+            {
+                return false;
+            }
+
+            if (current is Renci.SshNet.Common.SshConnectionException or Renci.SshNet.Common.SshOperationTimeoutException or
+                SshException or System.Net.Sockets.SocketException or TimeoutException)
             {
                 return true;
             }
@@ -2319,50 +2343,109 @@ internal sealed partial class PlanRunner
         return false;
     }
 
-    // Post-model syncs pass CancellationToken.None, so these retry pauses do not observe Stop.
     internal Task SyncToHubWithReconnectAsync(IWorkerWorkspaceSession worker, CancellationToken cancellationToken) =>
-        RunWithReconnectsAsync(worker, worker.SyncToHubAsync, "syncing changes to the hub", cancellationToken);
+        RunWithReconnectsAsync(worker, worker.SyncToHubAsync, "syncing changes to the hub", cancellationToken, cancellationToken);
 
-    // Post-model refreshes pass CancellationToken.None, so these retry pauses do not observe Stop.
+    internal Task SyncToHubWithReconnectAsync(PlanRecord plan, PlanStep step, int attempt, IWorkerWorkspaceSession worker,
+        CancellationToken operationToken, CancellationToken pauseToken) =>
+        RunWithReconnectsAsync(worker, worker.SyncToHubAsync, "syncing changes to the hub", operationToken, pauseToken,
+            plan, step, attempt, step.Tier);
+
     internal Task RefreshFromHubWithReconnectAsync(IWorkerWorkspaceSession worker, CancellationToken cancellationToken) =>
-        RunWithReconnectsAsync(worker, worker.RefreshFromHubAsync, "refreshing from the hub", cancellationToken);
+        RunWithReconnectsAsync(worker, worker.RefreshFromHubAsync, "refreshing from the hub", cancellationToken, cancellationToken);
 
-    private async Task RunWithReconnectsAsync(
+    internal Task RefreshFromHubWithReconnectAsync(PlanRecord plan, PlanStep step, int attempt, IWorkerWorkspaceSession worker,
+        CancellationToken operationToken, CancellationToken pauseToken) =>
+        RunWithReconnectsAsync(worker, worker.RefreshFromHubAsync, "refreshing from the hub", operationToken, pauseToken,
+            plan, step, attempt, step.Tier);
+
+    private Task RunWithReconnectsAsync(
         IWorkerWorkspaceSession worker,
         Func<CancellationToken, Task> operation,
         string operationName,
-        CancellationToken cancellationToken)
+        CancellationToken operationToken,
+        CancellationToken pauseToken,
+        PlanRecord? plan = null,
+        PlanStep? step = null,
+        int? attempt = null,
+        string? tier = null)
     {
+        return RunWithReconnectsAsync<bool>(worker, async token =>
+        {
+            await operation(token);
+            return true;
+        }, operationName, operationToken, pauseToken, plan, step, attempt, tier);
+    }
+
+    private async Task<T> RunWithReconnectsAsync<T>(
+        IWorkerWorkspaceSession worker,
+        Func<CancellationToken, Task<T>> operation,
+        string operationName,
+        CancellationToken operationToken,
+        CancellationToken pauseToken,
+        PlanRecord? plan = null,
+        PlanStep? step = null,
+        int? attempt = null,
+        string? tier = null,
+        Func<Exception, CancellationToken, Task<bool>>? shouldReconnect = null)
+    {
+        shouldReconnect ??= (exception, _) => Task.FromResult(IsWorkerTransportFailure(exception));
         Exception lastFailure;
         try
         {
-            await operation(cancellationToken);
-            return;
+            return await operation(operationToken);
         }
-        catch (Exception exception) when (IsWorkerTransportFailure(exception))
+        catch (Exception exception)
         {
+            if (!await shouldReconnect(exception, pauseToken)) throw;
             lastFailure = exception;
         }
 
         foreach (TimeSpan pause in ReconnectPauses)
         {
+            if (pause >= TimeSpan.FromMinutes(1) && plan is not null && step is not null)
+            {
+                _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.Waiting, tier, node: worker.Machine,
+                    detail: $"Worker {worker.Machine} is unreachable ({Summarize(lastFailure.Message)}); waiting {Duration(pause)} before reconnecting. The worker keeps this step's edits; nothing is lost.",
+                    modelNode: worker.Machine, workspaceNode: worker.Machine);
+            }
+
             _logger.LogWarning(lastFailure,
                 "Worker {Machine} lost its connection while {Operation}; waiting {Delay} before reconnecting.",
                 worker.Machine, operationName, Duration(pause));
-            await DelayBeforeRetryAsync(pause, cancellationToken);
+            await DelayBeforeRetryAsync(pause, pauseToken);
             try
             {
-                await worker.ReconnectAsync(cancellationToken);
-                await operation(cancellationToken);
-                return;
+                await worker.ReconnectAsync(operationToken);
+                return await operation(operationToken);
             }
-            catch (Exception exception) when (IsWorkerTransportFailure(exception))
+            catch (Exception exception)
             {
+                if (!await shouldReconnect(exception, pauseToken)) throw;
                 lastFailure = exception;
             }
         }
 
         ExceptionDispatchInfo.Capture(lastFailure).Throw();
+        throw new InvalidOperationException("Unreachable after rethrowing the final worker transport failure.");
+    }
+
+    private static async Task<bool> IsWorkerCheckTransportFailureAsync(
+        Exception exception, IWorkerWorkspaceSession workspace, CancellationToken cancellationToken)
+    {
+        bool commandTimedOut = false;
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is WorkerCommandTimeoutException)
+            {
+                commandTimedOut = true;
+                break;
+            }
+        }
+
+        return commandTimedOut
+            ? !await workspace.AnswersAsync(cancellationToken)
+            : IsWorkerTransportFailure(exception);
     }
 
     private async Task<bool> RunParallelGroupAsync(PlanRecord plan, IReadOnlyList<PlanStep> steps, CancellationToken cancellationToken)
@@ -2452,13 +2535,16 @@ internal sealed partial class PlanRunner
                     }
                     else
                     {
-                        modelOverride = await RouteFailedModelAsync(plan, step, step.Tier, attempt.ModelNode,
-                            attempt.Machine, 1, cancellationToken);
+                        bool workerTransportFailure = IsWorkerTransportFailure(attempt.FailureException);
+                        modelOverride = workerTransportFailure
+                            ? null
+                            : await RouteFailedModelAsync(plan, step, step.Tier, attempt.ModelNode,
+                                attempt.Machine, 1, cancellationToken);
                         if (modelOverride is null)
                         {
                             (modelOverride, _) = await WaitForInfrastructureRecoveryAsync(plan, step, step.Tier,
                                 attempt.ModelNode, attempt.Machine, 1, attempt.Failure,
-                                CountWaitingEvents(plan.Id, step.Id), cancellationToken);
+                                CountWaitingEvents(plan.Id, step.Id), cancellationToken, allowRoute: !workerTransportFailure);
                         }
                     }
                 }
@@ -2735,7 +2821,7 @@ internal sealed partial class PlanRunner
                 // verification and any retry see the same project state as the canonical checkout.
                 if (worker is not null)
                 {
-                    await SyncToHubWithReconnectAsync(worker, CancellationToken.None);
+                    await SyncToHubWithReconnectAsync(plan, step, attempt, worker, CancellationToken.None, cancellationToken);
                     _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.WorkspaceSynced, tier, machine,
                         "Synced worker file changes to the hub checkout before verification.",
                         modelNode: result.ModelNode ?? modelMachine, workspaceNode: machine);
@@ -2756,7 +2842,7 @@ internal sealed partial class PlanRunner
 
                 if (worker is not null)
                 {
-                    await RefreshFromHubWithReconnectAsync(worker, CancellationToken.None);
+                    await RefreshFromHubWithReconnectAsync(plan, step, attempt, worker, CancellationToken.None, cancellationToken);
                     result = result with { Workspace = worker };
                 }
             }

@@ -605,6 +605,35 @@ public sealed partial class PlanRunnerTests : PlanTestBase
     }
 
     [Fact]
+    public async Task A_worker_ssh_transport_failure_waits_and_retries_on_the_same_worker_even_when_hub_rescue_is_allowed()
+    {
+        FleetNodeConfig hub = new("hub", "http://hub.example.test/v1", "m", "hub", "heavy", Fallback: true);
+        FleetNodeConfig worker = new("worker-a", "http://worker.example.test/v1", "m", "worker", "standard");
+        FleetOptions options = OptionsWithNodes(hub, worker);
+        var health = new FleetHealthMonitor(options, new HealthyNodeFactory());
+        PlanRecord plan = NewPlan(Step("recover worker connection", tier: "standard"));
+        plan = Store.SelectMachine(plan.Id, 1, "worker-a", out string? selectionError)!;
+        Assert.Null(selectionError);
+        plan = Store.Approve(plan.Id, recoveryScope: PlanRecoveryScope.AllowHubRescue, autoRetries: 0)!;
+        int calls = 0;
+        var agent = new FakeStepAgent((_, _, _) => ++calls == 1
+            ? throw new Renci.SshNet.Common.SshConnectionException("Client not connected.")
+            : Task.FromResult("finished"));
+
+        await new PlanRunner(Store, new PlanTools(Store, Valid, (command, _, _) => Task.FromResult(Pass(command))),
+                agent, NullLogger.Instance, fleetOptions: options, healthMonitor: health,
+                transientDelay: _ => TimeSpan.Zero, delayAsync: (_, _) => Task.CompletedTask)
+            .RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.Equal(["worker-a", "worker-a"], agent.Calls.Select(call => call.Machine));
+        Assert.Contains(after.Events!, runEvent => runEvent.Kind == RunEventKind.Waiting &&
+            runEvent.Detail.StartsWith("Infra failure on worker-a:", StringComparison.Ordinal));
+        Assert.DoesNotContain(after.Events!, runEvent => runEvent.Kind == RunEventKind.RecoveryRouted && runEvent.ModelNode == "hub");
+    }
+
+    [Fact]
     public async Task An_outage_waits_only_until_the_plan_deadline()
     {
         PlanRecord plan = ApprovedPlan(Step("machines gone"));
@@ -784,6 +813,7 @@ public sealed partial class PlanRunnerTests : PlanTestBase
         Assert.Contains(agent.Calls.Skip(1), call => call.Prompt.Contains("The check never finished.", StringComparison.Ordinal));
         Assert.Contains(agent.Calls.Skip(1), call => call.Prompt.Contains("Error: command exceeded the 120s timeout and was killed.", StringComparison.Ordinal));
         Assert.Contains(after.Events!, runEvent => runEvent.Kind is RunEventKind.CheckFailed or RunEventKind.FinalValidationFailed);
+        Assert.Equal(0, workspaces.Sessions.Sum(session => session.ReconnectCalls));
         Assert.DoesNotContain(after.Events!, runEvent => runEvent.Kind == RunEventKind.RoundClassified &&
             runEvent.FailureClass == nameof(FailureClass.Environment));
         Assert.DoesNotContain(after.Events!, runEvent => runEvent.Kind == RunEventKind.CheckHealed);
@@ -796,8 +826,10 @@ public sealed partial class PlanRunnerTests : PlanTestBase
         var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], [])) { WorkerAnswers = false };
         FakeStepAgent agent = Agent();
 
+        var delays = new List<TimeSpan>();
         await Runner(agent, _ => throw new WorkerCommandTimeoutException("Operation has timed out.",
                 new Renci.SshNet.Common.SshOperationTimeoutException("Operation has timed out.")),
+            delayAsync: (delay, _) => { delays.Add(delay); return Task.CompletedTask; },
             workerWorkspaces: workspaces).RunPlanAsync(plan.Id, default);
 
         PlanRecord after = Store.Get(plan.Id)!;
@@ -806,7 +838,85 @@ public sealed partial class PlanRunnerTests : PlanTestBase
         PlanRunEvent parked = Assert.Single(after.Events!, runEvent => runEvent.Kind == RunEventKind.StepParked);
         Assert.Equal("environment", parked.FailureSignature);
         Assert.Contains("Worker workspace unavailable:", parked.Detail, StringComparison.Ordinal);
+        Assert.Equal(7, workspaces.Sessions.Sum(session => session.ReconnectCalls));
+        Assert.Equal([5d, 20d, 60d, 120d, 300d, 600d, 900d], delays.Select(delay => delay.TotalSeconds));
+        Assert.Equal(5, after.Events!.Count(runEvent => runEvent.Kind == RunEventKind.Waiting &&
+            runEvent.Detail.StartsWith("Worker worker-a is unreachable", StringComparison.Ordinal)));
         Assert.DoesNotContain(after.Events!, runEvent => runEvent.Kind == RunEventKind.CheckHealed);
+    }
+
+    [Fact]
+    public async Task A_worker_transport_failure_during_a_check_reconnects_and_retries_the_check()
+    {
+        var setup = NewWorkerSyncPlan();
+        var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []));
+        try
+        {
+            FakeStepAgent agent = Agent();
+            int checks = 0;
+            string Verify(string command)
+            {
+                if (command == "dotnet build" && ++checks == 1)
+                    throw new Renci.SshNet.Common.SshConnectionException("Client not connected.");
+                return Pass(command);
+            }
+
+            await Runner(agent, Verify,
+                workerWorkspaces: workspaces, fleetOptions: setup.Options, healthMonitor: setup.Health)
+                .RunPlanAsync(setup.Plan.Id, default);
+
+            PlanRecord after = Store.Get(setup.Plan.Id)!;
+            Assert.Equal(PlanStatus.Done, after.Status);
+            Assert.Equal(2, checks);
+            Assert.Equal(1, workspaces.Sessions.Sum(session => session.ReconnectCalls));
+        }
+        finally
+        {
+            Directory.Delete(setup.Project, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Stop_during_a_long_worker_reconnect_pause_stops_the_plan_without_environment_parking()
+    {
+        var setup = NewWorkerSyncPlan();
+        try
+        {
+            var reachedLongPause = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []))
+            {
+                SyncFailure = new Renci.SshNet.Common.SshConnectionException("Client not connected."),
+                SyncFailures = 3
+            };
+            Task Delay(TimeSpan delay, CancellationToken cancellationToken)
+            {
+                if (delay >= TimeSpan.FromMinutes(1))
+                {
+                    reachedLongPause.TrySetResult(true);
+                    return Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                return Task.CompletedTask;
+            }
+
+            var runner = Runner(Agent(), Pass, delayAsync: Delay, workerWorkspaces: workspaces,
+                fleetOptions: setup.Options, healthMonitor: setup.Health);
+            Task running = runner.RunPlanAsync(setup.Plan.Id, default);
+            await reachedLongPause.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.True(runner.Stop(setup.Plan.Id));
+            await running.WaitAsync(TimeSpan.FromSeconds(3));
+
+            PlanRecord after = Store.Get(setup.Plan.Id)!;
+            Assert.Equal(PlanStatus.Blocked, after.Status);
+            Assert.Equal(StepStatus.Pending, after.Steps[0].Status);
+            Assert.DoesNotContain(after.Events!, runEvent => runEvent.Kind == RunEventKind.StepParked &&
+                runEvent.FailureSignature == "environment");
+        }
+        finally
+        {
+            Directory.Delete(setup.Project, recursive: true);
+        }
     }
 
     [Fact]
@@ -902,7 +1012,7 @@ public sealed partial class PlanRunnerTests : PlanTestBase
             var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []))
             {
                 SyncFailure = new Renci.SshNet.Common.SshConnectionException("Connection lost."),
-                SyncFailures = 4
+                SyncFailures = 8
             };
 
             await Runner(Agent(), Pass, delayAsync: (delay, _) => { delays.Add(delay); return Task.CompletedTask; },
@@ -913,9 +1023,12 @@ public sealed partial class PlanRunnerTests : PlanTestBase
             Assert.Equal(PlanStatus.Blocked, after.Status);
             Assert.Equal(StepStatus.Parked, after.Steps[0].Status);
             FakeWorkerWorkspaceSession worker = Assert.Single(workspaces.Sessions);
-            Assert.Equal(4, worker.SyncCalls);
-            Assert.Equal(3, worker.ReconnectCalls);
-            Assert.Equal([5d, 20d, 60d], delays.Select(delay => delay.TotalSeconds));
+            Assert.Equal(8, worker.SyncCalls);
+            Assert.Equal(7, worker.ReconnectCalls);
+            Assert.Equal([5d, 20d, 60d, 120d, 300d, 600d, 900d], delays.Select(delay => delay.TotalSeconds));
+            Assert.Equal(2005d, delays.Sum(delay => delay.TotalSeconds));
+            Assert.Equal(5, after.Events!.Count(runEvent => runEvent.Kind == RunEventKind.Waiting &&
+                runEvent.Detail.StartsWith("Worker worker-a is unreachable", StringComparison.Ordinal)));
             Assert.Equal("environment", Assert.Single(after.Events!, runEvent => runEvent.Kind == RunEventKind.StepParked).FailureSignature);
         }
         finally
