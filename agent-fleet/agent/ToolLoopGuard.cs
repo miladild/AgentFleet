@@ -86,6 +86,10 @@ internal static partial class ToolLoopGuard
 
             return message;
         }
+        catch (WorkerPathRefusedException exception) when (fromRunner)
+        {
+            return $"Error: {exception.Message} Use a path relative to the project folder (for example src/app.js), or leave the path out.";
+        }
     }
 
     /// <summary>The error a model is given for a call that left out a required argument; null for any other exception.</summary>

@@ -141,6 +141,51 @@ public sealed class WorkerWorkspaceTests : PlanTestBase
     }
 
     [Fact]
+    public void C11_run_2_worker_native_project_path_resolves_against_the_sftp_root()
+    {
+        const string remoteRoot = "/C:/fleet-test/workspaces/agentfleet/plans/abc/worker-a/project";
+        Assert.Equal(string.Empty, WorkerWorkspacePath.RelativeToProject(
+            @"C:\fleet-test\workspaces\agentfleet\plans\abc\worker-a\project",
+            @"C:\hub-project",
+            remoteRoot));
+        Assert.Equal("src/a.js", WorkerWorkspacePath.RelativeToProject(
+            @"C:\fleet-test\workspaces\agentfleet\plans\abc\worker-a\project\src\a.js",
+            @"C:\hub-project",
+            remoteRoot));
+    }
+
+    [Theory]
+    [InlineData(@"c:\fleet-test\workspaces\AGENTFLEET\plans\abc\worker-a\project\src\a.js")]
+    [InlineData(@"C:\FLEET-TEST\WORKSPACES\agentfleet\plans\abc\worker-a\project\src\a.js")]
+    public void Windows_project_path_comparison_ignores_drive_and_path_case(string modelPath)
+    {
+        Assert.Equal("src/a.js", WorkerWorkspacePath.RelativeToProject(
+            modelPath,
+            @"C:\hub-project",
+            "/c:/FLEET-TEST/workspaces/agentfleet/plans/abc/worker-a/project"));
+    }
+
+    [Fact]
+    public void Windows_sftp_spelling_of_a_model_path_matches_a_native_drive_root()
+    {
+        Assert.Equal("src/a.js", WorkerWorkspacePath.RelativeToProject(
+            "/C:/fleet-test/workspaces/agentfleet/plans/abc/worker-a/project/src/a.js",
+            @"C:\hub-project",
+            @"C:\fleet-test\workspaces\agentfleet\plans\abc\worker-a\project"));
+    }
+
+    [Theory]
+    [InlineData(@"C:\fleet-test\other\src\a.js")]
+    [InlineData(@"D:\fleet-test\workspaces\agentfleet\plans\abc\worker-a\project\src\a.js")]
+    public void Refuses_other_windows_folders_and_drives(string modelPath)
+    {
+        Assert.Throws<WorkerPathRefusedException>(() => WorkerWorkspacePath.RelativeToProject(
+            modelPath,
+            @"C:\hub-project",
+            "/C:/fleet-test/workspaces/agentfleet/plans/abc/worker-a/project"));
+    }
+
+    [Fact]
     public void Windows_command_chains_run_through_cmd_with_powershell_safe_quoting()
     {
         string command = WorkerWorkspaceSession.BuildWindowsCommand(
@@ -172,7 +217,7 @@ public sealed class WorkerWorkspaceTests : PlanTestBase
     [InlineData("/etc/shadow", "/home/fleet-test/project")]
     public void Refuses_paths_that_escape_the_project(string path, string hubRoot)
     {
-        Assert.Throws<UnauthorizedAccessException>(() => WorkerWorkspacePath.RelativeToProject(path, hubRoot));
+        Assert.Throws<WorkerPathRefusedException>(() => WorkerWorkspacePath.RelativeToProject(path, hubRoot));
     }
 
     [Theory]

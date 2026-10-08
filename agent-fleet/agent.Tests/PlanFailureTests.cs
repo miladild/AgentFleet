@@ -48,6 +48,14 @@ public sealed class PlanFailureTests
     }
 
     [Fact]
+    public void A_model_path_refusal_is_not_an_environment_failure()
+    {
+        Assert.Equal(FailureClass.Unknown, PlanFailure.Classify(
+            new WorkerPathRefusedException("Absolute paths outside the staged project are not available to worker tools."),
+            string.Empty, []));
+    }
+
+    [Fact]
     public void Ssh_connection_and_operation_timeouts_are_infrastructure_but_authentication_is_not()
     {
         Assert.Equal(FailureClass.Infra, PlanFailure.Classify(
