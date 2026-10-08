@@ -65,6 +65,13 @@ public sealed class ToolLoopGuardTests
     public void Only_results_that_say_the_call_failed_are_errors(string result, bool error) =>
         Assert.Equal(error, ToolLoopGuard.IsError(result));
 
+    [Theory]
+    [InlineData("Error: nope", true)]
+    [InlineData("Unchanged: no file change", true)]
+    [InlineData("contents of the file", false)]
+    public void Errors_and_unchanged_results_are_no_progress(string result, bool noProgress) =>
+        Assert.Equal(noProgress, ToolLoopGuard.IsNoProgress(result));
+
     // A model that answers every request with the same call until it has made `calls` of them, then says it is done.
     private sealed class RepeatingModel(Func<int, FunctionCallContent> call, int calls) : IChatClient
     {
@@ -99,7 +106,7 @@ public sealed class ToolLoopGuardTests
         IChatClient client = new ChatClientBuilder(model)
             .UseFunctionInvocation(null, options =>
             {
-                options.MaximumIterationsPerRequest = 20;
+                options.MaximumIterationsPerRequest = 40;
                 options.FunctionInvoker = async (context, cancellationToken) =>
                 {
                     object? result = await context.Function.InvokeAsync(context.Arguments, cancellationToken);
@@ -150,11 +157,63 @@ public sealed class ToolLoopGuardTests
     }
 
     [Fact]
-    public async Task Repeating_a_call_that_works_is_not_a_loop()
+    public async Task Five_identical_successful_calls_get_a_note_on_three_and_end_the_turn_on_five()
     {
-        (string[] results, int executed, _) = await RunAsync(_ => Call("x"), 8, (_, _) => "the same file contents");
+        (string[] results, int executed, RepeatingModel model) = await RunAsync(_ => Call("x"), 8, (_, _) => "the same file contents");
+
+        Assert.Equal(5, executed);
+        Assert.Equal(5, model.Requests);
+        Assert.Equal(5, results.Length);
+        Assert.DoesNotContain(ToolLoopGuard.Marker, results[0]);
+        Assert.DoesNotContain(ToolLoopGuard.Marker, results[1]);
+        Assert.Contains("This exact call has now been made 3 times in this turn with the same result", results[2]);
+        Assert.DoesNotContain(ToolLoopGuard.Marker, results[3]);
+        Assert.Contains("This exact call has now been made 5 times in this turn with the same result", results[4]);
+    }
+
+    [Fact]
+    public async Task Repeated_unchanged_results_use_the_existing_no_progress_threshold()
+    {
+        (string[] results, int executed, _) = await RunAsync(_ => Call("x"), 8, (_, _) => "Unchanged: nothing was written");
+
+        Assert.Equal(5, executed);
+        Assert.Contains("failed the same way 3 times in this turn", results[2]);
+        Assert.Contains("failed the same way 5 times in this turn, so the turn ends here", results[4]);
+        Assert.DoesNotContain(ToolLoopGuard.Marker, results[3]);
+    }
+
+    [Fact]
+    public async Task Alternating_successful_calls_are_counted_separately_inside_the_recent_window()
+    {
+        (string[] results, int executed, _) = await RunAsync(
+            round => round % 2 == 1 ? Call("same-a", path: "a.txt") : Call("b" + round, path: $"b{round}.txt"),
+            12,
+            (path, _) => $"contents of {path}");
+
+        Assert.Equal(9, executed);
+        Assert.Contains("made 3 times", results[4]);
+        Assert.Contains("made 5 times", results[8]);
+        Assert.All([results[1], results[3], results[5], results[7]], result => Assert.DoesNotContain(ToolLoopGuard.Marker, result));
+    }
+
+    [Fact]
+    public async Task Identical_successful_calls_with_different_results_do_not_count()
+    {
+        (string[] results, int executed, _) = await RunAsync(_ => Call("same"), 8, (_, count) => $"contents version {count}");
 
         Assert.Equal(8, executed);
+        Assert.All(results, result => Assert.DoesNotContain(ToolLoopGuard.Marker, result));
+    }
+
+    [Fact]
+    public async Task Identical_successful_calls_more_than_ten_calls_apart_do_not_count()
+    {
+        (string[] results, int executed, _) = await RunAsync(
+            round => round % 11 == 1 ? Call("same", path: "same.txt") : Call("filler" + round, path: $"filler{round}.txt"),
+            23,
+            (_, _) => "same result");
+
+        Assert.Equal(23, executed);
         Assert.All(results, result => Assert.DoesNotContain(ToolLoopGuard.Marker, result));
     }
 
@@ -233,4 +292,5 @@ public sealed class ToolLoopGuardTests
         Assert.Null(ToolLoopGuard.MissingArgument("edit_file", new ArgumentException("The value must not be negative.")));
         Assert.Null(ToolLoopGuard.MissingArgument("edit_file", new InvalidOperationException(message)));
     }
+
 }

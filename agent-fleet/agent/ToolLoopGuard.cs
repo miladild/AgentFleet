@@ -13,12 +13,13 @@ namespace AgentFleet;
 /// identical failure in a turn gets a short note added to its result ("this is not working, try something else"); the
 /// fifth ends the turn, so the runner runs the step's check and the repair loop (see RepairLadder) takes over with fresh
 /// information. "The same" means the same tool with the same arguments and the same error text, apart from timings.
-/// Only calls that came back with an error count (see <see cref="IsError"/>): repeating a call that works is not a loop.
+/// Errors and explicit no-op results count as no progress. Repeated successful calls are checked within a short window.
 /// </summary>
 internal static partial class ToolLoopGuard
 {
     public const int NudgeAt = 3;
     public const int StopAt = 5;
+    private const int SuccessfulWindowSize = 10;
 
     /// <summary>Starts every note the guard adds to a result, so the same failure still counts as the same after one was added.</summary>
     internal const string Marker = "[Fleet loop guard]";
@@ -49,6 +50,9 @@ internal static partial class ToolLoopGuard
 
         return false;
     }
+
+    public static bool IsNoProgress(string result) =>
+        IsError(result) || result.StartsWith("Unchanged:", StringComparison.Ordinal);
 
     /// <summary>The third call in a turn that leaves out a required argument ends the turn (see <see cref="InvokeAsync"/>).</summary>
     public const int ArgumentFailureStopAt = 3;
@@ -106,17 +110,36 @@ internal static partial class ToolLoopGuard
         int start = Array.FindLastIndex(list, message => message.Role == ChatRole.User) + 1;
         string wanted = Normalise(text);
         return list.Skip(start).SelectMany(message => message.Contents).OfType<FunctionResultContent>()
-            .Count(result => result.Result?.ToString() is { } answer && IsError(answer) && Normalise(answer) == wanted);
+            .Count(result => result.Result?.ToString() is { } answer && IsNoProgress(answer) && Normalise(answer) == wanted);
     }
 
     /// <summary>
-    /// Looks at the call that just finished. After the third identical failure in this turn its result gets a note; the fifth
-    /// also ends the turn. Returns the result to give back to the model.
+    /// Looks at the call that just finished. Repeated no-progress results use the turn-wide rule; repeated successful results
+    /// use the recent-call window. Returns the result to give back to the model.
     /// </summary>
     public static object? Apply(FunctionInvocationContext context, object? result, ILogger? logger = null)
     {
-        if (result?.ToString() is not { } text || context.CallContent is not { } call || !IsError(text))
+        if (result?.ToString() is not { } text || context.CallContent is not { } call)
         {
+            return result;
+        }
+
+        if (!IsNoProgress(text))
+        {
+            int successfulRepeats = SuccessfulWindowRepeats(context.Messages, call, text);
+            if (successfulRepeats == NudgeAt)
+            {
+                logger?.LogWarning("Tool {Tool} returned the same successful result {Count} times in one turn; the model is told to change approach.", call.Name, successfulRepeats);
+                return text + $"\n\n{Marker} This exact call has now been made {successfulRepeats} times in this turn with the same result, so nothing is changing. Run the tests with run_command to see what fails, or try a different approach.";
+            }
+
+            if (successfulRepeats == StopAt)
+            {
+                logger?.LogWarning("Tool {Tool} returned the same successful result {Count} times in one turn; the turn ends here.", call.Name, successfulRepeats);
+                context.Terminate = true;
+                return text + $"\n\n{Marker} This exact call has now been made {successfulRepeats} times in this turn with the same result, so nothing is changing. Run the tests with run_command to see what fails, or try a different approach.";
+            }
+
             return result;
         }
 
@@ -145,8 +168,8 @@ internal static partial class ToolLoopGuard
     }
 
     /// <summary>
-    /// How many calls of this turn (everything after the latest user message) came back with this same error from the same
-    /// tool and arguments, counting the call that just finished.
+    /// How many calls of this turn (everything after the latest user message) came back with this same no-progress result from
+    /// the same tool and arguments, counting the call that just finished.
     /// </summary>
     public static int Repeats(IEnumerable<ChatMessage> messages, FunctionCallContent call, string result)
     {
@@ -175,7 +198,7 @@ internal static partial class ToolLoopGuard
                     }
 
                     waiting.Remove(answered);
-                    if (answer.Result?.ToString() is { } text && IsError(text))
+                    if (answer.Result?.ToString() is { } text && IsNoProgress(text))
                     {
                         failures.Add((KeyOf(answered), Normalise(text)));
                     }
@@ -187,6 +210,45 @@ internal static partial class ToolLoopGuard
         string error = Normalise(result);
         return failures.Count(failure => string.Equals(failure.Key, key, StringComparison.Ordinal) &&
             string.Equals(failure.Error, error, StringComparison.Ordinal)) + 1;
+    }
+
+    /// <summary>Counts matching successful calls among the last ten calls in this turn, including the current call.</summary>
+    public static int SuccessfulWindowRepeats(IEnumerable<ChatMessage> messages, FunctionCallContent call, string result)
+    {
+        ChatMessage[] list = messages.ToArray();
+        int start = Array.FindLastIndex(list, message => message.Role == ChatRole.User) + 1;
+        var calls = new List<(FunctionCallContent Call, string? Result)>();
+        var waiting = new List<int>();
+        for (int index = start; index < list.Length; index++)
+        {
+            foreach (AIContent content in list[index].Contents)
+            {
+                if (content is FunctionCallContent earlier)
+                {
+                    calls.Add((earlier, null));
+                    waiting.Add(calls.Count - 1);
+                }
+                else if (content is FunctionResultContent answer)
+                {
+                    int pending = waiting.FindIndex(candidate => string.Equals(calls[candidate].Call.CallId, answer.CallId, StringComparison.Ordinal));
+                    if (pending < 0) pending = 0;
+                    if (waiting.Count == 0) continue;
+                    int callIndex = waiting[pending];
+                    waiting.RemoveAt(pending);
+                    calls[callIndex] = (calls[callIndex].Call, answer.Result?.ToString());
+                }
+            }
+        }
+
+        // The invocation framework may include the current, still-unanswered call in Messages.
+        int current = calls.FindLastIndex(item => item.Result is null && string.Equals(item.Call.CallId, call.CallId, StringComparison.Ordinal));
+        if (current >= 0) calls.RemoveAt(current);
+
+        string key = KeyOf(call);
+        string normalized = Normalise(result);
+        return calls.TakeLast(SuccessfulWindowSize - 1).Count(item => item.Result is { } previous &&
+            string.Equals(KeyOf(item.Call), key, StringComparison.Ordinal) &&
+            string.Equals(Normalise(previous), normalized, StringComparison.Ordinal)) + 1;
     }
 
     // The tool and its arguments, in a form that does not depend on key order or on how long a written file was.

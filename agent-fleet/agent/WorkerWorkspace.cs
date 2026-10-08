@@ -42,6 +42,14 @@ internal interface IWorkerWorkspaceManager
 
 internal sealed record WorkerWorkspaceResume(IWorkerWorkspaceSession? Session, WorkerWorkspaceRecoveryAnalysis Analysis);
 
+internal interface IWorkerWorkspaceFileAccess
+{
+    bool Exists(string path);
+    Task<string> ReadTextAsync(string path, CancellationToken cancellationToken);
+    void CreateDirectoryTree(string path);
+    Task WriteTextAsync(string path, string content, CancellationToken cancellationToken);
+}
+
 /// <summary>Creates isolated per-plan copies on a selected, explicitly configured worker.</summary>
 internal sealed class WorkerWorkspaceManager(FleetOptions fleet, ILogger logger, TimeSpan commandTimeout) : IWorkerWorkspaceManager
 {
@@ -182,14 +190,16 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
     private readonly HashSet<string> _stepFiles = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _baselineHashes = new(StringComparer.OrdinalIgnoreCase);
     private readonly Action<IReadOnlyDictionary<string, string>>? _onSynced;
+    private readonly IWorkerWorkspaceFileAccess? _fileAccess;
     private SftpClient? _sftp;
     private SshClient? _ssh;
     private bool _disposed;
 
     internal WorkerWorkspaceSession(string machine, FleetWorkerWorkspaceConfig config, string hubRoot, ILogger logger, TimeSpan commandTimeout,
-        Action<IReadOnlyDictionary<string, string>>? onSynced = null)
+        Action<IReadOnlyDictionary<string, string>>? onSynced = null, IWorkerWorkspaceFileAccess? fileAccess = null)
     {
         _onSynced = onSynced;
+        _fileAccess = fileAccess;
         Machine = machine;
         _config = config;
         _hubRoot = hubRoot;
@@ -713,10 +723,8 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
         await _gate.WaitAsync(cancellationToken);
         try
         {
-            if (!_sftp!.Exists(remote)) return $"Error: file not found in worker workspace: {path}";
-            using var stream = _sftp.OpenRead(remote);
-            using var reader = new StreamReader(stream, detectEncodingFromByteOrderMarks: true);
-            string content = await reader.ReadToEndAsync(cancellationToken);
+            if (!RemoteFileExists(remote)) return $"Error: file not found in worker workspace: {path}";
+            string content = await ReadRemoteFileAsync(remote, cancellationToken);
             if (startLine is null && endLine is null) return Truncate(content);
             string[] lines = content.Split('\n');
             int first = Math.Max(startLine ?? 1, 1), last = Math.Min(endLine ?? lines.Length, lines.Length);
@@ -733,10 +741,10 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
         await _gate.WaitAsync(cancellationToken);
         try
         {
-            CreateDirectoryTree(Parent(remote));
-            using var output = _sftp!.Open(remote, FileMode.Create, FileAccess.Write);
-            using var writer = new StreamWriter(output, new UTF8Encoding(false));
-            await writer.WriteAsync(content.AsMemory(), cancellationToken);
+            if (RemoteFileExists(remote) && await ReadRemoteFileAsync(remote, cancellationToken) == content)
+                return $"Unchanged: {path} already has exactly this content; nothing was written. Run the tests with run_command to see what actually fails.";
+
+            await WriteRemoteFileAsync(remote, content, cancellationToken);
             return $"Wrote {content.Length} characters to {path} in worker workspace {Machine}.";
         }
         finally { _gate.Release(); }
@@ -753,16 +761,16 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
         if (crlf) { oldText = NormalizeLines(oldText); newText = NormalizeLines(newText); }
         int count = CountOccurrences(source, oldText);
         if (count == 0) return $"Error: oldText was not found in {path}; read the file and copy the exact text.";
-        if (count > 1 && replaceAll != true) return $"Error: oldText matches {count} places in {path}; include more surrounding lines or set replaceAll to true.";
         string updated = source.Replace(oldText, newText, StringComparison.Ordinal);
+        if (updated == source)
+            return $"Unchanged: this edit changes nothing in {path} (oldText and newText are the same, or the file already contains the new text). The file is as it was. Run the tests with run_command to see what actually fails, or read the file and change something else.";
+        if (count > 1 && replaceAll != true) return $"Error: oldText matches {count} places in {path}; include more surrounding lines or set replaceAll to true.";
         if (crlf) updated = updated.Replace("\n", "\r\n", StringComparison.Ordinal);
         Audit("edit_file", path);
         await _gate.WaitAsync(cancellationToken);
         try
         {
-            using var output = _sftp!.Open(target, FileMode.Create, FileAccess.Write);
-            using var writer = new StreamWriter(output, new UTF8Encoding(false));
-            await writer.WriteAsync(updated.AsMemory(), cancellationToken);
+            await WriteRemoteFileAsync(target, updated, cancellationToken);
             return $"Edited {path}: replaced {(replaceAll == true ? count : 1)} occurrence(s) in worker workspace {Machine}.";
         }
         finally { _gate.Release(); }
@@ -929,6 +937,9 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
         if (!path.StartsWith("/", StringComparison.Ordinal))
             throw new UnauthorizedAccessException("Worker tool paths must be absolute on the remote machine.");
 
+        // File-access fakes represent a trusted in-memory workspace and have no link metadata.
+        if (_fileAccess is not null) return;
+
         string[] paths = WorkerWorkspacePath.PathsForLinkCheck(path, _config.Platform);
         for (int i = 0; i < paths.Length; i++)
         {
@@ -1049,6 +1060,31 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
         string parent = Parent(path);
         if (parent != path && !_sftp.Exists(parent)) CreateDirectoryTree(parent);
         if (!_sftp.Exists(path)) _sftp.CreateDirectory(path);
+    }
+
+    private bool RemoteFileExists(string path) => _fileAccess?.Exists(path) ?? _sftp!.Exists(path);
+
+    private async Task<string> ReadRemoteFileAsync(string path, CancellationToken cancellationToken)
+    {
+        if (_fileAccess is not null) return await _fileAccess.ReadTextAsync(path, cancellationToken);
+        using var stream = _sftp!.OpenRead(path);
+        using var reader = new StreamReader(stream, detectEncodingFromByteOrderMarks: true);
+        return await reader.ReadToEndAsync(cancellationToken);
+    }
+
+    private async Task WriteRemoteFileAsync(string path, string content, CancellationToken cancellationToken)
+    {
+        if (_fileAccess is not null)
+        {
+            _fileAccess.CreateDirectoryTree(Parent(path));
+            await _fileAccess.WriteTextAsync(path, content, cancellationToken);
+            return;
+        }
+
+        CreateDirectoryTree(Parent(path));
+        using var output = _sftp!.Open(path, FileMode.Create, FileAccess.Write);
+        using var writer = new StreamWriter(output, new UTF8Encoding(false));
+        await writer.WriteAsync(content.AsMemory(), cancellationToken);
     }
 
     private void InitializeWorkspaceGit()
