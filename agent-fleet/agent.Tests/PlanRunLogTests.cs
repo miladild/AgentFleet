@@ -259,6 +259,24 @@ public sealed class PlanRunLogTests : PlanTestBase
     }
 
     [Fact]
+    public void An_older_round_event_loads_with_model_and_context_unrecorded()
+    {
+        PlanRecord plan = Approved(Step("one"));
+        Store.AddEvent(plan.Id, 1, 1, RunEventKind.RoundClassified, detail: "Round classified.");
+        string path = Path.Combine(PlansDirectory, plan.Id + ".json");
+        string legacy = System.Text.RegularExpressions.Regex.Replace(File.ReadAllText(path), ",\\s*\"model\": null", string.Empty);
+        legacy = System.Text.RegularExpressions.Regex.Replace(legacy, ",\\s*\"contextCeiling\": null", string.Empty);
+        Assert.DoesNotContain("\"model\"", legacy);
+        Assert.DoesNotContain("\"contextCeiling\"", legacy);
+        File.WriteAllText(path, legacy);
+
+        PlanRunEvent round = Assert.Single(Store.Get(plan.Id)!.Events!);
+
+        Assert.Null(round.Model);
+        Assert.Null(round.ContextCeiling);
+    }
+
+    [Fact]
     public void The_router_footer_names_the_machine()
     {
         Assert.Equal("worker1", PlanRunner.ViaNode("Done.\n\n_— via worker1_"));

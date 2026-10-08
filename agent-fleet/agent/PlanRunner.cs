@@ -1847,12 +1847,19 @@ internal sealed partial class PlanRunner
               (filesChanged == 0 ? ", only lock or generated files, so not counted as progress" : string.Empty);
         string detail = $"Round classified: {failureClass}; signature size: {signature.Size}; files changed: {files}; " +
             $"tool calls: {model.ToolCalls}; edit tool called: {(model.EditToolCalled ? "yes" : "no")}.";
+        FleetNodeDefinition? modelDefinition = null;
+        if (model.ModelNode is not null && _fleetOptions is not null)
+        {
+            _fleetOptions.TryGetNode(model.ModelNode, out modelDefinition);
+        }
+
         _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.RoundClassified, step.Tier,
             node: model.ModelNode ?? model.Machine, detail: detail,
             modelNode: model.ModelNode, workspaceNode: model.Machine,
             failureClass: failureClass, failureSignature: signature.Value, failureSignatureSize: signature.Size,
             filesChanged: changedFiles.Count, toolCalls: model.ToolCalls, editToolCalled: model.EditToolCalled,
-            rung: rung, round: round, changedFiles: changedFiles, durationSeconds: durationSeconds);
+            rung: rung, round: round, changedFiles: changedFiles, durationSeconds: durationSeconds,
+            model: modelDefinition?.Model, contextCeiling: modelDefinition?.ContextLength);
         string? previous = history.LastOrDefault(earlier => !string.IsNullOrWhiteSpace(earlier.Signature))?.Signature;
         return Task.FromResult(new RoundOutcome(classification, signature, previous, changedFiles, meaningful,
             FilesKnown: model.WorkBefore is not null, model.EditToolCalled));
