@@ -5,7 +5,7 @@
   "steps": [
     {
       "title": "Create greet",
-      "detail": "Create src/greet.js and export greet(name). For a non-empty string, greet(name) returns exactly \"Hello, \" + name + \"!\". For an empty string or a value that is not a string, throw a TypeError. Add test/greet.test.js using node:test with tests for a normal name, an empty string, and a non-string value. The check intentionally waits 20 seconds before running the tests; that wait is expected.",
+      "detail": "Create src/greet.js and export it as a named export: module.exports = { greet } (CommonJS). For a non-empty string, greet(name) returns exactly \"Hello, \" + name + \"!\". For an empty string or a value that is not a string, throw a TypeError. Add test/greet.test.js using node:test with tests for a normal name, an empty string, and a non-string value. The check intentionally waits 20 seconds before running the tests; that wait is expected.",
       "files": ["src/greet.js", "test/greet.test.js"],
       "verify": "node -e \"setTimeout(()=>{},20000)\" && node --test",
       "tier": "standard",
