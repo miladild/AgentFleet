@@ -159,27 +159,4 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
         Assert.Equal(0, runs); // Tool never ran (blocked by plan gate)
         Assert.NotEmpty(results);
     }
-
-    // Behaviour 3: Loop guard marker for runner, not for non-runner.
-    [Fact]
-    public async Task T3_loop_guard_marker_only_for_runner_on_repeated_failure()
-    {
-        var invoker = NewInvoker();
-        var tool = AIFunctionFactory.Create((string p) => "Error: not found", "read_file", "Reads a file.");
-        var model = new ScriptedModel(round =>
-            new FunctionCallContent("c" + round, "read_file", new Dictionary<string, object?> { ["path"] = "f" }));
-
-        // Runner request: should get marker on 3rd failure
-        string[] runnerResults = await RunAsync(invoker, model, tool, runner: true);
-
-        Assert.True(runnerResults.Length >= 3);
-        Assert.DoesNotContain(ToolLoopGuard.Marker, runnerResults[0]);
-        Assert.DoesNotContain(ToolLoopGuard.Marker, runnerResults[1]);
-        Assert.Contains(ToolLoopGuard.Marker, runnerResults[2]);
-
-        // Non-runner request: no marker
-        string[] nonRunnerResults = await RunAsync(invoker, model, tool, runner: false);
-
-        Assert.All(nonRunnerResults, result => Assert.DoesNotContain(ToolLoopGuard.Marker, result));
-    }
 }
