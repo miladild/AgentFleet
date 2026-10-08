@@ -58,7 +58,7 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
         public void Dispose() { }
     }
 
-    private async Task<string[]> RunAsync(FleetFunctionInvoker invoker, ScriptedModel model, AITool tool, bool runner, string? role = null, string? contextId = null)
+    private async Task<string[]> RunAsync(FleetFunctionInvoker invoker, ScriptedModel model, AITool tool, bool runner, string? role = null, string? contextId = null, CancellationToken cancellationToken = default)
     {
         IChatClient client = new ChatClientBuilder(model).UseFunctionInvocation(null, o =>
         {
@@ -77,7 +77,7 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
         }
 
         using IDisposable scope = Scope(contextId ?? NewContextId());
-        ChatResponse response = await client.GetResponseAsync("go", options);
+        ChatResponse response = await client.GetResponseAsync("go", options, cancellationToken);
         return response.Messages.SelectMany(m => m.Contents).OfType<FunctionResultContent>()
             .Select(c => c.Result?.ToString() ?? "").ToArray();
     }
@@ -344,9 +344,12 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
         Assert.True(ContextText.Bool(result.Payload, "isError"));
     }
 
-    // Behaviour 7 variant: Tool throws OperationCanceledException - not recorded as an error in the journal.
+    // Behaviour 7 variant 1: Tool throws OperationCanceledException with a live token - comes back as an error result, not journaled as a tool error.
+    // The Microsoft.Extensions.AI FunctionInvokingChatClient catches exceptions thrown by the function invoker
+    // and turns them into error results ONLY when the cancellation token is NOT cancelled;
+    // no ToolResult event is created because RecordToolCall is not called when an exception is turned into a result.
     [Fact]
-    public async Task T7b_tool_throws_operation_canceled_exception_not_recorded_as_error()
+    public async Task T7b1_A_tool_that_throws_OperationCanceledException_with_a_live_token_comes_back_as_an_error_result_and_is_not_journaled_as_a_tool_error()
     {
         var invoker = NewInvoker();
         var tool = AIFunctionFactory.Create((string path) =>
@@ -361,21 +364,45 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
         });
 
         string contextId = NewContextId();
-        try
-        {
-            await RunAsync(invoker, model, tool, runner: false, contextId: contextId);
-        }
-        catch (OperationCanceledException)
-        {
-            // Expected: exception propagates
-        }
+        string[] results = await RunAsync(invoker, model, tool, runner: false, contextId: contextId);
 
-        // Verify the journal has NO error record for that call (not recorded since exception was thrown, not caught)
+        // With a live (not-cancelled) token, the exception is turned into an error result
+        Assert.NotEmpty(results);
+        Assert.NotEqual("", results[0]); // Error text is not empty
+
+        // Verify the journal contains NO ToolResult event for that call
+        // (exception was turned into a result by the framework, not recorded by RecordToolCall)
         IReadOnlyList<FleetContextEvent> events = Store.AllEvents(contextId);
-        var resultEvent = events.FirstOrDefault(e => e.Kind == FleetContextEventKind.ToolResult);
-        if (resultEvent is not null)
+        Assert.DoesNotContain(events, e => e.Kind == FleetContextEventKind.ToolResult);
+    }
+
+    // Behaviour 7 variant 2: Cancelled request propagates cancellation - exception escapes and no ToolResult is journaled.
+    // When the cancellation token IS cancelled, the exception propagates out of GetResponseAsync.
+    [Fact]
+    public async Task T7b2_A_cancelled_request_propagates_cancellation()
+    {
+        var invoker = NewInvoker();
+        var cts = new CancellationTokenSource();
+        var tool = AIFunctionFactory.Create((string path) =>
         {
-            Assert.False(ContextText.Bool(resultEvent.Payload, "isError"));
-        }
+            cts.Cancel();
+            throw new OperationCanceledException(cts.Token);
+        }, "read_file", "Reads a file.");
+        int callCount = 0;
+        var model = new ScriptedModel(round =>
+        {
+            callCount++;
+            return callCount <= 1 ? new FunctionCallContent("c" + round, "read_file", new Dictionary<string, object?> { ["path"] = "f" }) : null;
+        });
+
+        string contextId = NewContextId();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        {
+            await RunAsync(invoker, model, tool, runner: false, contextId: contextId, cancellationToken: cts.Token);
+        });
+
+        // Verify the journal contains NO ToolResult event for that call
+        IReadOnlyList<FleetContextEvent> events = Store.AllEvents(contextId);
+        Assert.DoesNotContain(events, e => e.Kind == FleetContextEventKind.ToolResult);
     }
 }
