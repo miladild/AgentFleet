@@ -581,30 +581,8 @@ int planRoundsPerRung = int.TryParse(builder.Configuration["FLEET_PLAN_ROUNDS_PE
     ? roundsPerRung
     : RepairLadder.DefaultRoundsPerRung;
 
-IChatClient agentClient = new ChatClientBuilder(fleetClient)
-    // A plan step on a worker is told about the worker's machine, not the hub's (see WorkerPlatformChatClient).
-    .Use(inner => new WorkerPlatformChatClient(inner))
-    // Next: the current tool list goes onto the request before anything looks for a tool by name.
-    .Use(inner => new DynamicToolsChatClient(inner, toolRegistry, (messages, options, toolName) =>
-        PlanRunnerToolPolicy.Offers(
-            toolName,
-            fromRunner: options?.AdditionalProperties?.ContainsKey(FleetRoutingChatClient.RunnerTierKey) == true,
-            role: FleetRoutingChatClient.RunnerRole(options)) &&
-        ContextTools.ShouldOffer(
-            toolName,
-            hasContext: contextJournal.Current is not null,
-            planModeOn: planModeService.Effective,
-            fromPlanRunner: options?.AdditionalProperties?.ContainsKey(FleetRoutingChatClient.RunnerTierKey) == true,
-            lastUserText: messages.LastOrDefault(message => message.Role == ChatRole.User)?.Text)))
-    .UseFunctionInvocation(loggerFactory, invocation =>
-    {
-        invocation.IncludeDetailedErrors = true;
-        invocation.MaximumIterationsPerRequest = 200;
-        invocation.MaximumConsecutiveErrorsPerRequest = 6;
-        var invoker = new FleetFunctionInvoker(contextJournal, planModeService, planStore, readOnlyTools, planTools, toolLoopLogger, planStepToolRounds);
-        invocation.FunctionInvoker = invoker.InvokeAsync;
-    })
-    .Build();
+var invoker = new FleetFunctionInvoker(contextJournal, planModeService, planStore, readOnlyTools, planTools, toolLoopLogger, planStepToolRounds);
+IChatClient agentClient = FleetHarness.BuildAgentClient(fleetClient, toolRegistry, contextJournal, planModeService, invoker, loggerFactory);
 
 var fleetAgent = new ChatClientAgent(
     agentClient,
