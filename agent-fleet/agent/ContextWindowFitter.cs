@@ -47,6 +47,16 @@ internal static class ContextWindowFitters
             return ClassicContextWindowFitter.Instance;
         }
 
+        if (string.Equals(trimmed, "maf-truncate", StringComparison.OrdinalIgnoreCase))
+        {
+            return new MafContextWindowFitter(collapseToolResults: false, logger);
+        }
+
+        if (string.Equals(trimmed, "maf-collapse", StringComparison.OrdinalIgnoreCase))
+        {
+            return new MafContextWindowFitter(collapseToolResults: true, logger);
+        }
+
         logger?.LogWarning("Unknown context-window fitter '{Value}'. Accepted values are: classic, maf-truncate, maf-collapse. Using classic.", value);
         return ClassicContextWindowFitter.Instance;
     }
