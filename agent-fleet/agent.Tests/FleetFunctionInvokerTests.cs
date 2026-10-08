@@ -118,4 +118,68 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
         Assert.True(runs > 5, "Non-runner should not be cut by round limit (runs=" + runs + ")");
         Assert.True(model.Requests > 5, "Non-runner requests should exceed round limit");
     }
+
+    // Behaviour 1: Runner policy refusal returns the refusal text and ends the turn.
+    [Fact]
+    public async Task T1_runner_policy_refused_command_returns_refusal()
+    {
+        var invoker = NewInvoker();
+        int runs = 0;
+        var tool = AIFunctionFactory.Create((string cmd) => { runs++; return "ok"; }, "run_command", "Runs a command.");
+        // "npm publish" is refused by the policy as it reaches a remote service
+        var model = new ScriptedModel(round =>
+            new FunctionCallContent("c" + round, "run_command", new Dictionary<string, object?> { ["command"] = "npm publish" }));
+
+        string[] results = await RunAsync(invoker, model, tool, runner: true);
+
+        Assert.Equal(0, runs); // Tool never ran
+        Assert.Equal(1, model.Requests); // Turn ended after first request
+        Assert.NotEmpty(results);
+        // Check that a refusal message was returned (either from policy or plan gate depending on the setup)
+        Assert.True(results[0].Contains("refused") || results[0].Contains("outside"),
+            "Expected a refusal message but got: " + results[0]);
+    }
+
+    // Behaviour 2: Non-runner request in planning phase that blocks the tool.
+    [Fact]
+    public async Task T2_plan_gate_blocks_write_tool_in_planning_phase()
+    {
+        var invoker = NewInvoker(planMode: true);
+        int runs = 0;
+        var tool = AIFunctionFactory.Create((string p, string c) => { runs++; return "wrote"; }, "write_file", "Writes a file.");
+        int callCount = 0;
+        var model = new ScriptedModel(round =>
+        {
+            callCount++;
+            return callCount <= 1 ? new FunctionCallContent("c" + round, "write_file", new Dictionary<string, object?> { ["path"] = "f", ["content"] = "x" }) : null;
+        });
+
+        string[] results = await RunAsync(invoker, model, tool, runner: false);
+
+        Assert.Equal(0, runs); // Tool never ran (blocked by plan gate)
+        Assert.NotEmpty(results);
+    }
+
+    // Behaviour 3: Loop guard marker for runner, not for non-runner.
+    [Fact]
+    public async Task T3_loop_guard_marker_only_for_runner_on_repeated_failure()
+    {
+        var invoker = NewInvoker();
+        var tool = AIFunctionFactory.Create((string p) => "Error: not found", "read_file", "Reads a file.");
+        var model = new ScriptedModel(round =>
+            new FunctionCallContent("c" + round, "read_file", new Dictionary<string, object?> { ["path"] = "f" }));
+
+        // Runner request: should get marker on 3rd failure
+        string[] runnerResults = await RunAsync(invoker, model, tool, runner: true);
+
+        Assert.True(runnerResults.Length >= 3);
+        Assert.DoesNotContain(ToolLoopGuard.Marker, runnerResults[0]);
+        Assert.DoesNotContain(ToolLoopGuard.Marker, runnerResults[1]);
+        Assert.Contains(ToolLoopGuard.Marker, runnerResults[2]);
+
+        // Non-runner request: no marker
+        string[] nonRunnerResults = await RunAsync(invoker, model, tool, runner: false);
+
+        Assert.All(nonRunnerResults, result => Assert.DoesNotContain(ToolLoopGuard.Marker, result));
+    }
 }
