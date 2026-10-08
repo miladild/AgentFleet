@@ -183,39 +183,70 @@ public sealed class MafContextWindowFitterTests
             Assert.True(collapseChanges <= collapseCompacted / 2.0);
     }
 
-    // I8: Collapse - collapsed lines are valid, bounded.
+    // I8: Collapse - collapsed lines are valid, deterministic, with merged message.
     [Fact]
     public async Task I8_collapse_lines_valid()
     {
         var fitter = new MafContextWindowFitter(collapseToolResults: true);
         List<ChatMessage> input = ContextWindowTestHelper.BuildConversation(35);
 
-        // Add a large write_file
-        input.Add(new ChatMessage(ChatRole.Assistant,
+        // INSERT large write_file at index 2 (right after task) so it falls in collapsed region
+        input.Insert(2, new ChatMessage(ChatRole.Assistant,
             [new FunctionCallContent("large_write", "write_file",
                 new Dictionary<string, object?> { ["path"] = "file.txt", ["content"] = new string('x', 5_000) })]));
-        input.Add(new ChatMessage(ChatRole.Tool,
+        input.Insert(3, new ChatMessage(ChatRole.Tool,
             [new FunctionResultContent("large_write", "Wrote file")]));
 
         IReadOnlyList<ChatMessage> fitted = await fitter.FitAsync(input, null, 20_000, 1.0, CancellationToken.None);
 
-        var collapsed = fitted
-            .Where(m => m.Role == ChatRole.Assistant)
-            .SelectMany(m => m.Contents.OfType<TextContent>())
-            .Where(t => t.Text.StartsWith("[earlier tool call]"))
+        // Must compact
+        Assert.NotSame(fitted, input);
+        Assert.Equal(0, fitter.FallbackCount);
+
+        // Exactly ONE merged message
+        var mergedMessages = fitted
+            .Where(m => m.Role == ChatRole.Assistant &&
+                        m.Contents.Count == 1 &&
+                        m.Contents[0] is TextContent t &&
+                        t.Text.StartsWith("[earlier tool calls, shortened]"))
             .ToList();
 
-        foreach (var line in collapsed)
+        Assert.Single(mergedMessages);
+        var mergedMessage = mergedMessages[0];
+
+        // Message must contain only TextContent
+        Assert.All(mergedMessage.Contents, content => Assert.IsType<TextContent>(content));
+
+        // Check structure
+        var mergedText = ((TextContent)mergedMessage.Contents[0]).Text;
+        Assert.True(mergedText.StartsWith("[earlier tool calls, shortened]\n"));
+
+        // Check numbered lines exist (at least 10)
+        var lines = mergedText.Split('\n');
+        var numberedLines = lines.Where(l => char.IsDigit(l.FirstOrDefault()) && l.Contains(". ")).ToList();
+        Assert.True(numberedLines.Count >= 10);
+
+        // Check line that mentions file.txt
+        var fileLineLine = numberedLines.FirstOrDefault(l => l.Contains("file.txt"));
+        Assert.NotNull(fileLineLine);
+        Assert.Contains("...", fileLineLine);
+        Assert.True(fileLineLine.Length < 700);
+        Assert.DoesNotContain(new string('x', 200), fileLineLine);
+
+        // Check RemovedMarker appears at most once per line
+        foreach (var line in numberedLines)
         {
-            // No function calls in the text
-            Assert.DoesNotContain("FunctionCallContent", line.Text);
-
-            // RemovedMarker at most once
-            int markerCount = line.Text.Split(ContextSizeChatClient.RemovedMarker, StringSplitOptions.None).Length - 1;
+            int markerCount = line.Split(ContextSizeChatClient.RemovedMarker, StringSplitOptions.None).Length - 1;
             Assert.True(markerCount <= 1);
+        }
 
-            // Content is bounded
-            Assert.True(line.Text.Length < 2000);
+        // Last six messages of output equal input's last six by Signature
+        Assert.True(fitted.Count >= 6);
+        for (int i = 0; i < 6; i++)
+        {
+            Assert.Equal(
+                ContextWindowTestHelper.Signature(fitted[fitted.Count - 6 + i]),
+                ContextWindowTestHelper.Signature(input[input.Count - 6 + i]));
         }
     }
 
@@ -371,5 +402,40 @@ public sealed class MafContextWindowFitterTests
         Assert.Equal(
             ContextWindowTestHelper.Signature(fitted[2]),
             ContextWindowTestHelper.Signature(input[2]));
+    }
+
+    // B3: Merge is deterministic.
+    [Fact]
+    public async Task Collapse_merge_is_deterministic()
+    {
+        List<ChatMessage> input = ContextWindowTestHelper.BuildConversation(35);
+
+        var fitter1 = new MafContextWindowFitter(collapseToolResults: true);
+        IReadOnlyList<ChatMessage> fitted1 = await fitter1.FitAsync(input, null, 20_000, 1.0, CancellationToken.None);
+        var sigs1 = fitted1.Select(ContextWindowTestHelper.Signature).ToList();
+
+        var fitter2 = new MafContextWindowFitter(collapseToolResults: true);
+        IReadOnlyList<ChatMessage> fitted2 = await fitter2.FitAsync(input, null, 20_000, 1.0, CancellationToken.None);
+        var sigs2 = fitted2.Select(ContextWindowTestHelper.Signature).ToList();
+
+        Assert.Equal(sigs1, sigs2);
+    }
+
+    // B4: Truncate has no merged messages.
+    [Fact]
+    public async Task Truncate_policy_has_no_merged_message()
+    {
+        var fitter = new MafContextWindowFitter(collapseToolResults: false);
+        List<ChatMessage> input = ContextWindowTestHelper.BuildConversation(35);
+
+        IReadOnlyList<ChatMessage> fitted = await fitter.FitAsync(input, null, 20_000, 1.0, CancellationToken.None);
+
+        var mergedCount = fitted
+            .Count(m => m.Role == ChatRole.Assistant &&
+                        m.Contents.Count == 1 &&
+                        m.Contents[0] is TextContent t &&
+                        t.Text.StartsWith("[earlier tool calls"));
+
+        Assert.Equal(0, mergedCount);
     }
 }
