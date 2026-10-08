@@ -113,6 +113,12 @@ internal sealed class MafContextWindowFitter : IContextWindowFitter
             var compact = CompactAsyncOverride ?? _compactAsync;
             IEnumerable<ChatMessage> compactedBody = await compact(strategy, body, _logger, cancellationToken);
 
+            // Merge collapsed messages (maf-collapse only)
+            if (_collapseToolResults)
+            {
+                compactedBody = MergeCollapsed(compactedBody);
+            }
+
             List<ChatMessage> result = head.Concat(compactedBody).ToList();
 
             // Return the same instance if nothing was removed.
@@ -215,5 +221,71 @@ internal sealed class MafContextWindowFitter : IContextWindowFitter
             content_str += " " + ContextSizeChatClient.RemovedMarker;
         }
         return content_str;
+    }
+
+    /// <summary>
+    /// Merge consecutive collapsed messages into one per run.
+    /// A collapsed message is: role Assistant, one TextContent starting with "[earlier tool call] ".
+    /// Merges into: "[earlier tool calls, shortened]\n1. line1\n2. line2\n..."
+    /// </summary>
+    private static List<ChatMessage> MergeCollapsed(IEnumerable<ChatMessage> messages)
+    {
+        var result = new List<ChatMessage>();
+        var collapsedRun = new List<ChatMessage>();
+
+        foreach (var msg in messages)
+        {
+            bool isCollapsed = msg.Role == ChatRole.Assistant &&
+                msg.Contents.Count == 1 &&
+                msg.Contents[0] is TextContent textContent &&
+                textContent.Text.StartsWith("[earlier tool call] ", StringComparison.Ordinal);
+
+            if (isCollapsed)
+            {
+                collapsedRun.Add(msg);
+            }
+            else
+            {
+                // End of run - merge if there were any
+                if (collapsedRun.Count > 0)
+                {
+                    result.Add(CreateMergedMessage(collapsedRun));
+                    collapsedRun.Clear();
+                }
+                result.Add(msg);
+            }
+        }
+
+        // Handle final run
+        if (collapsedRun.Count > 0)
+        {
+            result.Add(CreateMergedMessage(collapsedRun));
+        }
+
+        return result;
+    }
+
+    private static ChatMessage CreateMergedMessage(List<ChatMessage> collapsed)
+    {
+        var lines = new List<string> { "[earlier tool calls, shortened]" };
+        int lineNum = 1;
+
+        foreach (var msg in collapsed)
+        {
+            var textContent = (TextContent)msg.Contents[0];
+            string originalText = textContent.Text;
+
+            // Remove "[earlier tool call] " prefix
+            string prefix = "[earlier tool call] ";
+            string withoutPrefix = originalText.StartsWith(prefix, StringComparison.Ordinal)
+                ? originalText[prefix.Length..]
+                : originalText;
+
+            lines.Add($"{lineNum}. {withoutPrefix}");
+            lineNum++;
+        }
+
+        string mergedText = string.Join("\n", lines);
+        return new ChatMessage(ChatRole.Assistant, mergedText);
     }
 }
