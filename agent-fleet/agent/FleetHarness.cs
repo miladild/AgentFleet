@@ -4,7 +4,7 @@ namespace AgentFleet;
 
 /// <summary>
 /// Composition of the agent pipeline. Five rules govern the architecture:
-/// 1. Context fitting happens once, per machine, in the node client (WorkerPlatformChatClient).
+/// 1. Context fitting happens once, per machine, in the node client (ContextSizeChatClient).
 /// 2. The tools a model is offered are decided in one place: the tool registry through DynamicToolsChatClient.
 /// 3. Tool-call policy lives in the function invoker (FleetFunctionInvoker).
 /// 4. Conversation history has one owner: the session store.
