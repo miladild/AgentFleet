@@ -167,6 +167,8 @@ internal static partial class PlanFailure
             {
                 case OllamaSharp.Models.Exceptions.ModelDoesNotSupportToolsException:
                     return false;
+                case Renci.SshNet.Common.SshConnectionException or Renci.SshNet.Common.SshOperationTimeoutException:
+                    return true;
                 case OllamaSharp.Models.Exceptions.OllamaException:
                 case HttpRequestException or System.Net.Sockets.SocketException or IOException or TimeoutException:
                 case System.ClientModel.ClientResultException { Status: 0 or 408 or 429 or >= 500 }:

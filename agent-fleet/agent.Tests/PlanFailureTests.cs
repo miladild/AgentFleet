@@ -48,6 +48,17 @@ public sealed class PlanFailureTests
     }
 
     [Fact]
+    public void Ssh_connection_and_operation_timeouts_are_infrastructure_but_authentication_is_not()
+    {
+        Assert.Equal(FailureClass.Infra, PlanFailure.Classify(
+            new Renci.SshNet.Common.SshConnectionException("Client not connected."), string.Empty, []));
+        Assert.Equal(FailureClass.Infra, PlanFailure.Classify(
+            new Renci.SshNet.Common.SshOperationTimeoutException("Operation timed out."), string.Empty, []));
+        Assert.Equal(FailureClass.Unknown, PlanFailure.Classify(
+            new Renci.SshNet.Common.SshAuthenticationException("Authentication failed."), string.Empty, []));
+    }
+
+    [Fact]
     public void A_first_failing_round_without_an_edit_is_a_no_op()
     {
         Assert.Equal(FailureClass.NoOp, PlanFailure.Classify(null,
