@@ -135,6 +135,8 @@ public sealed class PlanSecondOpinionTests : PlanTestBase
         Assert.Contains("Reviewed by hub", reviews[0].Detail);
         PlanRunEvent stepDone = Assert.Single(after.Events!, e => e.Kind == RunEventKind.StepDone);
         Assert.Contains("Evidence: own check and a second opinion agreed.", stepDone.Detail);
+        PlanRunEvent planDone = Assert.Single(after.Events!, e => e.Kind == RunEventKind.PlanDone);
+        Assert.Equal("Every step passed its check. Independent review: 1 of 1 steps.", planDone.Detail);
     }
 
     [Fact]
