@@ -73,6 +73,47 @@ tools can request VS Code's native confirmation UI. `/api/fleet-tools` exposes
 only enabled fleet MCP tool descriptions and schemas for safe duplicate
 detection; it does not return MCP URLs, headers or the full config.
 
+## Agent Framework harness
+
+The agent is a `ChatClientAgent` from Microsoft Agent Framework, served over AG-UI. Plan steps call the same agent
+through its session API (`FleetStepSession`), so a step and a chat turn share one composition. The chat client is built
+in one place, `FleetHarness.BuildAgentClient`. From outermost to innermost, a request passes these layers:
+
+1. `ChatClientAgent`: the agent, its sessions, and the AG-UI endpoint.
+2. `WorkerPlatformChatClient`: during a plan step on a worker, tells the model about the worker's platform instead of the hub's.
+3. `DynamicToolsChatClient`: offers the tools the registry allows for this request (`FleetToolRegistry`).
+4. `FunctionInvokingChatClient`: the framework's tool-call loop, with the `FleetFunctionInvoker` hook (runner policy,
+   plan gate, loop guard, journal). It runs inside the tools and platform layers and calls the router on every round.
+5. `SwappableChatClient`: holds the current router, so a saved configuration takes effect on the next request.
+6. `FleetRoutingChatClient`: chooses a machine for each request.
+7. Per machine: `ResilientChatClient` (fails over to the hub fallback when a node fails before it answers), then
+   `ToolCallRescueChatClient` (repairs a known Ollama tool-call parser bug), then `ContextSizeChatClient` (sizes the
+   context window and shortens a conversation that outgrew it through the context policy), then the model server.
+
+`ContextSizeChatClient` is used for the Ollama-native API. Nodes configured with the `openai` API get the raw
+OpenAI-compatible client and no context sizing.
+
+The rules the harness follows:
+
+1. Context fitting happens once, per machine, in the node client (`ContextSizeChatClient`).
+2. The tools a model is offered are decided in one place: the tool registry through `DynamicToolsChatClient`.
+3. Tool-call policy lives in the function invoker (`FleetFunctionInvoker`).
+4. Conversation history has one owner: the session store.
+5. New hooks use the framework's extension points (middleware, the function-invocation hook, context providers for
+   adding instructions, the session store).
+
+### What stays our own code, and why
+
+The plan engine is ours: durable steps, checks, the repair ladder, parks and deadlines. Plan-level approval is ours too.
+The SSH worker sandbox is ours as well: it pins each worker's SHA256 host key, confines paths to the staged project, and
+filters what is staged. The framework's harness offers no equivalent for any of these, and the project's security
+requirements (see [security.md](security.md)) keep them in our code.
+
+### Context policy
+
+`FLEET_CONTEXT_FIT` selects the context-window policy. The default is `classic`; the framework's compaction policies
+(`maf-truncate`, `maf-collapse`) are experimental alternatives. Context is cut exactly once, per machine, in the node client.
+
 ## Configuration as data
 
 `FleetConfigStore` loads `fleet.config.json`, normalizes it (default tiers, one fallback, `/v1` on addresses), validates it,
