@@ -68,7 +68,7 @@ public sealed class FleetHarnessTests : ContextTestBase
     }
 
     [Fact]
-    public void The_chain_from_outermost_to_innermost_is_function_invocation_dynamic_tools_worker_platform_then_the_model()
+    public void The_chain_from_outermost_to_innermost_is_worker_platform_dynamic_tools_function_invocation_then_the_model()
     {
         var fake = new RecordingChatClient();
         var registry = CreateRegistry();
