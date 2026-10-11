@@ -44,6 +44,44 @@ public sealed partial class PlanRunnerTests
         };
 
     [Fact]
+    public async Task Conservative_mode_keeps_check_audits_on_the_worker_and_explains_why()
+    {
+        WriteProject(BuildOnly);
+        PlanRecord plan = HealPlan("npm run dev", machine: "worker-a");
+        (FleetOptions options, FleetHealthMonitor health) = HubFleet();
+        FleetModeService mode = ModeService(FleetMode.Conservative);
+        FakeStepAgent agent = Healer(_ => FakeStepAgent.Proposes("npm run build"));
+
+        await RepairRunner(agent, command => command == "npm run build" ? Pass(command) : FailWith("not run"), options, health,
+            modeService: mode).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+        FakeAuditCall audit = Assert.Single(agent.Audits);
+        Assert.Equal("worker-a", audit.Machine);
+        Assert.Equal("standard", audit.Tier);
+        Assert.Contains(Store.Get(plan.Id)!.Events!, e => e.Kind == RunEventKind.CheckAudit && e.FailureClass == "Started" &&
+            e.Detail.Contains("Hub rescue is off while Hub mode is Conservative", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Aggressive_mode_keeps_check_audits_on_the_hub()
+    {
+        WriteProject(BuildOnly);
+        PlanRecord plan = HealPlan("npm run dev", machine: "worker-a");
+        (FleetOptions options, FleetHealthMonitor health) = HubFleet();
+        FleetModeService mode = ModeService(FleetMode.Aggressive);
+        FakeStepAgent agent = Healer(_ => FakeStepAgent.Proposes("npm run build"));
+
+        await RepairRunner(agent, command => command == "npm run build" ? Pass(command) : FailWith("not run"), options, health,
+            modeService: mode).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+        FakeAuditCall audit = Assert.Single(agent.Audits);
+        Assert.Equal("hub", audit.Machine);
+        Assert.Equal("heavy", audit.Tier);
+    }
+
+    [Fact]
     public async Task A_saved_check_that_never_finishes_is_healed_before_the_step_starts_and_costs_no_attempt()
     {
         WriteProject(BuildOnly);

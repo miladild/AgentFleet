@@ -28,6 +28,7 @@ other. You can also have several machines in one tier; the first one that is rea
 The **Hub mode** switch in the web UI (top right) decides how freely the hub's strongest model is used.
 *Conservative* keeps it for complex work and leaves your GPU free for other things. *Aggressive* lets it take ordinary
 requests too, which suits the night, when you are not using the machine.
+Plan rescue and the second-opinion reviewer use the hub model only in Aggressive mode.
 
 ## Set up a worker
 

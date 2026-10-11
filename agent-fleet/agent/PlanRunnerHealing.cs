@@ -166,8 +166,8 @@ internal sealed partial class PlanRunner
     }
 
     /// <summary>
-    /// Audits a check that looks broken and replaces it when the guard allows: the auditor (the hub's model when the plan
-    /// allows hub rescue, otherwise the model of the worker that did the work) reads the project and proposes a
+    /// Audits a check that looks broken and replaces it when the guard allows: the auditor (the hub's model when recovery
+    /// scope and Hub mode allow it, otherwise the model of the worker that did the work) reads the project and proposes a
     /// replacement; CheckGuard decides whether to apply it. Every outcome is a run event, and a check whose original text
     /// is kept in the step's OriginalVerify.
     /// </summary>
@@ -196,12 +196,14 @@ internal sealed partial class PlanRunner
             return new HealOutcome(HealKind.Continue);
         }
 
-        Note($"Auditing the check: {defect.Name}. {defect.Evidence}", "Started");
-
         string? hub = _fleetOptions?.Nodes.SingleOrDefault(node => node.Fallback)?.Name;
-        bool useHub = hub is not null && PlanRecoveryScope.AllowsHubRescue(plan, step);
+        bool useHub = hub is not null && HubRescueAllowed(plan, step);
         string auditTier = useHub ? FleetTiers.Heavy : step.Tier;
         string? auditMachine = useHub ? hub : workMachine ?? step.Machine;
+
+        string reason = hub is not null && !useHub ? HubModeDeclineReason(plan, step) ?? string.Empty : string.Empty;
+        string auditDetail = $"Auditing the check: {defect.Name}. {defect.Evidence}";
+        Note(string.IsNullOrEmpty(reason) ? auditDetail : $"{auditDetail} {reason}", "Started");
 
         string message = CheckAudit.BuildPrompt(plan, step, original, defect, output, CheckDefects.ShellDescription(workerPlatform, original), hint);
         IStepSession session = _agent.OpenSession(PlanRunnerToolPolicy.CheckAuditRole);

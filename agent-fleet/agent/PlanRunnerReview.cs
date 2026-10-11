@@ -21,9 +21,14 @@ internal sealed partial class PlanRunner
             return null;
         }
 
-        void Note(string detail, string failureClass, string? node = null) =>
+        string? hubModeReason = null;
+        void Note(string detail, string failureClass, string? node = null)
+        {
+            if (hubModeReason is not null)
+                detail = $"{detail} {hubModeReason}";
             _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.StepReview, tier, node: node, detail: detail,
                 failureClass: failureClass, rung: rung, round: round);
+        }
 
         List<(string Path, string Content)> files = ReadFilesToReview(latest, step, changedFiles);
         if (files.Count == 0)
@@ -31,6 +36,12 @@ internal sealed partial class PlanRunner
             Note("Nothing the step changed could be read, so there was nothing to review.", "Skipped");
             return null;
         }
+
+        string? hub = _fleetOptions?.Nodes.SingleOrDefault(node => !node.Vision && node.Fallback)?.Name;
+        string? author = model.ModelNode ?? model.Machine;
+        if (hub is not null && !string.Equals(author, hub, StringComparison.OrdinalIgnoreCase) &&
+            PlanRecoveryScope.AllowsHubRescue(latest, step))
+            hubModeReason = HubModeDeclineReason(latest, step);
 
         (string reviewerTier, string? reviewer, string? unavailable) = ChooseReviewer(latest, step, model);
         if (reviewer is null)
@@ -160,7 +171,7 @@ internal sealed partial class PlanRunner
         string? author = model.ModelNode ?? model.Machine;
         bool Same(string? left, string? right) => string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
 
-        if (hub is not null && PlanRecoveryScope.AllowsHubRescue(plan, step) && !Same(author, hub))
+        if (hub is not null && HubRescueAllowed(plan, step) && !Same(author, hub))
         {
             return (FleetTiers.Heavy, hub, null);
         }

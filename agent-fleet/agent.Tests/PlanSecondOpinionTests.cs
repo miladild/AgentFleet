@@ -42,9 +42,10 @@ public sealed class PlanSecondOpinionTests : PlanTestBase
     }
 
     private PlanRunner RepairRunner(FakeStepAgent agent, Func<string, string> verify, FleetOptions? options = null,
-        FleetHealthMonitor? health = null, int roundsPerRung = 1, IPlanNotifier? notifier = null) =>
+        FleetHealthMonitor? health = null, int roundsPerRung = 1, IPlanNotifier? notifier = null, FleetModeService? modeService = null) =>
         new(Store, RepairTools(verify), agent, NullLogger.Instance, fleetOptions: options, healthMonitor: health,
-            roundsPerRung: roundsPerRung, transientDelay: _ => TimeSpan.Zero, delayAsync: (_, _) => Task.CompletedTask, notifier: notifier);
+            roundsPerRung: roundsPerRung, transientDelay: _ => TimeSpan.Zero, delayAsync: (_, _) => Task.CompletedTask, notifier: notifier,
+            modeService: modeService);
 
     private FleetOptions OptionsWithNodes(params FleetNodeConfig[] nodes)
     {
@@ -83,6 +84,19 @@ public sealed class PlanSecondOpinionTests : PlanTestBase
         FleetNodeConfig workerA = new("worker-a", "http://worker-a.example.test/v1", "m", "worker", "standard");
         FleetOptions options = OptionsWithNodes(hub, workerA);
         return (options, new FleetHealthMonitor(options, new HealthyNodeFactory()));
+    }
+
+    private FleetModeService ModeService(FleetMode mode)
+    {
+        IConfiguration configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["FLEET_CONFIG_PATH"] = Path.Combine(PlansDirectory, "fleet.config.json")
+            })
+            .Build();
+        var service = new FleetModeService(new FleetConfigStore(configuration));
+        service.SetMode(mode);
+        return service;
     }
 
     private PlanRecord CreateOneStepPlan(string fileName, string scope)
@@ -137,6 +151,59 @@ public sealed class PlanSecondOpinionTests : PlanTestBase
         Assert.Contains("Evidence: own check and a second opinion agreed.", stepDone.Detail);
         PlanRunEvent planDone = Assert.Single(after.Events!, e => e.Kind == RunEventKind.PlanDone);
         Assert.Equal("Every step passed its check. Independent review: 1 of 1 steps.", planDone.Detail);
+    }
+
+    [Fact]
+    public async Task Conservative_mode_uses_another_worker_for_the_second_opinion_and_says_why()
+    {
+        FleetOptions options = OptionsWithNodes(
+            new FleetNodeConfig("hub", "http://hub.example.test/v1", "m", "hub", "heavy", Fallback: true),
+            new FleetNodeConfig("worker-a", "http://worker-a.example.test/v1", "m", "worker", "standard"),
+            new FleetNodeConfig("worker-b", "http://worker-b.example.test/v1", "m", "worker", "standard"));
+        var health = new FleetHealthMonitor(options, new HealthyNodeFactory());
+        FleetModeService mode = ModeService(FleetMode.Conservative);
+        PlanRecord plan = CreateOneStepPlan("test.txt", PlanRecoveryScope.AllowHubRescue);
+        Store.Approve(plan.Id, recoveryScope: PlanRecoveryScope.AllowHubRescue, autoRetries: 0, review: PlanSecondOpinion.Auto);
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            File.WriteAllText(Path.Combine(ProjectDirectory, "test.txt"), "implementation");
+            return Task.FromResult("Done.");
+        })
+        {
+            Auditor = _ => new StepAgentReply("PASS\nThe rule and its test agree.", 0, false)
+        };
+
+        await RepairRunner(agent, _ => Pass("check"), options, health, modeService: mode).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+        FakeAuditCall review = Assert.Single(agent.Audits, a => a.Role == PlanRunnerToolPolicy.StepReviewRole);
+        Assert.Equal("worker-b", review.Machine);
+        Assert.Contains(Store.Get(plan.Id)!.Events!, e => e.Kind == RunEventKind.StepReview && e.FailureClass == "Passed" &&
+            e.Detail.Contains("Hub rescue is off while Hub mode is Conservative", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Aggressive_mode_uses_the_hub_for_the_second_opinion()
+    {
+        (FleetOptions options, FleetHealthMonitor health) = HubFleet();
+        FleetModeService mode = ModeService(FleetMode.Aggressive);
+        PlanRecord plan = CreateOneStepPlan("test.txt", PlanRecoveryScope.AllowHubRescue);
+        Store.Approve(plan.Id, recoveryScope: PlanRecoveryScope.AllowHubRescue, autoRetries: 0, review: PlanSecondOpinion.Auto);
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            File.WriteAllText(Path.Combine(ProjectDirectory, "test.txt"), "implementation");
+            return Task.FromResult("Done.");
+        })
+        {
+            Auditor = _ => new StepAgentReply("PASS\nThe rule and its test agree.", 0, false)
+        };
+
+        await RepairRunner(agent, _ => Pass("check"), options, health, modeService: mode).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+        FakeAuditCall review = Assert.Single(agent.Audits, a => a.Role == PlanRunnerToolPolicy.StepReviewRole);
+        Assert.Equal("hub", review.Machine);
+        Assert.Equal("heavy", review.Tier);
     }
 
     [Fact]

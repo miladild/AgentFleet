@@ -281,6 +281,7 @@ on, the cases its test must cover.
   you; the plan's default applies if not set.
 - `Rescue` (optional, `worker-only` or `allow-hub-rescue`) overrides whether the hub model may take over if the
   worker's model fails; the plan's default applies if not set.
+  Hub rescue is available only in Aggressive Hub mode, even when the recovery scope allows it.
 - `Review` (optional, `off` or `auto`) overrides whether a second opinion reads the step's changes before it is
   accepted; the plan's default applies if not set.
 - `Check` is the command the fleet runs to decide whether the step worked. Name the files a step creates in `Files`.

@@ -854,7 +854,7 @@ internal sealed partial class PlanRunner
         TimeSpan worked = TimeSpan.FromSeconds(earlierEvents
             .Where(runEvent => runEvent.Kind == RunEventKind.RoundClassified).Sum(runEvent => runEvent.DurationSeconds ?? 0));
         string? hub = _fleetOptions?.Nodes.SingleOrDefault(node => node.Fallback)?.Name;
-        bool hubAllowed = hub is not null && PlanRecoveryScope.AllowsHubRescue(plan, step);
+        bool hubAllowed = hub is not null && HubRescueAllowed(plan, step);
 
         // A restart loses the open conversation, but not the rung: a step that had climbed to the hub stays on it.
         if (modelOverride is null && rung >= RepairLadder.HubRung && hubAllowed)
@@ -1357,7 +1357,15 @@ internal sealed partial class PlanRunner
         return events.Skip(RetryBoundary(events, stepId) + 1).Where(runEvent => runEvent.StepId == stepId).ToArray();
     }
 
-    // The hub rung needs a plan that allows the hub, a hub that is not already the model, and a conversation to continue.
+    private bool HubRescueAllowed(PlanRecord plan, PlanStep step) =>
+        PlanRecoveryScope.AllowsHubRescue(plan, step) && (_modeService is null || _modeService.Mode == FleetMode.Aggressive);
+
+    private string? HubModeDeclineReason(PlanRecord plan, PlanStep step) =>
+        PlanRecoveryScope.AllowsHubRescue(plan, step) && _modeService?.Mode == FleetMode.Conservative
+            ? "Hub rescue is off while Hub mode is Conservative."
+            : null;
+
+    // The hub rung needs recovery scope, an enabled Hub mode, a hub that is not already the model, and a conversation to continue.
     private bool HubRungAvailable(PlanStep step, string? hub, bool hubAllowed, string? modelNode)
     {
         if (!hubAllowed || hub is null)
@@ -1399,8 +1407,8 @@ internal sealed partial class PlanRunner
 
     /// <summary>
     /// Acts on a ladder decision that is not "another round": climbs to rung 2 (the same conversation on the hub) or rung 3
-    /// (a fresh conversation), or gives up. The hub is only used when its inference answers right now; otherwise rung 3
-    /// is a fresh conversation on the workers, and the reason says so.
+    /// (a fresh conversation), or gives up. The hub is only used when recovery scope and Hub mode allow it and its inference
+    /// answers right now; otherwise rung 3 is a fresh conversation on the workers, and the reason says so.
     /// </summary>
     private async Task<(int Rung, int RoundsInRung, string? ModelOverride, bool ConversationOver, bool GaveUp, string? Handover)> MoveAsync(
         PlanRecord plan,
@@ -1470,6 +1478,8 @@ internal sealed partial class PlanRunner
 
         string where = target ?? currentModel ?? "the machine routing picks";
         string detail = $"Climbing from rung {fromRung} ({RepairLadder.Name(fromRung)}) to rung {decision.ToRung} ({RepairLadder.Name(decision.ToRung)}) on {where}: {decision.Why}.";
+        if (hub is not null && HubModeDeclineReason(plan, step) is { } modeReason)
+            detail += $" {modeReason}";
         _logger.LogInformation("Plan {PlanId} step {StepId}: {Detail}", plan.Id, step.Id, detail);
         _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.RungChanged, tier, node: target, detail: detail,
             modelNode: target, workspaceNode: workspace, rung: decision.ToRung);
@@ -2055,13 +2065,20 @@ internal sealed partial class PlanRunner
             return alternate;
         }
 
-        if (!PlanRecoveryScope.AllowsHubRescue(plan, step) || _fleetOptions is null || _healthMonitor is null)
+        if (_fleetOptions is null || _healthMonitor is null)
         {
             return null;
         }
 
         FleetNodeDefinition? hub = _fleetOptions.Nodes.SingleOrDefault(node => node.Fallback);
         if (hub is null || string.Equals(hub.Name, failedModel, StringComparison.OrdinalIgnoreCase) || recentlyFailed?.Contains(hub.Name) == true) return null;
+        if (!HubRescueAllowed(plan, step))
+        {
+            if (HubModeDeclineReason(plan, step) is { } reason)
+                _logger.LogInformation("Plan {PlanId} step {StepId}: {Reason}", plan.Id, step.Id, reason);
+            return null;
+        }
+
         try
         {
             NodeHealthSnapshot health = await _healthMonitor.GetNodeAsync(hub.Name, cancellationToken,

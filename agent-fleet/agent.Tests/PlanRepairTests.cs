@@ -1,5 +1,6 @@
 using Microsoft.Extensions.AI;
 using Microsoft.Agents.AI;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AgentFleet.Tests;
@@ -47,10 +48,24 @@ public sealed partial class PlanRunnerTests
     private PlanRunner RepairRunner(FakeStepAgent agent, Func<string, string> verify, FleetOptions? options = null,
         FleetHealthMonitor? health = null, int roundsPerRung = RepairLadder.DefaultRoundsPerRung,
         Func<DateTimeOffset>? utcNow = null, TimeSpan? stepClock = null, TimeSpan? attemptTimeout = null, IPlanNotifier? notifier = null,
-        Func<int, TimeSpan>? transientDelay = null, Func<TimeSpan, CancellationToken, Task>? delayAsync = null) =>
+        Func<int, TimeSpan>? transientDelay = null, Func<TimeSpan, CancellationToken, Task>? delayAsync = null,
+        FleetModeService? modeService = null) =>
         new(Store, RepairTools(verify), agent, NullLogger.Instance, attemptTimeout: attemptTimeout, fleetOptions: options, healthMonitor: health,
             transientDelay: transientDelay ?? (_ => TimeSpan.Zero), delayAsync: delayAsync ?? ((_, _) => Task.CompletedTask), utcNow: utcNow,
-            roundsPerRung: roundsPerRung, stepClock: stepClock, notifier: notifier);
+            roundsPerRung: roundsPerRung, stepClock: stepClock, notifier: notifier, modeService: modeService);
+
+    private FleetModeService ModeService(FleetMode mode)
+    {
+        IConfiguration configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["FLEET_CONFIG_PATH"] = Path.Combine(PlansDirectory, "mode-fleet.config.json")
+            })
+            .Build();
+        var service = new FleetModeService(new FleetConfigStore(configuration));
+        service.SetMode(mode);
+        return service;
+    }
 
     private PlanRecord RepairPlan(string? machine, string scope)
     {
@@ -149,6 +164,150 @@ public sealed partial class PlanRunnerTests
         Assert.Contains("Repair ladder: 1 failed round, reached rung 2 (the hub model, same conversation)", report);
         Assert.Contains("attempt 1, rung 1 round 1", report);
         Assert.Contains("attempt 1, rung 2", report);
+    }
+
+    [Fact]
+    public async Task Conservative_mode_skips_the_hub_rung_and_records_why()
+    {
+        (FleetOptions options, FleetHealthMonitor health) = HubFleet();
+        PlanRecord plan = RepairPlan("worker-a", PlanRecoveryScope.AllowHubRescue);
+        FleetModeService mode = ModeService(FleetMode.Conservative);
+        int calls = 0;
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            File.WriteAllText(SourceFile, ++calls == 1 ? "partial" : "fixed");
+            return Task.FromResult("Tried.");
+        });
+
+        await RepairRunner(agent, _ => File.Exists(SourceFile) && File.ReadAllText(SourceFile) == "fixed"
+            ? Pass("check") : FailWith("widget::renders"), options, health, roundsPerRung: 1, modeService: mode)
+            .RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.Equal(["worker-a", "worker-a"], agent.Calls.Select(call => call.Machine));
+        PlanRunEvent climb = Assert.Single(after.Events!, runEvent => runEvent.Kind == RunEventKind.RungChanged);
+        Assert.Equal(RepairLadder.FreshRung, climb.Rung);
+        Assert.Contains("Hub rescue is off while Hub mode is Conservative", climb.Detail);
+        Assert.DoesNotContain(after.Events!, runEvent => runEvent.ModelNode == "hub" || runEvent.Node == "hub");
+    }
+
+    [Fact]
+    public async Task Aggressive_mode_keeps_the_hub_rung_available()
+    {
+        (FleetOptions options, FleetHealthMonitor health) = HubFleet();
+        PlanRecord plan = RepairPlan("worker-a", PlanRecoveryScope.AllowHubRescue);
+        FleetModeService mode = ModeService(FleetMode.Aggressive);
+        FakeStepAgent agent = null!;
+        agent = new FakeStepAgent((_, _, _) =>
+        {
+            if (agent.Calls[^1].Machine == "hub")
+                File.WriteAllText(SourceFile, "fixed");
+            return Task.FromResult("Tried.");
+        })
+        {
+            ToolsOf = call => call.Machine == "hub" ? (4, true) : (2, false)
+        };
+
+        await RepairRunner(agent, _ => File.Exists(SourceFile) && File.ReadAllText(SourceFile) == "fixed"
+            ? Pass("check") : FailWith("widget::renders"), options, health, roundsPerRung: 1, modeService: mode)
+            .RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+        Assert.Equal(["worker-a", "hub"], agent.Calls.Select(call => call.Machine));
+        Assert.Equal(RepairLadder.HubRung, Assert.Single(Store.Get(plan.Id)!.Events!, e => e.Kind == RunEventKind.RungChanged).Rung);
+    }
+
+    [Fact]
+    public async Task Aggressive_mode_does_not_override_worker_only_scope()
+    {
+        (FleetOptions options, FleetHealthMonitor health) = HubFleet();
+        PlanRecord plan = RepairPlan("worker-a", PlanRecoveryScope.WorkerOnly);
+        FleetModeService mode = ModeService(FleetMode.Aggressive);
+        int calls = 0;
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            File.WriteAllText(SourceFile, ++calls == 1 ? "partial" : "fixed");
+            return Task.FromResult("Tried.");
+        });
+
+        await RepairRunner(agent, _ => File.Exists(SourceFile) && File.ReadAllText(SourceFile) == "fixed"
+            ? Pass("check") : FailWith("widget::renders"), options, health, roundsPerRung: 1, modeService: mode)
+            .RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+        Assert.Equal(["worker-a", "worker-a"], agent.Calls.Select(call => call.Machine));
+        Assert.DoesNotContain(Store.Get(plan.Id)!.Events!, runEvent => runEvent.ModelNode == "hub" || runEvent.Node == "hub");
+    }
+
+    [Fact]
+    public async Task A_mode_change_applies_to_the_next_step_rescue_decision()
+    {
+        (FleetOptions options, FleetHealthMonitor health) = HubFleet();
+        FleetModeService mode = ModeService(FleetMode.Conservative);
+        PlanStepInput[] steps =
+        [
+            new("first", "Write the first file.", ["first.cs"], "check first", "standard"),
+            new("second", "Write the second file.", ["second.cs"], "check second", "standard")
+        ];
+        PlanRecord plan = Store.Create("Flip mode", "Complete two steps", ProjectDirectory, ["first", "second"], ["q?"], ["r"],
+            null, null, steps, PlanRecoveryScope.AllowHubRescue);
+        plan = Store.SelectMachine(plan.Id, 1, "worker-a", out string? firstError)!;
+        Assert.Null(firstError);
+        plan = Store.SelectMachine(plan.Id, 2, "worker-a", out string? secondError)!;
+        Assert.Null(secondError);
+        plan = Store.Approve(plan.Id, recoveryScope: PlanRecoveryScope.AllowHubRescue, autoRetries: 0, review: PlanSecondOpinion.Off)!;
+        string firstFile = Path.Combine(ProjectDirectory, "first.cs");
+        string secondFile = Path.Combine(ProjectDirectory, "second.cs");
+        FakeStepAgent agent = null!;
+        agent = new FakeStepAgent((_, _, _) =>
+        {
+            if (agent.Calls.Count == 1)
+                File.WriteAllText(firstFile, "fixed");
+            else
+                File.WriteAllText(secondFile, agent.Calls[^1].Machine == "hub" ? "fixed" : "partial");
+            return Task.FromResult("Tried.");
+        });
+
+        await RepairRunner(agent, command => command switch
+        {
+            "check first" => SetAggressiveAndPass(mode),
+            "check second" when File.Exists(secondFile) && File.ReadAllText(secondFile) == "fixed" => Pass(command),
+            _ => FailWith("widget::renders")
+        }, options, health, roundsPerRung: 1, modeService: mode).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+        Assert.Equal(["worker-a", "worker-a", "hub"], agent.Calls.Select(call => call.Machine));
+    }
+
+    private static string SetAggressiveAndPass(FleetModeService mode)
+    {
+        mode.SetMode(FleetMode.Aggressive);
+        return Pass("check first");
+    }
+
+    [Fact]
+    public async Task Conservative_mode_does_not_route_a_failed_worker_model_to_the_hub()
+    {
+        (FleetOptions options, FleetHealthMonitor health) = HubFleet();
+        PlanRecord plan = RepairPlan("worker-a", PlanRecoveryScope.AllowHubRescue);
+        FleetModeService mode = ModeService(FleetMode.Conservative);
+        int calls = 0;
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            if (++calls == 1)
+                throw new HttpRequestException("worker model unavailable");
+            File.WriteAllText(SourceFile, "fixed");
+            return Task.FromResult("Recovered.");
+        });
+
+        await RepairRunner(agent, _ => File.Exists(SourceFile) && File.ReadAllText(SourceFile) == "fixed"
+            ? Pass("check") : FailWith("widget::renders"), options, health, modeService: mode)
+            .RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+        Assert.All(agent.Calls, call => Assert.Equal("worker-a", call.Machine));
+        Assert.DoesNotContain(Store.Get(plan.Id)!.Events!, runEvent => runEvent.ModelNode == "hub" || runEvent.Node == "hub");
     }
 
     [Fact]
