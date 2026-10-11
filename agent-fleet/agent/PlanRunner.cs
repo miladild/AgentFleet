@@ -219,6 +219,7 @@ internal sealed partial class PlanRunner
     private readonly int _roundsPerRung;
     private readonly TimeSpan _stepClock;
     private readonly IPlanNotifier? _notifier;
+    private readonly bool _stepGuidance;
 
     public PlanRunner(
         FleetPlanStore store,
@@ -238,9 +239,11 @@ internal sealed partial class PlanRunner
         Func<DateTimeOffset>? utcNow = null,
         int roundsPerRung = RepairLadder.DefaultRoundsPerRung,
         TimeSpan? stepClock = null,
-        IPlanNotifier? notifier = null)
+        IPlanNotifier? notifier = null,
+        bool stepGuidance = false)
     {
         _notifier = notifier;
+        _stepGuidance = stepGuidance;
         _roundsPerRung = Math.Max(1, roundsPerRung);
         _stepClock = stepClock is { } clock && clock > TimeSpan.Zero ? clock : DefaultStepClock;
         _transientDelay = transientDelay ?? DefaultTransientDelay;
@@ -2781,12 +2784,19 @@ internal sealed partial class PlanRunner
             StepAgentReply reply;
             using (IDisposable? workerScope = worker?.Enter())
             {
+                bool addStepGuidance = conversation.RepairMessage is null &&
+                    _stepGuidance && PlanStepGuidance.AppliesTo(step.Files);
+                if (addStepGuidance)
+                {
+                    _logger.LogInformation("Step guidance added to step {StepId} of plan {PlanId}", step.Id, plan.Id);
+                }
+
                 reply = await conversation.Session.SendAsync(
                     conversation.RepairMessage ??
                     BuildPrompt(plan, step, attempt, lastFailure, fileContext, parallelGroup,
                         durableContext: contextId is not null, retryRoute: retryRoute,
                         workerWorkspace: worker is not null, workerMachine: machine, workerPlatform: worker?.Platform,
-                        brief: conversation.Brief),
+                        brief: conversation.Brief, stepGuidance: _stepGuidance),
                     tier,
                     modelMachine,
                     attemptCancellation.Token);
@@ -3060,7 +3070,8 @@ internal sealed partial class PlanRunner
         bool workerWorkspace = false,
         string? workerMachine = null,
         string? workerPlatform = null,
-        string? brief = null)
+        string? brief = null,
+        bool stepGuidance = false)
     {
         var text = new StringBuilder();
         text.AppendLine(workerWorkspace
@@ -3112,6 +3123,11 @@ internal sealed partial class PlanRunner
         if (step.Files.Count > 0)
         {
             text.AppendLine($"Files: {string.Join(", ", step.Files)}");
+        }
+
+        if (stepGuidance && PlanStepGuidance.AppliesTo(step.Files))
+        {
+            text.AppendLine(PlanStepGuidance.Text);
         }
 
         if (!string.IsNullOrWhiteSpace(fileContext))

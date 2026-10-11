@@ -70,12 +70,19 @@ var app = builder.Build();
 ILoggerFactory fitLoggers = app.Services.GetRequiredService<ILoggerFactory>();
 var fitLog = fitLoggers.CreateLogger("AgentFleet.ContextFit");
 IContextWindowFitter contextFitter = ContextWindowFitters.FromSetting(builder.Configuration["FLEET_CONTEXT_FIT"], fitLog);
+bool stepGuidanceEnabled = PlanStepGuidance.IsEnabled(builder.Configuration["FLEET_STEP_GUIDANCE"]);
 
 // Log a warning if a non-default context-window fitting policy is in use.
 if (contextFitter.Name != "classic")
 {
     fitLog.LogWarning(
         "Context-window policy \"{Name}\" is experimental; unset FLEET_CONTEXT_FIT to return to the default.", contextFitter.Name);
+}
+
+if (stepGuidanceEnabled)
+{
+    app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("AgentFleet.StepGuidance").LogWarning(
+        "Step guidance \"tests\" is experimental; unset FLEET_STEP_GUIDANCE to return to the default.");
 }
 
 RequestGuard.Use(app, RequestGuard.ParseAllowedNames(builder.Configuration["FLEET_ALLOWED_HOSTS"]));
@@ -694,7 +701,8 @@ var planRunner = new PlanRunner(
     roundsPerRung: planRoundsPerRung,
     stepClock: TimeSpan.FromMinutes(planStepMinutes),
     attemptTimeout: TimeSpan.FromMinutes(planAttemptMinutes),
-    notifier: planNotifier);
+    notifier: planNotifier,
+    stepGuidance: stepGuidanceEnabled);
 planStore.Approved += planRunner.Enqueue;
 app.Lifetime.ApplicationStarted.Register(() => planRunner.Start(app.Lifetime.ApplicationStopping));
 
