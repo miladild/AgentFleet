@@ -62,9 +62,11 @@ internal static class OllamaNodeClient
         else
         {
             var root = new UriBuilder(openAiEndpoint.Scheme, openAiEndpoint.Host, openAiEndpoint.IsDefaultPort ? -1 : openAiEndpoint.Port, "/").Uri;
-            var http = handler is null
-                ? new HttpClient { BaseAddress = root, Timeout = networkTimeout }
-                : new HttpClient(handler) { BaseAddress = root, Timeout = networkTimeout };
+            var http = new HttpClient(new OllamaErrorBodyHandler(handler ?? new HttpClientHandler(), logger, model))
+            {
+                BaseAddress = root,
+                Timeout = networkTimeout
+            };
             raw = new ContextSizeChatClient(new OllamaApiClient(http, model), http, model, contextLength, logger,
                 thinkingOff: NodeThinking.Normalize(thinking) == NodeThinking.Off, fitter: fitter);
         }
