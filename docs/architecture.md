@@ -182,6 +182,8 @@ without server-side conversation state.
   plans updated in the last 36 hours. Dismissals are stored in browser `localStorage`, keyed by plan, status, and update
   time, so closing the app does not lose an unread result and an intentional retry can notify again.
 
+When a step is done, its own check passed. The plan card labels that evidence; it shows a second-opinion label only when an independent review also agrees. The plan label reflects its weakest completed step.
+
 ## Durable context
 
 Everything a conversation does is appended to one SQLite journal (`FleetContextStore`, WAL mode), and each model call gets a

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useAgent } from "@copilotkit/react-core/v2";
 import { MermaidDiagram } from "./MermaidDiagram";
+import { planEvidenceLabel, type PlanEvidence } from "./planEvidence";
 
 export type PlanStep = {
   id: number;
@@ -22,6 +23,7 @@ export type PlanStep = {
   autoRetries?: number | null;
   rescue?: string | null;
   review?: string | null;
+  evidence?: PlanEvidence | null;
   status: string;
   note: string | null;
   attempts: number;
@@ -78,6 +80,7 @@ export type Plan = {
   healChecks?: string | null;
   autoRetries?: number | null;
   review?: string | null;
+  evidence?: PlanEvidence | null;
   runDeadlineUtc?: string | null;
 };
 
@@ -368,6 +371,11 @@ export function PlanCard({ planId }: { planId: string }) {
 
       <div className="px-3 py-2 space-y-3">
         {plan.goal && <p className="text-xs text-neutral-300">{plan.goal}</p>}
+        {plan.status === "done" && planEvidenceLabel(plan.evidence) && (
+          <span className="inline-flex rounded-full border border-emerald-700/60 bg-emerald-950/40 px-2 py-0.5 text-[10px] text-emerald-200">
+            {planEvidenceLabel(plan.evidence)}
+          </span>
+        )}
         {plan.runDeadlineUtc && (
           <p className="text-[11px] text-neutral-500">Run deadline: {new Date(plan.runDeadlineUtc).toLocaleString()}</p>
         )}
@@ -394,6 +402,11 @@ export function PlanCard({ planId }: { planId: string }) {
                     <div className="text-xs text-neutral-200">
                       {step.id}. {step.title}{" "}
                       <span className="text-[10px] text-neutral-500">({step.tier})</span>
+                      {step.status === "done" && planEvidenceLabel(step.evidence) && (
+                        <span className="ml-1 inline-flex rounded-full border border-emerald-700/60 bg-emerald-950/40 px-1.5 py-0.5 text-[10px] text-emerald-200">
+                          {planEvidenceLabel(step.evidence)}
+                        </span>
+                      )}
                       <span
                         className={`ml-1 text-[10px] ${step.retrySafe ? "text-emerald-400" : "text-amber-400"}`}
                         title={step.retrySafe ? "This local step may resume automatically after a backend restart." : "If the backend restarts during this step, it will stop for review before retrying."}

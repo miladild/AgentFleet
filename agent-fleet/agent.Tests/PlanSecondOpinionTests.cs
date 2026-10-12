@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -10,6 +11,13 @@ namespace AgentFleet.Tests;
 public sealed class PlanSecondOpinionTests : PlanTestBase
 {
     private static readonly FakeValidator Valid = new(code => new DiagramCheck(true, true, code, null));
+
+    [Fact]
+    public void Evidence_uses_stable_kebab_case_values()
+    {
+        Assert.Equal("\"own-check-only\"", JsonSerializer.Serialize(PlanEvidence.OwnCheckOnly));
+        Assert.Equal("\"second-opinion-agreed\"", JsonSerializer.Serialize(PlanEvidence.SecondOpinionAgreed));
+    }
 
     private string ProjectDirectory
     {
@@ -149,6 +157,8 @@ public sealed class PlanSecondOpinionTests : PlanTestBase
         Assert.Contains("Reviewed by hub", reviews[0].Detail);
         PlanRunEvent stepDone = Assert.Single(after.Events!, e => e.Kind == RunEventKind.StepDone);
         Assert.Contains("Evidence: own check and a second opinion agreed.", stepDone.Detail);
+        Assert.Equal(PlanEvidence.SecondOpinionAgreed, after.Steps[0].Evidence);
+        Assert.Equal(PlanEvidence.SecondOpinionAgreed, after.Evidence);
         PlanRunEvent planDone = Assert.Single(after.Events!, e => e.Kind == RunEventKind.PlanDone);
         Assert.Equal("Every step passed its check. Independent review: 1 of 1 steps.", planDone.Detail);
     }
@@ -265,6 +275,8 @@ public sealed class PlanSecondOpinionTests : PlanTestBase
         PlanRecord after = Store.Get(plan.Id)!;
         Assert.NotEqual(PlanStatus.Done, after.Status);
         Assert.Equal(StepStatus.Parked, after.Steps[0].Status);
+        Assert.Null(after.Steps[0].Evidence);
+        Assert.Null(after.Evidence);
 
         // StepParked event with FailureSignature "review"
         PlanRunEvent? parked = after.Events?.FirstOrDefault(e => e.Kind == RunEventKind.StepParked);
@@ -323,7 +335,11 @@ public sealed class PlanSecondOpinionTests : PlanTestBase
             .Where(e => e.Kind == RunEventKind.StepDone).ToArray();
         Assert.Equal(2, stepDone.Length);
         Assert.All(stepDone, e => Assert.Contains("Evidence: own check only; no independent review.", e.Detail));
-        PlanRunEvent planDone = Assert.Single(Store.Get(plan.Id)!.Events!, e => e.Kind == RunEventKind.PlanDone);
+        PlanRecord finished = Store.Get(plan.Id)!;
+        Assert.All(finished.Steps, step => Assert.Equal(PlanEvidence.OwnCheckOnly, step.Evidence));
+        Assert.Equal(PlanEvidence.OwnCheckOnly, finished.Evidence);
+        Assert.Equal(PlanEvidence.OwnCheckOnly, Assert.Single(Store.List()).Evidence);
+        PlanRunEvent planDone = Assert.Single(finished.Events!, e => e.Kind == RunEventKind.PlanDone);
         Assert.Equal("Every step passed its check. Independent review: 0 of 2 steps.", planDone.Detail);
     }
 

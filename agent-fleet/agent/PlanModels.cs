@@ -1,4 +1,6 @@
 using System.ComponentModel;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace AgentFleet;
 
@@ -82,6 +84,52 @@ internal static class PlanSecondOpinion
         };
 }
 
+[JsonConverter(typeof(PlanEvidenceJsonConverter))]
+internal enum PlanEvidence
+{
+    OwnCheckOnly,
+    SecondOpinionAgreed
+}
+
+internal sealed class PlanEvidenceJsonConverter : JsonConverter<PlanEvidence>
+{
+    public override PlanEvidence Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options) =>
+        reader.GetString() switch
+        {
+            "own-check-only" => PlanEvidence.OwnCheckOnly,
+            "second-opinion-agreed" => PlanEvidence.SecondOpinionAgreed,
+            _ => throw new JsonException("Unknown plan evidence value.")
+        };
+
+    public override void Write(Utf8JsonWriter writer, PlanEvidence value, JsonSerializerOptions options) =>
+        writer.WriteStringValue(value switch
+        {
+            PlanEvidence.OwnCheckOnly => "own-check-only",
+            PlanEvidence.SecondOpinionAgreed => "second-opinion-agreed",
+            _ => throw new JsonException("Unknown plan evidence value.")
+        });
+}
+
+internal static class PlanEvidenceRules
+{
+    public static string Detail(PlanEvidence evidence) => evidence switch
+    {
+        PlanEvidence.OwnCheckOnly => "Evidence: own check only; no independent review.",
+        PlanEvidence.SecondOpinionAgreed => "Evidence: own check and a second opinion agreed.",
+        _ => throw new ArgumentOutOfRangeException(nameof(evidence))
+    };
+
+    public static PlanEvidence? Weakest(IReadOnlyList<PlanStep> steps)
+    {
+        if (steps.Count == 0 || steps.Any(step => step.Status != StepStatus.Done || step.Evidence is null))
+            return null;
+
+        return steps.Any(step => step.Evidence == PlanEvidence.OwnCheckOnly)
+            ? PlanEvidence.OwnCheckOnly
+            : PlanEvidence.SecondOpinionAgreed;
+    }
+}
+
 internal static class PlanAutoRetry
 {
     public const int Default = 2;
@@ -116,7 +164,8 @@ internal sealed record PlanStep(
     IReadOnlyList<int>? DependsOn = null,
     int? AutoRetries = null,
     string? Rescue = null,
-    string? Review = null);
+    string? Review = null,
+    PlanEvidence? Evidence = null);
 
 internal static class RunEventKind
 {
@@ -234,7 +283,10 @@ internal sealed record PlanRecord(
     DateTimeOffset? RunDeadlineUtc = null,
     string? HealChecks = null,
     int? AutoRetries = null,
-    string? Review = null);
+    string? Review = null)
+{
+    public PlanEvidence? Evidence => PlanEvidenceRules.Weakest(Steps);
+}
 
 internal sealed record PlanSummary(
     string Id,
@@ -245,7 +297,8 @@ internal sealed record PlanSummary(
     DateTimeOffset UpdatedUtc,
     string? ContextId = null,
     int StepsParked = 0,
-    IReadOnlyList<ParkedStepSummary>? ParkedSteps = null);
+    IReadOnlyList<ParkedStepSummary>? ParkedSteps = null,
+    PlanEvidence? Evidence = null);
 
 internal sealed record ParkedStepSummary(
     int StepId,

@@ -2951,10 +2951,16 @@ internal sealed partial class PlanRunner
 
     private string StepDoneDetail(PlanRecord plan, PlanStep step, int attempt, string? restored, bool allowReview = true)
     {
-        string evidence = allowReview && HasPassedReview(_store.Get(plan.Id)!, step.Id, attempt)
-            ? "Evidence: own check and a second opinion agreed."
-            : "Evidence: own check only; no independent review.";
-        return JoinNotes(JoinNotes(StrayDetail(plan, step), restored), evidence);
+        PlanEvidence evidence = allowReview && HasPassedReview(_store.Get(plan.Id)!, step.Id, attempt)
+            ? PlanEvidence.SecondOpinionAgreed
+            : PlanEvidence.OwnCheckOnly;
+        _store.Update(plan.Id, current => current with
+        {
+            Steps = current.Steps
+                .Select(candidate => candidate.Id == step.Id ? candidate with { Evidence = evidence } : candidate)
+                .ToArray()
+        });
+        return JoinNotes(JoinNotes(StrayDetail(plan, step), restored), PlanEvidenceRules.Detail(evidence));
     }
 
     private static bool HasPassedReview(PlanRecord plan, int stepId, int attempt) =>

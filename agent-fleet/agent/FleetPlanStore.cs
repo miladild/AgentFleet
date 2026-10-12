@@ -229,7 +229,8 @@ internal sealed partial class FleetPlanStore
                                 runEvent.Kind == RunEventKind.StepParked && runEvent.StepId == step.Id);
                             return new ParkedStepSummary(step.Id, step.Title, parked?.AtUtc, parked?.FailureSignature);
                         })
-                        .ToList()))
+                        .ToList(),
+                    plan.Evidence))
                 .ToList();
         }
     }
