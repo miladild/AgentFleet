@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useAgent } from "@copilotkit/react-core/v2";
 import { MermaidDiagram } from "./MermaidDiagram";
-import { planEvidenceLabel, type PlanEvidence } from "./planEvidence";
+import { planEvidenceClass, planEvidenceLabel, type PlanEvidence } from "./planEvidence";
 
 export type PlanStep = {
   id: number;
@@ -372,7 +372,7 @@ export function PlanCard({ planId }: { planId: string }) {
       <div className="px-3 py-2 space-y-3">
         {plan.goal && <p className="text-xs text-neutral-300">{plan.goal}</p>}
         {plan.status === "done" && planEvidenceLabel(plan.evidence) && (
-          <span className="inline-flex rounded-full border border-emerald-700/60 bg-emerald-950/40 px-2 py-0.5 text-[10px] text-emerald-200">
+          <span className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] ${planEvidenceClass(plan.evidence)}`}>
             {planEvidenceLabel(plan.evidence)}
           </span>
         )}
@@ -403,7 +403,7 @@ export function PlanCard({ planId }: { planId: string }) {
                       {step.id}. {step.title}{" "}
                       <span className="text-[10px] text-neutral-500">({step.tier})</span>
                       {step.status === "done" && planEvidenceLabel(step.evidence) && (
-                        <span className="ml-1 inline-flex rounded-full border border-emerald-700/60 bg-emerald-950/40 px-1.5 py-0.5 text-[10px] text-emerald-200">
+                        <span className={`ml-1 inline-flex rounded-full border px-1.5 py-0.5 text-[10px] ${planEvidenceClass(step.evidence)}`}>
                           {planEvidenceLabel(step.evidence)}
                         </span>
                       )}

@@ -107,6 +107,20 @@ public sealed class PlanFileTests : PlanTestBase
     }
 
     [Fact]
+    public void A_plan_with_unknown_evidence_loads_without_evidence()
+    {
+        PlanRecord plan = NewPlan(Step("one"));
+        string path = Path.Combine(PlansDirectory, plan.Id + ".json");
+        string json = File.ReadAllText(path);
+        Assert.Contains("\"evidence\": null", json);
+        File.WriteAllText(path, json.Replace("\"evidence\": null", "\"evidence\": \"something-new\"", StringComparison.Ordinal));
+
+        PlanRecord restored = Store.Get(plan.Id)!;
+
+        Assert.Null(restored.Steps[0].Evidence);
+    }
+
+    [Fact]
     public async Task Propose_plan_with_a_plan_file_saves_the_steps_with_their_full_instructions()
     {
         string file = Path.Combine(_project, "PLAN.md");

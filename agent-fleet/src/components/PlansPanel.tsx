@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { PlanCard } from "./PlanCard";
-import { planEvidenceLabel, type PlanEvidence } from "./planEvidence";
+import { planEvidenceClass, planEvidenceLabel, type PlanEvidence } from "./planEvidence";
 
 type PlanSummary = {
   id: string;
@@ -169,7 +169,7 @@ export function PlansPanel() {
                       : `${notice.stepsDone} of ${notice.stepsTotal} steps - ${new Date(notice.updatedUtc).toLocaleString()}`}
                   </p>
                   {notice.status === "done" && planEvidenceLabel(notice.evidence) && (
-                    <span className="mt-2 inline-flex rounded-full border border-emerald-700/60 bg-emerald-950/40 px-2 py-0.5 text-[10px] text-emerald-200">
+                    <span className={`mt-2 inline-flex rounded-full border px-2 py-0.5 text-[10px] ${planEvidenceClass(notice.evidence)}`}>
                       {planEvidenceLabel(notice.evidence)}
                     </span>
                   )}

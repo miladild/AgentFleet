@@ -110,6 +110,33 @@ internal sealed class PlanEvidenceJsonConverter : JsonConverter<PlanEvidence>
         });
 }
 
+internal sealed class NullablePlanEvidenceJsonConverter : JsonConverter<PlanEvidence?>
+{
+    public override PlanEvidence? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options) =>
+        reader.TokenType == JsonTokenType.String ? reader.GetString() switch
+        {
+            "own-check-only" => PlanEvidence.OwnCheckOnly,
+            "second-opinion-agreed" => PlanEvidence.SecondOpinionAgreed,
+            _ => null
+        } : null;
+
+    public override void Write(Utf8JsonWriter writer, PlanEvidence? value, JsonSerializerOptions options)
+    {
+        if (value is null)
+        {
+            writer.WriteNullValue();
+            return;
+        }
+
+        writer.WriteStringValue(value.Value switch
+        {
+            PlanEvidence.OwnCheckOnly => "own-check-only",
+            PlanEvidence.SecondOpinionAgreed => "second-opinion-agreed",
+            _ => throw new JsonException("Unknown plan evidence value.")
+        });
+    }
+}
+
 internal static class PlanEvidenceRules
 {
     public static string Detail(PlanEvidence evidence) => evidence switch
@@ -165,7 +192,7 @@ internal sealed record PlanStep(
     int? AutoRetries = null,
     string? Rescue = null,
     string? Review = null,
-    PlanEvidence? Evidence = null);
+    [property: JsonConverter(typeof(NullablePlanEvidenceJsonConverter))] PlanEvidence? Evidence = null);
 
 internal static class RunEventKind
 {
@@ -285,6 +312,7 @@ internal sealed record PlanRecord(
     int? AutoRetries = null,
     string? Review = null)
 {
+    [JsonConverter(typeof(NullablePlanEvidenceJsonConverter))]
     public PlanEvidence? Evidence => PlanEvidenceRules.Weakest(Steps);
 }
 
@@ -298,7 +326,7 @@ internal sealed record PlanSummary(
     string? ContextId = null,
     int StepsParked = 0,
     IReadOnlyList<ParkedStepSummary>? ParkedSteps = null,
-    PlanEvidence? Evidence = null);
+    [property: JsonConverter(typeof(NullablePlanEvidenceJsonConverter))] PlanEvidence? Evidence = null);
 
 internal sealed record ParkedStepSummary(
     int StepId,
