@@ -22,7 +22,7 @@ public sealed class PlanNoticeTests : PlanTestBase
 
     [Theory]
     [InlineData("http://127.0.0.1:9000/hook")]
-    [InlineData("http://192.168.1.50:8080/notify")]
+    [InlineData("http://127.0.0.2:8080/notify")]
     [InlineData("https://10.0.0.5/x")]
     [InlineData("http://172.16.4.1/x")]
     [InlineData("http://172.31.255.1/x")]
@@ -70,15 +70,39 @@ public sealed class PlanNoticeTests : PlanTestBase
     public async Task A_notice_is_posted_to_a_private_address_and_never_to_a_public_one()
     {
         var handler = new RecordingHandler();
-        var privateOne = new WebhookPlanNotifier(new HttpClient(handler), "http://192.168.1.50:8080/notify", NullLogger.Instance);
+        var privateOne = new WebhookPlanNotifier(new HttpClient(handler), "http://127.0.0.2:8080/notify", NullLogger.Instance);
         await privateOne.SendAsync(Notice());
         (Uri? uri, string body) = Assert.Single(handler.Requests);
-        Assert.Equal("http://192.168.1.50:8080/notify", uri?.ToString());
+        Assert.Equal("http://127.0.0.2:8080/notify", uri?.ToString());
         Assert.Contains("\"event\":\"step-parked\"", body);
 
         var publicOne = new WebhookPlanNotifier(new HttpClient(handler), "http://8.8.8.8/notify", NullLogger.Instance);
         await publicOne.SendAsync(Notice());
         Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task A_model_results_notice_uses_the_same_private_webhook_sender()
+    {
+        var handler = new RecordingHandler();
+        var notifier = new WebhookPlanNotifier(new HttpClient(handler), "http://127.0.0.1:8080/notify", NullLogger.Instance);
+        var notice = new ModelRegressionNotice("node-a.example.test", "model-a", 4, 5, 1, 6,
+            new DateTimeOffset(2026, 10, 12, 0, 0, 0, TimeSpan.Zero));
+
+        await notifier.SendAsync(notice);
+
+        (Uri? uri, string body) = Assert.Single(handler.Requests);
+        Assert.Equal("http://127.0.0.1:8080/notify", uri?.ToString());
+        using var document = System.Text.Json.JsonDocument.Parse(body);
+        System.Text.Json.JsonElement root = document.RootElement;
+        Assert.Equal("model-results-regressed", root.GetProperty("event").GetString());
+        Assert.Equal("node-a.example.test", root.GetProperty("node").GetString());
+        Assert.Equal("model-a", root.GetProperty("model").GetString());
+        Assert.Equal((4, 5, 1, 6), (
+            root.GetProperty("previousOwnSteps").GetInt32(),
+            root.GetProperty("previousSteps").GetInt32(),
+            root.GetProperty("currentOwnSteps").GetInt32(),
+            root.GetProperty("currentSteps").GetInt32()));
     }
 
     [Fact]
@@ -146,8 +170,8 @@ public sealed class PlanNoticeTests : PlanTestBase
 
         FleetConfigStore Open() => new(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["FLEET_CONFIG_PATH"] = path }).Build());
 
-        Write("\"notifyUrl\":\"http://192.168.1.50:8080/notify\"");
-        Assert.Equal("http://192.168.1.50:8080/notify", Open().Current.NotifyUrl);
+        Write("\"notifyUrl\":\"http://127.0.0.2:8080/notify\"");
+        Assert.Equal("http://127.0.0.2:8080/notify", Open().Current.NotifyUrl);
 
         Write("\"notifyUrl\":\"http://8.8.8.8/notify\"");
         Assert.Contains("private network", Assert.Throws<InvalidOperationException>(() => Open()).Message);

@@ -25,15 +25,17 @@ internal sealed class FleetHealthMonitor
 
     private readonly FleetOptions _options;
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly MeasuringMachines? _measuringMachines;
     private readonly ConcurrentDictionary<string, NodeHealthSnapshot> _snapshots = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, (DateTimeOffset AtUtc, bool Answers, string? Failure)> _inference = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _probeLocks = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, (DateTimeOffset Until, string Failure)> _coolingDown = new(StringComparer.Ordinal);
 
-    public FleetHealthMonitor(FleetOptions options, IHttpClientFactory httpClientFactory)
+    public FleetHealthMonitor(FleetOptions options, IHttpClientFactory httpClientFactory, MeasuringMachines? measuringMachines = null)
     {
         _options = options;
         _httpClientFactory = httpClientFactory;
+        _measuringMachines = measuringMachines;
     }
 
     public async Task<NodeHealthSnapshot> GetNodeAsync(
@@ -46,6 +48,11 @@ internal sealed class FleetHealthMonitor
         if (!_options.TryGetNode(nodeName, out FleetNodeDefinition? node))
         {
             return new NodeHealthSnapshot(nodeName, string.Empty, false, false, false, DateTimeOffset.UtcNow, "not_configured");
+        }
+
+        if (IsBeingMeasured(node, forceInferenceProbe))
+        {
+            return SnapshotWhileMeasured(node);
         }
 
         // A machine that just failed a real request (it timed out, or Ollama broke) rests for a while even though its
@@ -69,6 +76,11 @@ internal sealed class FleetHealthMonitor
         await probeLock.WaitAsync(cancellationToken);
         try
         {
+            if (IsBeingMeasured(node, forceInferenceProbe))
+            {
+                return SnapshotWhileMeasured(node);
+            }
+
             if (!forceProbe && !forceInferenceProbe && TryGetFreshSnapshot(node.Name, out snapshot))
             {
                 return snapshot;
@@ -190,6 +202,11 @@ internal sealed class FleetHealthMonitor
             }
 
             DateTimeOffset now = DateTimeOffset.UtcNow;
+            if (IsBeingMeasured(node, forceInferenceProbe))
+            {
+                return SnapshotWhileMeasured(node);
+            }
+
             if (!forceInferenceProbe && _inference.TryGetValue(node.Name, out var recent) &&
                 now - recent.AtUtc < InferenceProbeInterval)
             {
@@ -199,6 +216,11 @@ internal sealed class FleetHealthMonitor
             using var inferenceCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             inferenceCancellation.CancelAfter(InferenceProbeTimeout);
             using HttpRequestMessage? request = await InferenceProbeRequestAsync(client, node, forceInferenceProbe, inferenceCancellation.Token);
+            if (IsBeingMeasured(node, forceInferenceProbe))
+            {
+                return SnapshotWhileMeasured(node);
+            }
+
             if (request is null)
             {
                 // Loading this model just to ask is not worth it (another model is working on this machine, or this is the hub's model: see
@@ -256,6 +278,14 @@ internal sealed class FleetHealthMonitor
             return Unavailable(node, failure, reachable: true, modelAvailable: modelListed);
         }
     }
+
+    private bool IsBeingMeasured(FleetNodeDefinition node, bool forceInferenceProbe) =>
+        !forceInferenceProbe && _measuringMachines?.IsMeasuring(node.OllamaRoot) == true;
+
+    private NodeHealthSnapshot SnapshotWhileMeasured(FleetNodeDefinition node) =>
+        _snapshots.TryGetValue(node.Name, out NodeHealthSnapshot? snapshot)
+            ? snapshot
+            : new NodeHealthSnapshot(node.Name, node.Model, true, true, true, DateTimeOffset.UtcNow, "being measured");
 
     // Ollama's OpenAI-compatible endpoint takes no num_ctx, so a probe through it loads the model at Ollama's own default
     // window (measured on a worker: 262144 tokens, two thirds of the model out of graphics memory and slow), and the next

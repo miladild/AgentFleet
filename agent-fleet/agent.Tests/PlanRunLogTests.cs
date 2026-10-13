@@ -266,14 +266,17 @@ public sealed class PlanRunLogTests : PlanTestBase
         string path = Path.Combine(PlansDirectory, plan.Id + ".json");
         string legacy = System.Text.RegularExpressions.Regex.Replace(File.ReadAllText(path), ",\\s*\"model\": null", string.Empty);
         legacy = System.Text.RegularExpressions.Regex.Replace(legacy, ",\\s*\"contextCeiling\": null", string.Empty);
+        legacy = System.Text.RegularExpressions.Regex.Replace(legacy, ",\\s*\"loopGuardNotes\": null", string.Empty);
         Assert.DoesNotContain("\"model\"", legacy);
         Assert.DoesNotContain("\"contextCeiling\"", legacy);
+        Assert.DoesNotContain("\"loopGuardNotes\"", legacy);
         File.WriteAllText(path, legacy);
 
         PlanRunEvent round = Assert.Single(Store.Get(plan.Id)!.Events!);
 
         Assert.Null(round.Model);
         Assert.Null(round.ContextCeiling);
+        Assert.Null(round.LoopGuardNotes);
     }
 
     [Fact]

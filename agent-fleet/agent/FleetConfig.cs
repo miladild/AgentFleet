@@ -137,7 +137,8 @@ internal sealed record FleetConfig(
     FleetSandboxConfig? Sandbox = null,
     FleetHistoryConfig? History = null,
     IReadOnlyDictionary<string, FleetCustomToolConfig>? CustomTools = null,
-    string? NotifyUrl = null)
+    string? NotifyUrl = null,
+    FleetLabConfig? Lab = null)
 {
     public const int MaxHistoryDays = 3650;
 
@@ -153,3 +154,5 @@ internal sealed record FleetConfig(
     public bool IsToolEnabled(string name) =>
         !Tools.TryGetValue(name, out FleetToolConfig? tool) || tool.Enabled;
 }
+
+internal sealed record FleetLabConfig(double MinSpeedFraction = 0.70, double FullFitShare = 0.90);

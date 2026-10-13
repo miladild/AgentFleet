@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Configuration;
@@ -25,6 +27,7 @@ internal sealed class FleetConfigStore
     private static readonly Regex NodeNamePattern = new("^[a-z0-9][a-z0-9-]{0,31}$", RegexOptions.Compiled);
 
     private readonly string _path;
+    private readonly Action<string, string> _replaceFile;
 
     // Writers take this lock; readers never do. Almost every request reads the config (mode, plan
     // mode, tools), and a disk write that stalls - a slow disk, or antivirus scanning the file -
@@ -32,26 +35,87 @@ internal sealed class FleetConfigStore
     private readonly object _writeLock = new();
     private volatile FleetConfig _current;
 
-    public FleetConfigStore(IConfiguration configuration)
+    public FleetConfigStore(IConfiguration configuration, Action<string, string>? replaceFile = null)
     {
         ArgumentNullException.ThrowIfNull(configuration);
-        _path = configuration["FLEET_CONFIG_PATH"] ?? Path.Combine(AppContext.BaseDirectory, "fleet.config.json");
+        _path = Path.GetFullPath(configuration["FLEET_CONFIG_PATH"] ?? Path.Combine(AppContext.BaseDirectory, "fleet.config.json"));
+        _replaceFile = replaceFile ?? ((temporary, destination) => File.Move(temporary, destination, overwrite: true));
         _current = LoadOrSeed(configuration);
     }
 
     public FleetConfig Current => _current;
+
+    /// <summary>A short hash of the exact bytes currently saved on disk.</summary>
+    public string Version => ReadVersion();
 
     /// <summary>True when this start created the file: a first run, which the web UI greets with its setup checklist.</summary>
     public bool Seeded { get; private set; }
 
     public FleetConfig Save(FleetConfig config)
     {
-        FleetConfig prepared = Prepare(config);
+        if (!TrySave(config, null, out FleetConfig saved, out _))
+        {
+            throw new InvalidOperationException("The configuration could not be saved.");
+        }
+
+        return saved;
+    }
+
+    /// <summary>Saves only if the caller's version still matches the current file.</summary>
+    public bool TrySave(FleetConfig config, string? ifVersion, out FleetConfig saved, out string currentVersion)
+    {
         lock (_writeLock)
         {
-            File.WriteAllText(_path, JsonSerializer.Serialize(prepared, SerializerOptions));
+            currentVersion = ReadVersion();
+            if (ifVersion is not null && !string.Equals(ifVersion, currentVersion, StringComparison.Ordinal))
+            {
+                saved = _current;
+                return false;
+            }
+
+            FleetConfig prepared = Prepare(config);
+            WriteAtomically(prepared);
             _current = prepared;
-            return prepared;
+            saved = prepared;
+            currentVersion = ReadVersion();
+            return true;
+        }
+    }
+
+    public FleetContextPatchResult PatchNodeContext(string name, int? contextLength, string? ifVersion)
+    {
+        lock (_writeLock)
+        {
+            FleetConfig current = _current;
+            FleetNodeConfig? node = current.Nodes.FirstOrDefault(candidate => candidate.Name == name);
+            if (node is null)
+            {
+                return new(FleetContextPatchStatus.NotFound, null, ReadVersion(), null);
+            }
+
+            string version = ReadVersion();
+            if (ifVersion is not null && !string.Equals(ifVersion, version, StringComparison.Ordinal))
+            {
+                return new(FleetContextPatchStatus.Conflict, null, version, FleetConfigResponses.VersionConflictReason);
+            }
+
+            if (contextLength is < 2048 or > 131072)
+            {
+                return new(FleetContextPatchStatus.InvalidContextLength, null, version, "contextLength must be between 2048 and 131072 tokens, or null.");
+            }
+
+            FleetConfig updated = current with
+            {
+                Nodes = current.Nodes.Select(candidate => candidate.Name == name
+                    ? candidate with { ContextLength = contextLength }
+                    : candidate).ToList()
+            };
+            if (!TrySave(updated, ifVersion, out FleetConfig saved, out string savedVersion))
+            {
+                return new(FleetContextPatchStatus.Conflict, null, savedVersion, FleetConfigResponses.VersionConflictReason);
+            }
+
+            return new(FleetContextPatchStatus.Updated, saved, savedVersion, null);
         }
     }
 
@@ -132,6 +196,40 @@ internal sealed class FleetConfigStore
         File.WriteAllText(_path, JsonSerializer.Serialize(prepared, SerializerOptions));
         Seeded = true;
         return prepared;
+    }
+
+    private string ReadVersion() => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(_path))).ToLowerInvariant()[..16];
+
+    private void WriteAtomically(FleetConfig config)
+    {
+        string directory = Path.GetDirectoryName(_path)!;
+        string temporary = Path.Combine(directory, $".{Path.GetFileName(_path)}.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            File.WriteAllText(temporary, JsonSerializer.Serialize(config, SerializerOptions));
+            if (File.Exists(_path))
+            {
+                string timestamp = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
+                File.Copy(_path, $"{_path}.{timestamp}.bak", overwrite: true);
+                PruneBackups(directory);
+            }
+
+            _replaceFile(temporary, _path);
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
+        }
+    }
+
+    private void PruneBackups(string directory)
+    {
+        foreach (string oldBackup in Directory.EnumerateFiles(directory, $"{Path.GetFileName(_path)}.*.bak")
+                     .OrderByDescending(path => Path.GetFileName(path), StringComparer.Ordinal)
+                     .Skip(10))
+        {
+            File.Delete(oldBackup);
+        }
     }
 
     private static FleetConfig Prepare(FleetConfig config)
@@ -376,3 +474,17 @@ internal sealed class FleetConfigStore
         }
     }
 }
+
+internal enum FleetContextPatchStatus
+{
+    Updated,
+    NotFound,
+    Conflict,
+    InvalidContextLength
+}
+
+internal sealed record FleetContextPatchResult(
+    FleetContextPatchStatus Status,
+    FleetConfig? Config,
+    string Version,
+    string? Reason);

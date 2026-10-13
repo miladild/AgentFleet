@@ -205,6 +205,18 @@ internal sealed partial class FleetPlanStore
         }
     }
 
+    public IReadOnlyList<PlanRecord> ListRecords()
+    {
+        lock (_lock)
+        {
+            return Directory.EnumerateFiles(_directory, "*.json")
+                .Select(path => TryRead(path))
+                .OfType<PlanRecord>()
+                .OrderByDescending(plan => plan.UpdatedUtc)
+                .ToList();
+        }
+    }
+
     public IReadOnlyList<PlanSummary> List()
     {
         lock (_lock)
@@ -380,7 +392,8 @@ internal sealed partial class FleetPlanStore
         string? checkBefore = null,
         string? checkAfter = null,
         string? model = null,
-        int? contextCeiling = null)
+        int? contextCeiling = null,
+        int? loopGuardNotes = null)
     {
         string text = detail ?? string.Empty;
         int limit = kind == RunEventKind.FilesChanged ? MaxFilesChangedCharacters : MaxEventDetailCharacters;
@@ -392,7 +405,7 @@ internal sealed partial class FleetPlanStore
         var entry = new PlanRunEvent(DateTimeOffset.UtcNow, stepId, attempt, kind, tier, node, text, modelNode, workspaceNode,
             failureClass, failureSignature, failureSignatureSize, filesChanged, toolCalls, editToolCalled, rung, round,
             changedFiles is { Count: > 0 } ? changedFiles.Take(MaxChangedFilesPerEvent).ToList() : null, durationSeconds,
-            Shorten(checkBefore), Shorten(checkAfter), model, contextCeiling);
+            Shorten(checkBefore), Shorten(checkAfter), model, contextCeiling, loopGuardNotes);
         return Update(id, plan =>
         {
             List<PlanRunEvent> events = [.. plan.Events ?? [], entry];

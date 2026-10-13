@@ -73,7 +73,7 @@ public sealed class NodeHealthProbeAndThinkingTests : IDisposable
         return new FleetConfigStore(configuration);
     }
 
-    private (FleetHealthMonitor Monitor, FakeOllama Ollama) Monitor(string psJson, string? api = null)
+    private (FleetHealthMonitor Monitor, FakeOllama Ollama) Monitor(string psJson, string? api = null, MeasuringMachines? measuringMachines = null)
     {
         FleetConfigStore store = ConfigStore();
         store.Save(store.Current with
@@ -89,7 +89,7 @@ public sealed class NodeHealthProbeAndThinkingTests : IDisposable
             ["FLEET_CONFIG_PATH"] = Path.Combine(_directory, "fleet.config.json")
         }).Build(), store);
         var ollama = new FakeOllama(psJson);
-        return (new FleetHealthMonitor(options, new Factory(ollama)), ollama);
+        return (new FleetHealthMonitor(options, new Factory(ollama), measuringMachines), ollama);
     }
 
     private static Seen Only(FakeOllama ollama, string path) => Assert.Single(ollama.Requests, r => r.Path == path);
@@ -186,6 +186,36 @@ public sealed class NodeHealthProbeAndThinkingTests : IDisposable
 
         Assert.True(snapshot.Ready);
         Assert.Equal(ContextSizeChatClient.SmallestSize, Json(Only(ollama, "/api/chat").Body).GetProperty("options").GetProperty("num_ctx").GetInt32());
+    }
+
+    [Fact]
+    public async Task The_health_monitor_skips_inference_while_a_machine_is_being_measured_and_resumes_afterward()
+    {
+        MeasuringMachines measuring = new();
+        Uri root = new("http://worker-a.example.test/");
+        measuring.Begin(root);
+        (FleetHealthMonitor monitor, FakeOllama ollama) = Monitor("{\"models\":[]}", measuringMachines: measuring);
+
+        NodeHealthSnapshot during = await monitor.GetNodeAsync("worker-a", forceProbe: true);
+
+        Assert.True(during.Ready);
+        Assert.DoesNotContain(ollama.Requests, request => request.Method == HttpMethod.Post && request.Path == "/api/chat");
+        Assert.Equal("being measured", during.Failure);
+
+        measuring.End(root);
+        Assert.True((await monitor.GetNodeAsync("worker-a", forceProbe: true)).Ready);
+        Assert.Contains(ollama.Requests, request => request.Method == HttpMethod.Post && request.Path == "/api/chat");
+    }
+
+    [Fact]
+    public async Task A_forced_inference_probe_still_asks_while_a_machine_is_being_measured()
+    {
+        MeasuringMachines measuring = new();
+        measuring.Begin(new Uri("http://worker-a.example.test/"));
+        (FleetHealthMonitor monitor, FakeOllama ollama) = Monitor("{\"models\":[]}", measuringMachines: measuring);
+
+        Assert.True((await monitor.GetNodeAsync("worker-a", forceProbe: true, forceInferenceProbe: true)).Ready);
+        Assert.Contains(ollama.Requests, request => request.Method == HttpMethod.Post && request.Path == "/api/chat");
     }
 
     [Fact]

@@ -2,6 +2,7 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AgentFleet.Tests;
@@ -30,6 +31,9 @@ internal sealed class FakeStepAgent(
 
     /// <summary>The tools a step's model is seen calling in a reply (report_blocker).</summary>
     public Func<FakeStepCall, IReadOnlyList<AgentToolCall>>? CallsOf { get; init; }
+
+    /// <summary>The number of loop-guard result notes reported by a reply.</summary>
+    public Func<FakeStepCall, int>? LoopGuardNotesOf { get; init; }
 
     /// <summary>
     /// How the auditor of a check answers (a conversation opened with the check-audit role). By default it answers in words
@@ -83,7 +87,7 @@ internal sealed class FakeStepAgent(
 
         string text = await run(message, tier, cancellationToken);
         (int tools, bool edited) = ToolsOf?.Invoke(call) ?? (toolCalls, editToolCalled);
-        return new StepAgentReply(text, tools, edited, CallsOf?.Invoke(call));
+        return new StepAgentReply(text, tools, edited, CallsOf?.Invoke(call), LoopGuardNotesOf?.Invoke(call) ?? 0);
     }
 }
 
@@ -534,6 +538,36 @@ public sealed partial class PlanRunnerTests : PlanTestBase
         PlanRunEvent round = Assert.Single(Store.Get(plan.Id)!.Events!, runEvent => runEvent.Kind == RunEventKind.RoundClassified);
         Assert.Equal("model-example:latest", round.Model);
         Assert.Equal(16_384, round.ContextCeiling);
+    }
+
+    [Fact]
+    public async Task A_round_records_the_loop_guard_note_count_from_the_step_session()
+    {
+        PlanRecord plan = ApprovedPlan(Step("build it"));
+        var agent = new FakeStepAgent((_, _, _) => Task.FromResult("Worked on the build."))
+        {
+            LoopGuardNotesOf = _ => 2,
+        };
+
+        await Runner(agent, Pass).RunPlanAsync(plan.Id, default);
+
+        PlanRunEvent round = Assert.Single(Store.Get(plan.Id)!.Events!, runEvent => runEvent.Kind == RunEventKind.RoundClassified);
+        Assert.Equal(2, round.LoopGuardNotes);
+    }
+
+    [Fact]
+    public void A_step_session_counts_tool_results_containing_the_guard_marker()
+    {
+        string marker = ToolLoopGuard.Marker;
+        ChatMessage[] messages =
+        [
+            new(ChatRole.Tool, [new FunctionResultContent("call-a", $"output {marker}")]),
+            new(ChatRole.Tool, [new FunctionResultContent("call-b", "clean output")]),
+            new(ChatRole.Tool, [new FunctionResultContent("call-c", $"first {marker}; second {marker}")]),
+            new(ChatRole.Assistant, [new Microsoft.Extensions.AI.TextContent($"mention {marker} in prose")]),
+        ];
+
+        Assert.Equal(2, FleetStepSession.CountLoopGuardNotes(messages));
     }
 
     [Fact]

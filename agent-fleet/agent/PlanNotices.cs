@@ -30,12 +30,12 @@ internal interface IPlanNotifier
 }
 
 /// <summary>
-/// An optional webhook (<c>notifyUrl</c> in the fleet config, off by default) that gets one small JSON message per notice.
+/// An optional webhook (<c>notifyUrl</c> in the fleet config, off by default) for plan notices and model-results regressions.
 /// The fleet is LAN-only, so the address must be on the private network: loopback, a private or link-local address, a
 /// Tailscale (100.64.0.0/10) address, or a name that resolves to one. The message carries the plan's and the step's
 /// titles, counts and a cause word, never a file's contents or a check's output. Redirects are not followed.
 /// </summary>
-internal sealed class WebhookPlanNotifier(HttpClient client, string url, ILogger logger) : IPlanNotifier
+internal sealed class WebhookPlanNotifier(HttpClient client, string url, ILogger logger) : IPlanNotifier, IModelRegressionNoticeSender
 {
     public static readonly TimeSpan Timeout = TimeSpan.FromSeconds(5);
 
@@ -135,15 +135,31 @@ internal sealed class WebhookPlanNotifier(HttpClient client, string url, ILogger
         at = notice.AtUtc
     });
 
+    public static string Body(ModelRegressionNotice notice) => JsonSerializer.Serialize(new
+    {
+        @event = "model-results-regressed",
+        node = notice.Node,
+        model = notice.Model,
+        previousOwnSteps = notice.PreviousStepsDoneOnOwn,
+        previousSteps = notice.PreviousStepsWorked,
+        currentOwnSteps = notice.CurrentStepsDoneOnOwn,
+        currentSteps = notice.CurrentStepsWorked,
+        weekStartUtc = notice.WeekStartUtc
+    });
+
     public void Notify(PlanNotice notice) => _ = Task.Run(() => SendAsync(notice));
 
-    internal async Task SendAsync(PlanNotice notice)
+    internal Task SendAsync(PlanNotice notice) => SendBodyAsync(Body(notice));
+
+    public Task SendAsync(ModelRegressionNotice notice) => SendBodyAsync(Body(notice));
+
+    private async Task SendBodyAsync(string body)
     {
         try
         {
             if (Problem(url) is { } problem)
             {
-                logger.LogWarning("The plan notice was not sent: {Problem}", problem);
+                logger.LogWarning("The notice was not sent: {Problem}", problem);
                 return;
             }
 
@@ -153,22 +169,22 @@ internal sealed class WebhookPlanNotifier(HttpClient client, string url, ILogger
                 : await Dns.GetHostAddressesAsync(uri.Host);
             if (addresses.Length == 0 || addresses.Any(address => !IsPrivate(address)))
             {
-                logger.LogWarning("The plan notice was not sent: {Host} does not resolve to a private address (the fleet is LAN-only).", uri.Host);
+                logger.LogWarning("The notice was not sent: {Host} does not resolve to a private address (the fleet is LAN-only).", uri.Host);
                 return;
             }
 
             using var cancellation = new CancellationTokenSource(Timeout);
-            using var content = new StringContent(Body(notice), Encoding.UTF8, "application/json");
+            using var content = new StringContent(body, Encoding.UTF8, "application/json");
             using HttpResponseMessage response = await client.PostAsync(uri, content, cancellation.Token);
             if (!response.IsSuccessStatusCode)
             {
-                logger.LogWarning("The plan notice to {Host} was answered with HTTP {Status}.", uri.Host, (int)response.StatusCode);
+                logger.LogWarning("The notice to {Host} was answered with HTTP {Status}.", uri.Host, (int)response.StatusCode);
             }
         }
         catch (Exception exception)
         {
             // Fire and forget: whatever goes wrong here is logged and goes no further.
-            logger.LogWarning("The plan notice could not be sent: {Message}", exception.Message);
+            logger.LogWarning("The notice could not be sent: {Message}", exception.Message);
         }
     }
 }

@@ -50,6 +50,7 @@ builder.Services.AddHttpClient(WebTools.HttpClientName, client =>
 builder.Services.AddHttpClient(FrontendDiagramValidator.HttpClientName, client =>
     client.Timeout = TimeSpan.FromSeconds(30));
 builder.Services.AddSingleton<FleetPlanStore>();
+builder.Services.AddSingleton<MeasuringMachines>();
 builder.Services.AddSingleton<FleetHealthMonitor>();
 builder.Services.AddHostedService<FleetHealthBackgroundService>();
 builder.Services.AddSingleton<FleetModeService>();
@@ -59,6 +60,7 @@ builder.Services.AddSingleton<FleetContextStore>();
 builder.Services.AddSingleton<FleetRequestContext>();
 builder.Services.AddSingleton<ContextRetentionService>();
 builder.Services.AddSingleton<ModelPullService>();
+builder.Services.AddSingleton<FitProbeService>();
 builder.Services.AddHostedService(services => services.GetRequiredService<ContextRetentionService>());
 
 // How much conversation each model sees, when a machine does not set its own (see OllamaNodeClient).
@@ -99,6 +101,7 @@ if (contextStore.RecoveredFrom is { } damagedDatabase)
         "Nothing else was lost: plans, sessions from before the record existed, and the configuration are separate files.", damagedDatabase);
 }
 FleetPlanStore planStore = app.Services.GetRequiredService<FleetPlanStore>();
+FitProbeService fitProbeService = app.Services.GetRequiredService<FitProbeService>();
 ILoggerFactory loggerFactory = app.Services.GetRequiredService<ILoggerFactory>();
 
 // The durable record. Every AG-UI run joins the context named by its thread id, and everything the
@@ -668,6 +671,7 @@ var fleetAgent = new ChatClientAgent(
 // Optional: a message to a LAN address when a plan needs the user (a step parked, the run ended with steps waiting, done,
 // the run deadline). Off unless "notifyUrl" is set in the fleet config.
 IPlanNotifier? planNotifier = null;
+WebhookPlanNotifier? webhookNotifier = null;
 if (!string.IsNullOrWhiteSpace(fleetConfigStore.Current.NotifyUrl))
 {
     if (WebhookPlanNotifier.Problem(fleetConfigStore.Current.NotifyUrl) is { } notifyProblem)
@@ -676,10 +680,11 @@ if (!string.IsNullOrWhiteSpace(fleetConfigStore.Current.NotifyUrl))
     }
     else
     {
-        planNotifier = new WebhookPlanNotifier(
+        webhookNotifier = new WebhookPlanNotifier(
             new HttpClient(WebhookPlanNotifier.CreateHandler()) { Timeout = WebhookPlanNotifier.Timeout },
             fleetConfigStore.Current.NotifyUrl.Trim(),
             loggerFactory.CreateLogger("AgentFleet.PlanNotices"));
+        planNotifier = webhookNotifier;
     }
 }
 
@@ -702,7 +707,8 @@ var planRunner = new PlanRunner(
     stepClock: TimeSpan.FromMinutes(planStepMinutes),
     attemptTimeout: TimeSpan.FromMinutes(planAttemptMinutes),
     notifier: planNotifier,
-    stepGuidance: stepGuidanceEnabled);
+    stepGuidance: stepGuidanceEnabled,
+    fitProbes: fitProbeService);
 planStore.Approved += planRunner.Enqueue;
 app.Lifetime.ApplicationStarted.Register(() => planRunner.Start(app.Lifetime.ApplicationStopping));
 
@@ -787,6 +793,8 @@ app.MapGet("/api/fleet-config", () =>
     FleetConfig config = fleetConfigStore.Current;
     return Results.Json(new
     {
+        version = fleetConfigStore.Version,
+        defaultContextLength,
         triageModel = config.TriageModel,
         nodes = config.Nodes.Select(node => new { node.Name, node.Url, node.Model, node.Purpose, node.Tier, node.Vision, node.Fallback, node.ContextLength, node.Api, node.Caveman, node.Ponytail, node.Workspace, node.Thinking }),
         tools = ToolsPayload(config),
@@ -935,7 +943,10 @@ app.MapPut("/api/fleet-config", async (FleetConfigUpdateRequest request, Cancell
             return Results.BadRequest(new { error = $"{clash} is the name of a built-in tool. Give your tool another name." });
         }
 
-        FleetConfig saved = fleetConfigStore.Save(updated);
+        if (!fleetConfigStore.TrySave(updated, request.IfVersion, out FleetConfig saved, out string version))
+        {
+            return FleetConfigResponses.VersionConflict(version);
+        }
 
         // Everything here applies now: tools and MCP servers through the tool registry, machines and the
         // triage model by building a new router and swapping it in.
@@ -961,6 +972,8 @@ app.MapPut("/api/fleet-config", async (FleetConfigUpdateRequest request, Cancell
         const bool restartRequired = false;
         return Results.Json(new
         {
+            version,
+            defaultContextLength,
             triageModel = saved.TriageModel,
             nodes = saved.Nodes.Select(node => new { node.Name, node.Url, node.Model, node.Purpose, node.Tier, node.Vision, node.Fallback, node.ContextLength, node.Api, node.Caveman, node.Ponytail, node.Workspace, node.Thinking }),
             tools = ToolsPayload(saved),
@@ -979,6 +992,28 @@ app.MapPut("/api/fleet-config", async (FleetConfigUpdateRequest request, Cancell
     {
         return Results.BadRequest(new { error = exception.Message });
     }
+});
+
+app.MapPatch("/api/fleet-config/nodes/{name}/context", (string name, FleetConfigContextUpdateRequest request) =>
+{
+    FleetContextPatchResult result = fleetConfigStore.PatchNodeContext(name, request.ContextLength, request.IfVersion);
+    if (FleetConfigResponses.ContextPatchFailure(result) is { } failure)
+    {
+        return failure;
+    }
+
+    FleetConfig saved = result.Config!;
+    lock (routerLock)
+    {
+        string fingerprint = RoutingFingerprint(saved);
+        if (fingerprint != routedFingerprint)
+        {
+            fleetClient.Swap(BuildRouter(saved));
+            routedFingerprint = fingerprint;
+        }
+    }
+
+    return Results.Json(new { name, contextLength = request.ContextLength, version = result.Version });
 });
 
 app.MapGet("/api/plans", () => Results.Json(planStore.List()));
@@ -1546,7 +1581,40 @@ app.MapPost("/api/tools/import", async (McpImportRequest request, CancellationTo
 // so a first-time user does not need a terminal. RequestGuard keeps other websites out, as for the rest.
 ModelPullService modelPulls = app.Services.GetRequiredService<ModelPullService>();
 modelPulls.Finished += _ => healthMonitor.Forget();
-var setupService = new FleetSetupService(fleetConfigStore, fleetOptions, healthMonitor, sandbox, httpClientFactory);
+var modelRegressionNotifier = webhookNotifier is null
+    ? null
+    : new ModelRegressionNotifier(webhookNotifier, fitProbeService.LabDirectory, loggerFactory.CreateLogger("AgentFleet.ModelResults"));
+var setupService = new FleetSetupService(fleetConfigStore, fleetOptions, healthMonitor, sandbox, httpClientFactory,
+    planStore, fitProbeService, modelRegressionNotifier);
+
+app.MapPost("/api/lab/fit", (FitProbeRequest request) =>
+{
+    FitProbeStartResult result = fitProbeService.Start(request.Node, request.Force, request.ConfirmHub);
+    return result.Job is null
+        ? Results.Conflict(new { reason = result.Reason })
+        : Results.Json(new { id = result.Job.Id }, statusCode: StatusCodes.Status202Accepted);
+});
+
+app.MapGet("/api/lab/fit", () => Results.Json(fitProbeService.List()));
+
+app.MapPost("/api/lab/fit/{id}/cancel", (string id) =>
+    fitProbeService.Cancel(id) ? Results.Ok() : Results.NotFound());
+
+app.MapGet("/api/lab/fit/latest", async (string node, CancellationToken cancellationToken) =>
+{
+    FitProbeLatestResult? latest = await fitProbeService.LatestAsync(node, cancellationToken);
+    return latest is null ? Results.NotFound() : Results.Json(latest);
+});
+
+app.MapGet("/api/lab/scorecards", (int? days) =>
+{
+    if (!ModelScorecards.TrySinceUtc(days, DateTimeOffset.UtcNow, out DateTimeOffset sinceUtc))
+    {
+        return Results.BadRequest(new { error = "days must be between 1 and 90." });
+    }
+
+    return Results.Json(ModelScorecards.Build(planStore.ListRecords(), sinceUtc));
+});
 
 IReadOnlyList<string> BackendUrls() =>
     app.Services.GetRequiredService<Microsoft.AspNetCore.Hosting.Server.IServer>()
@@ -1787,6 +1855,8 @@ internal sealed record ContextFeedbackRequest(string? Rating, string? MessageId,
 
 internal sealed record ModelPullRequest(string Url, string? Model);
 
+internal sealed record FitProbeRequest(string? Node, bool Force = false, bool ConfirmHub = false);
+
 internal sealed record ToolRunRequest(string? Name, System.Text.Json.JsonElement? Arguments);
 
 internal sealed record CustomToolTestRequest(string? Name, FleetCustomToolConfig Tool, IReadOnlyDictionary<string, string?>? Arguments);
@@ -1819,7 +1889,10 @@ internal sealed record FleetConfigUpdateRequest(
     IReadOnlyDictionary<string, bool>? Tools,
     IReadOnlyDictionary<string, FleetMcpServerConfig>? McpServers = null,
     FleetHistoryConfig? History = null,
-    IReadOnlyDictionary<string, FleetCustomToolConfig>? CustomTools = null);
+    IReadOnlyDictionary<string, FleetCustomToolConfig>? CustomTools = null,
+    string? IfVersion = null);
+
+internal sealed record FleetConfigContextUpdateRequest(int? ContextLength, string? IfVersion = null);
 
 internal sealed record OllamaModelsResponse(IReadOnlyList<OllamaModelSummary>? Models);
 

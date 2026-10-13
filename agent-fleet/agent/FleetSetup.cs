@@ -425,7 +425,10 @@ internal sealed class FleetSetupService(
     FleetOptions fleetOptions,
     FleetHealthMonitor healthMonitor,
     SandboxHolder sandbox,
-    IHttpClientFactory httpClientFactory)
+    IHttpClientFactory httpClientFactory,
+    FleetPlanStore? planStore = null,
+    FitProbeService? fitProbes = null,
+    ModelRegressionNotifier? modelRegressionNotifier = null)
 {
     public const string Ok = "ok";
     public const string Warn = "warn";
@@ -438,6 +441,7 @@ internal sealed class FleetSetupService(
         CancellationToken cancellationToken)
     {
         FleetConfig config = configStore.Current;
+        DateTimeOffset nowUtc = DateTimeOffset.UtcNow;
         HardwareInfo hardware = await HardwareProbe.ReadAsync(cancellationToken);
         HubInfo hub = Hub(backendUrls);
         var checks = new List<SetupCheck>();
@@ -481,6 +485,23 @@ internal sealed class FleetSetupService(
         checks.AddRange(ToolChecks(config));
         checks.AddRange(McpChecks(mcpStatuses));
         checks.Add(NetworkCheck(hub));
+
+        IReadOnlyList<PlanRecord> plans = planStore?.ListRecords() ?? [];
+        ModelScorecardsResult currentResults = ModelScorecards.Build(plans, nowUtc.AddDays(-7), nowUtc);
+        ModelScorecardsResult previousResults = ModelScorecards.Build(plans, nowUtc.AddDays(-14), nowUtc.AddDays(-7));
+        IReadOnlyList<ModelRegression> regressions = ModelResults.FindRegressions(currentResults, previousResults);
+        string[] staleMeasurements = fitProbes is null
+            ? []
+            : (await Task.WhenAll(fleetOptions.Nodes.Select(async node =>
+            {
+                FitProbeLatestResult? latest = await fitProbes.LatestAsync(node.Name, cancellationToken);
+                return latest?.Stale == true ? $"{node.Name} ({latest.Model})" : null;
+            }))).OfType<string>().ToArray();
+        if (modelRegressionNotifier is not null)
+        {
+            await modelRegressionNotifier.NotifyOnceAsync(regressions, nowUtc);
+        }
+        checks.Add(ModelResults.Check(regressions, staleMeasurements, nowUtc));
 
         NodeHealthSnapshot? fallback = (await nodes).FirstOrDefault(snapshot =>
             fleetOptions.TryGetNode(snapshot.Name, out FleetNodeDefinition? node) && node.Fallback);

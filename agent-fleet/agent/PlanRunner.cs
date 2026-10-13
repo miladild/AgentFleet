@@ -50,7 +50,7 @@ internal interface IStepSession
 /// <summary>A tool the model called during a turn, with its arguments as text.</summary>
 internal sealed record AgentToolCall(string Name, IReadOnlyDictionary<string, string?> Arguments);
 
-internal sealed record StepAgentReply(string Text, int ToolCalls, bool EditToolCalled, IReadOnlyList<AgentToolCall>? Calls = null);
+internal sealed record StepAgentReply(string Text, int ToolCalls, bool EditToolCalled, IReadOnlyList<AgentToolCall>? Calls = null, int LoopGuardNotes = 0);
 
 /// <summary>
 /// Drives the real agent. Each conversation is its own session, so a step never inherits another step's
@@ -125,8 +125,12 @@ internal sealed class FleetStepSession(AIAgent agent, string? role = null) : ISt
             seen.AddRange(nudgedCalls);
         }
 
-        return new StepAgentReply(response.Text, toolCalls, editToolCalled, seen.Select(AsToolCall).ToList());
+        return new StepAgentReply(response.Text, toolCalls, editToolCalled, seen.Select(AsToolCall).ToList(), CountLoopGuardNotes(response.Messages));
     }
+
+    internal static int CountLoopGuardNotes(IEnumerable<ChatMessage> messages) => messages
+        .SelectMany(message => message.Contents.OfType<FunctionResultContent>())
+        .Count(result => result.Result?.ToString()?.Contains(ToolLoopGuard.Marker, StringComparison.Ordinal) == true);
 
     private static AgentToolCall AsToolCall(FunctionCallContent call) => new(
         call.Name,
@@ -220,6 +224,7 @@ internal sealed partial class PlanRunner
     private readonly TimeSpan _stepClock;
     private readonly IPlanNotifier? _notifier;
     private readonly bool _stepGuidance;
+    private readonly FitProbeService? _fitProbes;
 
     public PlanRunner(
         FleetPlanStore store,
@@ -240,10 +245,12 @@ internal sealed partial class PlanRunner
         int roundsPerRung = RepairLadder.DefaultRoundsPerRung,
         TimeSpan? stepClock = null,
         IPlanNotifier? notifier = null,
-        bool stepGuidance = false)
+        bool stepGuidance = false,
+        FitProbeService? fitProbes = null)
     {
         _notifier = notifier;
         _stepGuidance = stepGuidance;
+        _fitProbes = fitProbes;
         _roundsPerRung = Math.Max(1, roundsPerRung);
         _stepClock = stepClock is { } clock && clock > TimeSpan.Zero ? clock : DefaultStepClock;
         _transientDelay = transientDelay ?? DefaultTransientDelay;
@@ -359,6 +366,7 @@ internal sealed partial class PlanRunner
             _active.TryRemove(planId, out _);
             return;
         }
+        _fitProbes?.CancelAll("Stopped: a plan needed this machine. Nothing changed.");
         _stopRequested.TryRemove(planId, out _);
 
         // A plan left running overnight must not be stopped by the computer going to sleep.
@@ -1877,7 +1885,8 @@ internal sealed partial class PlanRunner
             failureClass: failureClass, failureSignature: signature.Value, failureSignatureSize: signature.Size,
             filesChanged: changedFiles.Count, toolCalls: model.ToolCalls, editToolCalled: model.EditToolCalled,
             rung: rung, round: round, changedFiles: changedFiles, durationSeconds: durationSeconds,
-            model: modelDefinition?.Model, contextCeiling: modelDefinition?.ContextLength);
+            model: modelDefinition?.Model, contextCeiling: modelDefinition?.ContextLength,
+            loopGuardNotes: model.LoopGuardNotes);
         string? previous = history.LastOrDefault(earlier => !string.IsNullOrWhiteSpace(earlier.Signature))?.Signature;
         return Task.FromResult(new RoundOutcome(classification, signature, previous, changedFiles, meaningful,
             FilesKnown: model.WorkBefore is not null, model.EditToolCalled));
@@ -2808,7 +2817,8 @@ internal sealed partial class PlanRunner
                 modelNode: modelMachine ?? ViaNode(summary), workspaceNode: machine, rung: conversation.Rung, round: conversation.Round);
             result = new ModelAttemptResult(step.Id, summary, null, ShouldVerify: true, Workspace: worker, Machine: machine,
                 ModelNode: modelMachine ?? ViaNode(summary) ?? _journal?.ActualNode, ToolCalls: reply.ToolCalls,
-                EditToolCalled: reply.EditToolCalled, WorkBefore: work, Blocker: CheckAudit.BlockerFrom(reply));
+                EditToolCalled: reply.EditToolCalled, LoopGuardNotes: reply.LoopGuardNotes, WorkBefore: work,
+                Blocker: CheckAudit.BlockerFrom(reply));
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -3031,6 +3041,7 @@ internal sealed partial class PlanRunner
         bool ReroutableWorkspaceFailure = false,
         int ToolCalls = 0,
         bool EditToolCalled = false,
+        int? LoopGuardNotes = null,
         PlanTools.WorkSnapshot? WorkBefore = null,
         Exception? FailureException = null,
         IStepSession? Session = null,

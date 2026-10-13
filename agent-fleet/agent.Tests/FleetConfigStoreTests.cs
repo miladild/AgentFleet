@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 
 namespace AgentFleet.Tests;
@@ -13,10 +15,10 @@ public sealed class FleetConfigStoreTests : IDisposable
 
     private string ConfigPath => Path.Combine(_dir, "fleet.config.json");
 
-    private FleetConfigStore Open() =>
+    private FleetConfigStore Open(Action<string, string>? replaceFile = null) =>
         new(new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { ["FLEET_CONFIG_PATH"] = ConfigPath })
-            .Build());
+            .Build(), replaceFile);
 
     private void WriteConfig(string nodesJson) =>
         File.WriteAllText(
@@ -119,7 +121,7 @@ public sealed class FleetConfigStoreTests : IDisposable
     {
         WriteConfig("""[{"name":"a","url":"http://h:1/api","model":"m","purpose":""}]""");
 
-        var exception = Assert.Throws<InvalidOperationException>(Open);
+        var exception = Assert.Throws<InvalidOperationException>(() => Open());
 
         Assert.Contains("/v1", exception.Message);
     }
@@ -191,7 +193,7 @@ public sealed class FleetConfigStoreTests : IDisposable
     {
         WriteConfig(nodesJson);
 
-        InvalidOperationException error = Assert.Throws<InvalidOperationException>(Open);
+        InvalidOperationException error = Assert.Throws<InvalidOperationException>(() => Open());
 
         Assert.Contains(expected, error.Message);
     }
@@ -230,6 +232,120 @@ public sealed class FleetConfigStoreTests : IDisposable
 
         Assert.Equal("aggressive", reopened.Mode);
         Assert.True(reopened.PlanModeEnabled);
+    }
+
+    [Fact]
+    public void The_version_changes_when_the_saved_bytes_change()
+    {
+        FleetConfigStore store = Open();
+        string before = store.Version;
+
+        File.AppendAllText(ConfigPath, "\n");
+
+        Assert.Equal(16, before.Length);
+        Assert.NotEqual(before, store.Version);
+    }
+
+    [Fact]
+    public void A_stale_version_is_rejected_without_changing_the_file()
+    {
+        FleetConfigStore store = Open();
+        byte[] before = File.ReadAllBytes(ConfigPath);
+        string currentVersion = store.Version;
+
+        bool saved = store.TrySave(store.Current with { Mode = "aggressive" }, "stale-version", out _, out string actualVersion);
+
+        Assert.False(saved);
+        Assert.Equal(currentVersion, actualVersion);
+        Assert.Equal(before, File.ReadAllBytes(ConfigPath));
+        IResult conflict = FleetConfigResponses.VersionConflict(actualVersion);
+        Assert.Equal(StatusCodes.Status409Conflict, Assert.IsAssignableFrom<IStatusCodeHttpResult>(conflict).StatusCode);
+        JsonElement body = JsonSerializer.SerializeToElement(Assert.IsAssignableFrom<IValueHttpResult>(conflict).Value);
+        Assert.Equal(FleetConfigResponses.VersionConflictReason, body.GetProperty("reason").GetString());
+        Assert.Equal(currentVersion, body.GetProperty("version").GetString());
+    }
+
+    [Fact]
+    public void A_save_without_a_version_still_succeeds()
+    {
+        FleetConfigStore store = Open();
+
+        bool saved = store.TrySave(store.Current with { Mode = "aggressive" }, null, out FleetConfig result, out string version);
+
+        Assert.True(saved);
+        Assert.Equal("aggressive", result.Mode);
+        Assert.Equal(version, store.Version);
+    }
+
+    [Fact]
+    public void A_save_keeps_a_backup_and_only_the_newest_ten_and_removes_its_temporary_file()
+    {
+        FleetConfigStore store = Open();
+        byte[] previous = File.ReadAllBytes(ConfigPath);
+        for (int index = 0; index < 11; index++)
+        {
+            File.WriteAllText(Path.Combine(_dir, $"fleet.config.json.20000101-{index:D6}.bak"), "old");
+        }
+
+        store.Save(store.Current with { Mode = "aggressive" });
+
+        string[] backups = Directory.GetFiles(_dir, "fleet.config.json.*.bak");
+        Assert.Equal(10, backups.Length);
+        Assert.Contains(backups, path => File.ReadAllBytes(path).SequenceEqual(previous));
+        Assert.Empty(Directory.GetFiles(_dir, "*.tmp"));
+    }
+
+    [Fact]
+    public void A_failed_atomic_replace_keeps_the_old_file_and_cleans_up_the_temporary_file()
+    {
+        FleetConfigStore store = Open((_, _) => throw new IOException("simulated replace failure"));
+        byte[] previous = File.ReadAllBytes(ConfigPath);
+
+        Assert.Throws<IOException>(() => store.Save(store.Current with { Mode = "aggressive" }));
+
+        Assert.Equal(previous, File.ReadAllBytes(ConfigPath));
+        Assert.Equal("conservative", store.Current.Mode);
+        Assert.Empty(Directory.GetFiles(_dir, "*.tmp"));
+    }
+
+    [Fact]
+    public void Context_patch_changes_only_the_requested_node_field()
+    {
+        FleetConfigStore store = Open();
+        FleetConfig config = store.Current with
+        {
+            Nodes =
+            [
+                new FleetNodeConfig("main", "http://main.example.test/v1", "model-x", "main", FleetTiers.Heavy, Fallback: true),
+                new FleetNodeConfig("worker", "http://worker.example.test/v1", "model-y", "worker", FleetTiers.Standard)
+            ]
+        };
+        store.Save(config);
+        JsonNode expected = JsonNode.Parse(File.ReadAllText(ConfigPath))!;
+        expected["nodes"]!.AsArray().Single(node => node!["name"]!.GetValue<string>() == "worker")!["contextLength"] = 16384;
+
+        FleetContextPatchResult result = store.PatchNodeContext("worker", 16384, store.Version);
+        JsonNode actual = JsonNode.Parse(File.ReadAllText(ConfigPath))!;
+
+        Assert.Equal(FleetContextPatchStatus.Updated, result.Status);
+        Assert.True(JsonNode.DeepEquals(expected, actual));
+    }
+
+    [Fact]
+    public void Context_patch_reports_missing_nodes_conflicts_and_out_of_range_values()
+    {
+        FleetConfigStore store = Open();
+
+        FleetContextPatchResult missing = store.PatchNodeContext("missing", 16384, null);
+        FleetContextPatchResult conflict = store.PatchNodeContext("hub", 16384, "stale-version");
+        FleetContextPatchResult invalid = store.PatchNodeContext("hub", 131073, store.Version);
+
+        Assert.Equal(FleetContextPatchStatus.NotFound, missing.Status);
+        Assert.Equal(StatusCodes.Status404NotFound, Assert.IsAssignableFrom<IStatusCodeHttpResult>(FleetConfigResponses.ContextPatchFailure(missing)).StatusCode);
+        Assert.Equal(FleetContextPatchStatus.Conflict, conflict.Status);
+        Assert.Equal(StatusCodes.Status409Conflict, Assert.IsAssignableFrom<IStatusCodeHttpResult>(FleetConfigResponses.ContextPatchFailure(conflict)).StatusCode);
+        Assert.Equal(FleetContextPatchStatus.InvalidContextLength, invalid.Status);
+        Assert.Equal(StatusCodes.Status400BadRequest, Assert.IsAssignableFrom<IStatusCodeHttpResult>(FleetConfigResponses.ContextPatchFailure(invalid)).StatusCode);
     }
 
     [Fact]
