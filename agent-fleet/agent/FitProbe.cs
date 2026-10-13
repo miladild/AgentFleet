@@ -23,7 +23,12 @@ internal sealed record FitPoint(
     string? Detail);
 
 /// <summary>How much speed and graphics-memory fit a recommendation asks for.</summary>
-internal sealed record FitThresholds(double MinSpeedFraction = 0.70, double FullFitShare = 0.90);
+/// <summary>
+/// How much speed and graphics-memory fit a recommendation asks for. A model that already spills to the processor
+/// at the smallest size is held to the stricter <see cref="ConstrainedSpeedFraction"/>, because each larger size
+/// spills more and the speed drops further.
+/// </summary>
+internal sealed record FitThresholds(double MinSpeedFraction = 0.70, double FullFitShare = 0.90, double ConstrainedSpeedFraction = 0.80);
 
 /// <summary>The context size to use for the one model that was measured. It never names a model.</summary>
 internal sealed record FitRecommendation(int? Context, bool DoesNotFullyFit, string Reason);
@@ -78,19 +83,26 @@ internal sealed class FitProbe(HttpClient client)
             return new FitRecommendation(null, false, "No speed could be measured.");
         }
 
-        double floor = baseline.TokensPerSecond!.Value * thresholds.MinSpeedFraction;
+        bool doesNotFullyFit = baseline.GpuShare is double share && share < thresholds.FullFitShare;
+        double fraction = doesNotFullyFit
+            ? Math.Max(thresholds.ConstrainedSpeedFraction, thresholds.MinSpeedFraction)
+            : thresholds.MinSpeedFraction;
+        double floor = baseline.TokensPerSecond!.Value * fraction;
+        // A model that fits at the smallest size is only offered sizes that still fit on the card; one that already
+        // spills is judged on speed alone, against the stricter floor.
         // The baseline always keeps its own speed, so it is the fallback when no other size is listed as a candidate.
         FitPoint largest = ok
-            .Where(point => point.TokensPerSecond is double speed && speed >= floor)
+            .Where(point => point.TokensPerSecond is double speed && speed >= floor &&
+                            (doesNotFullyFit || point.GpuShare is null || point.GpuShare >= thresholds.FullFitShare))
             .MaxBy(point => point.Context) ?? baseline;
 
-        bool doesNotFullyFit = baseline.GpuShare is double share && share < thresholds.FullFitShare;
-        string percent = Math.Round(thresholds.MinSpeedFraction * 100).ToString("0", System.Globalization.CultureInfo.InvariantCulture);
+        string percent = Math.Round(fraction * 100).ToString("0", System.Globalization.CultureInfo.InvariantCulture);
         string reason =
-            $"{largest.Context} keeps at least {percent}% of the speed at the smallest size measured ({baseline.Context}).";
+            $"{largest.Context} keeps at least {percent}% of the speed at the smallest size measured ({baseline.Context})";
+        reason += doesNotFullyFit ? "." : " and stays on the graphics card.";
         if (doesNotFullyFit)
         {
-            reason += " The model does not fully fit on the graphics card even at the smallest size.";
+            reason += " The model does not fully fit on the graphics card even at the smallest size, so a stricter speed floor was used.";
         }
 
         reason += " Speed only, not coding skill.";

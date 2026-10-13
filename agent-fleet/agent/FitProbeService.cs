@@ -524,7 +524,7 @@ internal sealed class FitProbeService
     private FitThresholds Thresholds()
     {
         FleetLabConfig settings = _config.Current.Lab ?? new FleetLabConfig();
-        return new FitThresholds(settings.MinSpeedFraction, settings.FullFitShare);
+        return new FitThresholds(settings.MinSpeedFraction, settings.FullFitShare, settings.ConstrainedSpeedFraction);
     }
 
     private void PruneJobs()

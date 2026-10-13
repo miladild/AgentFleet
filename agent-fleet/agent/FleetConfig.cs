@@ -155,4 +155,4 @@ internal sealed record FleetConfig(
         !Tools.TryGetValue(name, out FleetToolConfig? tool) || tool.Enabled;
 }
 
-internal sealed record FleetLabConfig(double MinSpeedFraction = 0.70, double FullFitShare = 0.90);
+internal sealed record FleetLabConfig(double MinSpeedFraction = 0.70, double FullFitShare = 0.90, double ConstrainedSpeedFraction = 0.80);

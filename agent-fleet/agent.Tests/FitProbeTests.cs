@@ -282,6 +282,53 @@ public sealed class FitProbeTests
     }
 
     [Fact]
+    public void A_machine_that_already_spills_gets_the_stricter_speed_floor()
+    {
+        // Measured on a small card: the model spills even at the smallest size, and each larger size spills more.
+        FitRecommendation result = FitProbe.Recommend(
+        [
+            Ok(12288, 0.78, 15.95),
+            Ok(16384, 0.76, 13.98),
+            Ok(24576, 0.72, 11.58),
+            Ok(32768, 0.70, 10.68)
+        ]);
+
+        Assert.True(result.DoesNotFullyFit);
+        Assert.Equal(16384, result.Context);
+        Assert.Contains("stricter speed floor", result.Reason);
+    }
+
+    [Fact]
+    public void The_stricter_speed_floor_argument_is_used()
+    {
+        FitRecommendation result = FitProbe.Recommend(
+        [
+            Ok(12288, 0.78, 15.95),
+            Ok(16384, 0.76, 13.98),
+            Ok(24576, 0.72, 11.58),
+            Ok(32768, 0.70, 10.68)
+        ], new FitThresholds(ConstrainedSpeedFraction: 0.70));
+
+        Assert.Equal(24576, result.Context);
+    }
+
+    [Fact]
+    public void A_machine_that_fits_is_not_offered_a_size_that_spills_even_when_it_is_fast_enough()
+    {
+        FitRecommendation result = FitProbe.Recommend(
+        [
+            Ok(12288, 1.00, 64.87),
+            Ok(16384, 1.00, 64.47),
+            Ok(24576, 1.00, 64.78),
+            Ok(32768, 0.89, 49.91)
+        ]);
+
+        Assert.False(result.DoesNotFullyFit);
+        Assert.Equal(24576, result.Context);
+        Assert.Contains("stays on the graphics card", result.Reason);
+    }
+
+    [Fact]
     public void The_speed_threshold_argument_is_used()
     {
         FitRecommendation result = FitProbe.Recommend(
@@ -290,7 +337,7 @@ public sealed class FitProbeTests
             Ok(16384, 0.92, 15),
             Ok(24576, 0.75, 11),
             Ok(32768, 0.60, 8)
-        ], new FitThresholds(MinSpeedFraction: 0.5));
+        ], new FitThresholds(MinSpeedFraction: 0.5, FullFitShare: 0.5));
 
         Assert.Equal(24576, result.Context);
     }
