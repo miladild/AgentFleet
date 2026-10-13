@@ -105,6 +105,19 @@ A release download is new to your antivirus too, and its web UI is about 11,000 
 scanner may look at each one before it runs, so the web UI can take a minute or more to answer; later starts take a few
 seconds. Add an exclusion for the folder you unpacked it to if that first start stalls.
 
+**After restarting the backend task, the old settings are still in use.** `Stop-ScheduledTask` stops the task's shell but can
+leave the previous `AgentFleet.exe` running and listening on the port. The new instance then fails, and the log shows
+"address already in use". The old one keeps answering `/health` with `ok`, so the check looks fine while the new settings
+are not applied. Stop the task, stop the `AgentFleet.exe` whose path is the install's backend folder, then start the task:
+
+```powershell
+Stop-ScheduledTask AgentFleetBackend
+Get-Process AgentFleet | Where-Object Path -eq '<install-root>\backend\AgentFleet.exe' | Stop-Process
+Start-ScheduledTask AgentFleetBackend
+```
+
+Confirm that the process start time changed and that `/health` answers. `scripts\Deploy-Fleet.ps1` already does this.
+
 **It stopped and did not come back.** The two scheduled tasks start at your logon and then again every five minutes while
 they are not running, so a backend or web UI that was stopped, crashed, or gave up (its port still held, its disk not yet
 mounted) is started again within five minutes, as long as you are logged in. A task is switched off while

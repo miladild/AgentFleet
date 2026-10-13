@@ -47,9 +47,9 @@ flowchart TB
    web UI declares `open_fleet_settings` and `set_project_folder`, which run in the browser) and AG-UI `context` (the web
    UI's project folder). The AG-UI endpoint drops `context`, so `FleetRequestContext` reads it (bounded: 8 entries of 2000
    characters) and the router hands it to the model with the durable-record block.
-2. `ChatClientAgent` calls its chat client, which is `FleetRoutingChatClient` wrapped in a function-invocation layer. That
-   layer runs tool calls by name, with a per-request cap of 200 iterations and detailed errors (small models need to see
-   the real error to correct themselves).
+2. `ChatClientAgent` calls its chat client: the outer layers of the harness (see [Agent Framework harness](#agent-framework-harness)),
+   ending in `FleetRoutingChatClient`. The function-invocation layer runs tool calls by name, with a per-request cap of 200
+   iterations and detailed errors (small models need to see the real error to correct themselves).
 3. `FleetRoutingChatClient` decides where the call goes:
    - It works out the **plan phase** from the messages (see below).
    - Images in the conversation go to a vision node; with no vision node they are stripped.
@@ -58,7 +58,9 @@ flowchart TB
      skipped).
    - It picks a client for that node. Each node client is a `ResilientChatClient` (health-aware, falls back to the fallback
      node on failure) around a `ToolCallRescueChatClient` (repairs a known Ollama bug where the `qwen3-coder` parser leaks a
-     tool call as text) around an OpenAI-compatible client.
+     tool call as text) around a `ContextSizeChatClient` (fits the conversation to that machine's context window, once per
+     machine) around the Ollama client. A node with `"api": "openai"` gets the OpenAI-compatible client in its place, with
+     no context sizing.
 4. Streamed updates pass back through `GuardCalls`, which rewrites any disallowed tool call while planning.
 5. Routes, outputs, tool calls, errors and partial streamed output are journaled against the conversation context. The
    route is also identified in the response and Context timeline.
