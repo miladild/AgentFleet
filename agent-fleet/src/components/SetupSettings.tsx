@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { CopyCommand, DownloadButton, type SetupCheck, type SetupReport, announceFleetChanged } from "./setupApi";
+import { formatSetupFitSummary, type FitLatestResult } from "./fitPresentation";
 
 type NodeLite = { name: string; url: string; model: string; vision: boolean; fallback: boolean };
 
@@ -117,6 +118,7 @@ export function SetupSettings({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [installed, setInstalled] = useState<string[] | null>(null);
+  const [measuredFit, setMeasuredFit] = useState<FitLatestResult | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -142,6 +144,21 @@ export function SetupSettings({
 
   const localNode = report ? nodes.find((node) => !node.vision && isLocalAddress(node.url, report)) : undefined;
   const localUrl = localNode?.url;
+
+  useEffect(() => {
+    if (!localNode) {
+      setMeasuredFit(null);
+      return;
+    }
+    let cancelled = false;
+    fetch(`/api/lab/fit/latest?node=${encodeURIComponent(localNode.name)}`, { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((result: FitLatestResult | null) => !cancelled && setMeasuredFit(result))
+      .catch(() => !cancelled && setMeasuredFit(null));
+    return () => {
+      cancelled = true;
+    };
+  }, [localNode?.name]);
 
   // What is already downloaded on this computer's machine, to offer "use it" instead of a download.
   useEffect(() => {
@@ -212,13 +229,15 @@ export function SetupSettings({
             </p>
             {report.suggestions.map((s) => {
               const inUse = tagged(s.model) === tagged(localNode.model);
+              const fitSummary = formatSetupFitSummary(s.model, measuredFit);
               return (
                 <div key={s.model} className="flex flex-wrap items-center gap-x-3 gap-y-1 bg-neutral-900/60 rounded px-2 py-1.5">
                   <span className="font-mono text-xs text-neutral-100">{s.model}</span>
                   {s.recommended && <span className="text-[10px] uppercase tracking-wide text-sky-300">recommended</span>}
                   <span className="text-[11px] text-neutral-500 flex-1 min-w-40">
                     {s.downloadGb ? `${s.downloadGb} GB. ` : ""}
-                    {s.why}
+                    {fitSummary?.replacesStaticReason ? fitSummary.line : s.why}
+                    {fitSummary && !fitSummary.replacesStaticReason && <span className="block">{fitSummary.line}</span>}
                   </span>
                   {inUse && isInstalled(s.model) ? (
                     <span className="text-[11px] text-emerald-400">in use</span>

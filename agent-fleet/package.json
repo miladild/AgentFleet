@@ -9,7 +9,7 @@
     "build": "next build",
     "start": "node scripts/serve.mjs start",
     "test:e2e": "playwright test",
-    "test:unit": "node --test src/components/planEvidence.test.mjs",
+    "test:unit": "node --test src/components/planEvidence.test.mjs src/components/fitPresentation.test.mjs src/components/workPresentation.test.mjs",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit"
   },

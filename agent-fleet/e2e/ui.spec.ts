@@ -1,16 +1,29 @@
 import { expect, test } from "@playwright/test";
 
 const baseConfig = {
-  triageModel: "llama3.2:latest",
+  version: "fixture-version-1",
+  defaultContextLength: 32768,
+  triageModel: "model-triage",
   nodes: [
     {
       name: "hub",
-      url: "http://127.0.0.1:11434/v1",
-      model: "qwen3-coder:30b",
+      url: "http://hub.example.test/v1",
+      model: "model-x",
       purpose: "hard work",
       tier: "heavy",
       vision: false,
       fallback: true,
+      caveman: "off",
+      ponytail: "off",
+    },
+    {
+      name: "worker-a",
+      url: "http://worker-a.example.test/v1",
+      model: "model-y",
+      purpose: "worker",
+      tier: "standard",
+      vision: false,
+      fallback: false,
       caveman: "off",
       ponytail: "off",
     },
@@ -85,6 +98,9 @@ const parkedPlanId = "cccccccccccccccccccccccccccccccc";
 test.beforeEach(async ({ page }) => {
   let config = JSON.parse(JSON.stringify(baseConfig)) as typeof baseConfig;
   let machineChoice: string | null = null;
+  let fitJob: Record<string, unknown> | null = null;
+  let fitLatest: Record<string, unknown> | null = null;
+  let fitId = 0;
 
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -92,21 +108,70 @@ test.beforeEach(async ({ page }) => {
     const json = (body: unknown, status = 200) =>
       route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
-    // Let the local CopilotKit runtime advertise its real default agent; only
+    // Let the local chat runtime advertise its default agent; only
     // fleet/backend APIs are fixture-backed in these browser tests.
     if (pathname.startsWith("/api/copilotkit/")) return route.continue();
 
+    if (pathname === "/api/lab/fit/latest") {
+      return fitLatest ? json(fitLatest) : json({ reason: "not measured" }, 404);
+    }
+    if (pathname === "/api/lab/fit" && request.method() === "POST") {
+      const body = request.postDataJSON();
+      fitId += 1;
+      const id = fitId.toString(16).padStart(32, "0");
+      const result = { context: 12288, status: "ok", gpuShare: 0.96, tokensPerSecond: 20, loadSeconds: 3, detail: null, completedAtUtc: "2026-10-05T00:00:00Z" };
+      const recommendedResult = { ...result, context: 16384, gpuShare: 0.76, tokensPerSecond: 15.2, loadSeconds: 4 };
+      const complete = body.node === "hub";
+      const measuredModel = config.nodes.find((node) => node.name === body.node)?.model ?? "model-x";
+      fitJob = {
+        id,
+        node: body.node,
+        model: measuredModel,
+        state: complete ? "complete" : "running",
+        currentContext: complete ? null : 16384,
+        results: complete ? [result, recommendedResult] : [result],
+        recommendation: { context: complete ? 16384 : null, doesNotFullyFit: false, reason: "Keeps enough speed." },
+        startedAtUtc: "2026-10-05T00:00:00Z",
+        finishedAtUtc: complete ? "2026-10-05T00:01:00Z" : null,
+        reason: null,
+      };
+      if (complete) {
+        fitLatest = {
+          node: "hub",
+          model: measuredModel,
+          results: [result, recommendedResult],
+          recommendation: { context: 16384, doesNotFullyFit: false, reason: "Keeps enough speed." },
+          measuredAtUtc: "2026-10-05T00:00:00Z",
+          stale: false,
+          staleReason: null,
+        };
+      }
+      return json({ id }, 202);
+    }
+    if (pathname === "/api/lab/fit" && request.method() === "GET") return json(fitJob ? [fitJob] : []);
+    if (/^\/api\/lab\/fit\/[0-9a-f]{32}\/cancel$/.test(pathname)) {
+      if (fitJob) fitJob = { ...fitJob, state: "cancelled", reason: "Stopped." };
+      return json({});
+    }
+    if (pathname === "/api/fleet-config/nodes/hub/context" && request.method() === "PATCH") {
+      return json({ reason: "The settings changed since you opened them. Reload and try again.", version: "fixture-version-2" }, 409);
+    }
+
     if (pathname === "/api/fleet-config") {
       if (request.method() === "PUT") {
-        config = { ...config, ...request.postDataJSON() };
+        const { ifVersion: _ifVersion, ...changes } = request.postDataJSON();
+        config = { ...config, ...changes, version: "fixture-version-2" };
       }
       return json(config);
+    }
+    if (pathname === "/api/fleet-config/models") {
+      return json({ models: [{ name: "model-new", sizeBytes: 4096 }] });
     }
     if (pathname === "/api/fleet-status") {
       return json({
         mode: "conservative",
         planMode: false,
-        nodes: [{ name: "hub", model: "qwen3-coder:30b", ready: true, reachable: true }],
+        nodes: [{ name: "hub", model: "model-x", ready: true, reachable: true }],
         recentActivity: [],
       });
     }
@@ -140,7 +205,7 @@ test.beforeEach(async ({ page }) => {
           : after === 1
             ? [{ id: 2, at: "2026-09-27T00:00:02.000Z", step: 1, kind: "verification", node: "hub", text: "check failed", ok: false }]
             : [],
-        nodes: [{ name: "hub", model: "hub/qwen3-coder:30b", ready: true }],
+        nodes: [{ name: "hub", model: "model-x", ready: true }],
       });
     }
     if (pathname === `/api/live/${reroutePlanId}`) {
@@ -180,11 +245,11 @@ test.beforeEach(async ({ page }) => {
         },
         events: [],
         nodes: [
-          { name: "hub", model: "qwen3-coder:30b", ready: true, vision: false },
+          { name: "hub", model: "model-x", ready: true, vision: false },
           // As /api/fleet-status sends them: only a worker with a workspace at the step's tier can be chosen for a retry.
-          { name: "worker-a", model: "ornith:9b", tier: "light", ready: true, vision: false, workspace: true },
-          { name: "worker-b", model: "ornith:9b", tier: "light", ready: true, vision: false, workspace: true },
-          { name: "vision", model: "qwen2.5vl:7b", ready: true, vision: true },
+          { name: "worker-a", model: "model-y", tier: "light", ready: true, vision: false, workspace: true },
+          { name: "worker-b", model: "model-y", tier: "light", ready: true, vision: false, workspace: true },
+          { name: "vision", model: "model-vision", ready: true, vision: true },
         ],
       });
     }
@@ -221,8 +286,8 @@ test.beforeEach(async ({ page }) => {
         },
         events: [],
         nodes: [
-          { name: "hub", model: "qwen3-coder:30b", ready: true, vision: false },
-          { name: "worker-a", model: "ornith:9b", tier: "standard", ready: true, vision: false, workspace: true },
+          { name: "hub", model: "model-x", ready: true, vision: false },
+          { name: "worker-a", model: "model-y", tier: "standard", ready: true, vision: false, workspace: true },
         ],
       });
     }
@@ -258,8 +323,8 @@ test.beforeEach(async ({ page }) => {
         },
         events: [],
         nodes: [
-          { name: "hub", model: "qwen3-coder:30b", ready: true, vision: false },
-          { name: "worker-a", model: "ornith:9b", tier: "standard", ready: true, vision: false, workspace: true },
+          { name: "hub", model: "model-x", ready: true, vision: false },
+          { name: "worker-a", model: "model-y", tier: "standard", ready: true, vision: false, workspace: true },
         ],
       });
     }
@@ -396,7 +461,7 @@ test("reroutes a failed step without changing its requested tier", async ({ page
 
   const machine = page.getByRole("combobox", { name: "Machine for step #1" });
   await expect(machine).toHaveValue("");
-  expect((await machine.locator("option").allTextContents()).join("\n")).not.toContain("qwen2.5vl");
+  expect((await machine.locator("option").allTextContents()).join("\n")).not.toContain("model-vision");
   await expect(page.locator(".live-node.failed .tier")).toHaveText("light");
   await expect(page.locator(".live-inspector .tier")).toHaveText("light");
   await expect(page.locator(".live-inspector .tier")).not.toHaveClass(/raised/);
@@ -474,17 +539,261 @@ test("saves per-machine Caveman and Ponytail style settings", async ({ page }) =
   await page.goto("/");
   await page.getByRole("button", { name: "Config", exact: true }).click();
   await page.getByRole("button", { name: /^Machines/ }).click();
-  await page.getByRole("button", { name: "Edit", exact: true }).click();
-  await page.getByRole("combobox", { name: "Caveman response style" }).selectOption("lite");
-  await page.getByRole("combobox", { name: "Ponytail coding style" }).selectOption("full");
+  await page.getByRole("button", { name: "Edit", exact: true }).first().click();
+  await page.getByRole("combobox", { name: "Caveman response style" }).first().selectOption("lite");
+  await page.getByRole("combobox", { name: "Ponytail coding style" }).first().selectOption("full");
   const saveRequestPromise = page.waitForRequest((request) => request.url().endsWith("/api/fleet-config") && request.method() === "PUT");
   await page.getByRole("button", { name: "Save", exact: true }).click();
   const saveRequest = await saveRequestPromise;
   const savedNode = saveRequest.postDataJSON().nodes[0];
 
   await expect(page.getByText("Saved.", { exact: true })).toBeVisible();
+  expect(saveRequest.postDataJSON().ifVersion).toBe("fixture-version-1");
   expect(savedNode.caveman).toBe("lite");
   expect(savedNode.ponytail).toBe("full");
-  await expect(page.getByRole("combobox", { name: "Caveman response style" })).toHaveValue("lite");
-  await expect(page.getByRole("combobox", { name: "Ponytail coding style" })).toHaveValue("full");
+  await expect(page.getByRole("combobox", { name: "Caveman response style" }).first()).toHaveValue("lite");
+  await expect(page.getByRole("combobox", { name: "Ponytail coding style" }).first()).toHaveValue("full");
+});
+
+test("a stale config save shows the conflict and reloads the latest version", async ({ page }) => {
+  let conflicted = false;
+  await page.route("**/api/fleet-config", async (route) => {
+    const request = route.request();
+    if (request.method() === "PUT") {
+      conflicted = true;
+      return route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({ reason: "The settings changed since you opened them. Reload and try again.", version: "server-version-2" }),
+      });
+    }
+    if (request.method() === "GET" && conflicted) {
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...baseConfig, version: "server-version-2" }) });
+    }
+    return route.fallback();
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Config", exact: true }).click();
+  await page.getByRole("button", { name: /^Machines/ }).click();
+  await page.getByRole("button", { name: "Edit", exact: true }).first().click();
+  await page.getByRole("combobox", { name: "Caveman response style" }).first().selectOption("lite");
+
+  const firstSave = page.waitForRequest((request) => request.url().endsWith("/api/fleet-config") && request.method() === "PUT");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  expect((await firstSave).postDataJSON().ifVersion).toBe("fixture-version-1");
+  await expect(page.getByText("The settings changed since you opened them. Reload and try again.", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Reload", exact: true }).click();
+  await expect(page.getByRole("combobox", { name: "Caveman response style" }).first()).toHaveValue("off");
+  await page.getByRole("combobox", { name: "Caveman response style" }).first().selectOption("lite");
+  const secondSave = page.waitForRequest((request) => request.url().endsWith("/api/fleet-config") && request.method() === "PUT");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  expect((await secondSave).postDataJSON().ifVersion).toBe("server-version-2");
+});
+
+test("a worker context-fit measurement shows progress and can be cancelled", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Config", exact: true }).click();
+  await page.getByRole("button", { name: /^Machines/ }).click();
+  const workerCard = page.getByRole("textbox", { name: "Name" }).nth(1).locator("xpath=ancestor::div[contains(@class, 'bg-neutral-800/60')][1]");
+
+  await expect(workerCard).toContainText("Fit not measured yet.");
+  await expect(workerCard).toContainText("Speed only, not coding skill.");
+  console.log("Fit card before measurement DOM:", await workerCard.evaluate((element) => element.outerHTML));
+  const startRequest = page.waitForRequest((request) => request.url().endsWith("/api/lab/fit") && request.method() === "POST");
+  await workerCard.getByRole("button", { name: "Measure", exact: true }).click();
+  expect((await startRequest).postDataJSON()).toEqual({ node: "worker-a" });
+
+  const panel = workerCard.getByRole("region", { name: "Context fit measurement" });
+  await expect(panel).toContainText("16K — ◉ Measuring");
+  await expect(panel.getByRole("progressbar", { name: "Context fit measurement progress" })).toHaveAttribute("aria-valuemax", "4");
+  await panel.getByRole("button", { name: "Cancel measuring" }).click();
+  await expect(panel).toContainText("Measurement cancelled: Stopped.");
+});
+
+test("a machine card shows count-only work results and the shared check appears in setup", async ({ page }) => {
+  await page.route("**/api/lab/scorecards**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        models: [{
+          node: "worker-a", model: "model-y", stepsWorked: 6, stepsDoneOnOwn: 4,
+          rescuedByNode: { hub: 2 }, parksByFailureSignature: { check: 1 },
+        }],
+        infrastructureRoundsByNode: { "worker-a": 2 },
+        skippedButCountedDoneByNode: { "worker-a": 1 },
+        truncatedPlans: 1,
+      }),
+    });
+  });
+  await page.route("**/api/setup", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ready: true,
+        firstRun: false,
+        checks: [{ id: "model-results", area: "machines", status: "fail", title: "Model results", detail: "4 of 5 last week, 1 of 6 this week on model-y." }],
+        suggestions: [],
+        hub: { hostname: "localhost", addresses: ["127.0.0.1"] },
+        hardware: { ramGb: 64, gpu: null, vramGb: 0, freeDiskGb: null },
+      }),
+    });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Config", exact: true }).click();
+  await page.getByRole("button", { name: /^Machines/ }).click();
+  const workerCard = page.getByRole("textbox", { name: "Name" }).nth(1).locator("xpath=ancestor::div[contains(@class, 'bg-neutral-800/60')][1]");
+  const workLine = workerCard.getByText(/^Work last 7 days:/);
+  await expect(workLine).toContainText("4 of 6 steps on its own, 1 parked");
+  await expect(workLine).toContainText("Rescued by the hub 2 · infrastructure problems 2 · skipped 1");
+  await expect(workLine).toContainText("Some long plans were cut.");
+  await expect(workLine).not.toContainText("%");
+
+  await page.getByRole("button", { name: /^Setup/ }).click();
+  await expect(page.getByText("Model results", { exact: true })).toBeVisible();
+  await expect(page.getByText("4 of 5 last week, 1 of 6 this week on model-y.", { exact: true })).toBeVisible();
+});
+
+test("a vision machine without history says there is no plan record", async ({ page }) => {
+  await page.route("**/api/fleet-config", async (route) => {
+    const config = JSON.parse(JSON.stringify(baseConfig));
+    config.nodes.push({
+      name: "vision-node", url: "http://vision-node.example.test/v1", model: "model-vision",
+      purpose: "visual tasks", tier: null, vision: true, fallback: false, caveman: "off", ponytail: "off",
+    });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(config) });
+  });
+  await page.route("**/api/lab/scorecards**", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ models: [], truncatedPlans: 0 }) });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Config", exact: true }).click();
+  await page.getByRole("button", { name: /^Machines/ }).click();
+  const visionCard = page.getByRole("textbox", { name: "Name" }).nth(2).locator("xpath=ancestor::div[contains(@class, 'bg-neutral-800/60')][1]");
+  await expect(visionCard.getByText("Work last 7 days: no plan record.", { exact: true })).toBeVisible();
+});
+
+test("the plan run log labels missing loop-guard history and shows recorded counts", async ({ page }) => {
+  const planId = "dddddddddddddddddddddddddddddddd";
+  const now = "2026-10-05T00:00:00Z";
+  const plan = {
+    id: planId,
+    title: "Loop guard recording",
+    goal: "Show round notes in the run log.",
+    status: "running",
+    workingDirectory: null,
+    assumptions: [],
+    openQuestions: [],
+    risks: [],
+    diagram: null,
+    diagramNote: null,
+    steps: [{ id: 1, title: "Record round history", detail: "", files: [], verify: null, tier: "standard", status: "running", note: null, attempts: 1 }],
+    updatedUtc: now,
+    events: [
+      { atUtc: now, stepId: 1, attempt: 1, kind: "round-classified", tier: "standard", node: "worker-a", detail: "Old event", loopGuardNotes: null },
+      { atUtc: now, stepId: 1, attempt: 1, kind: "round-classified", tier: "standard", node: "worker-a", detail: "New event", loopGuardNotes: 2 },
+    ],
+  };
+  await page.route("**/api/plans", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([{ ...plan, stepsDone: 0, stepsTotal: 1 }]) });
+  });
+  await page.route("**/api/plans/*", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(plan) });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /^Plans/ }).click();
+  await page.getByRole("button", { name: /Loop guard recording/ }).click();
+  await page.getByText("Run log (2 events)").click();
+  const runLog = page.getByText("Run log (2 events)").locator("xpath=ancestor::details");
+  await expect(runLog).toContainText("loop guard notes: not recorded");
+  await expect(runLog).toContainText("loop guard notes: 2");
+});
+
+test("a newly added machine shows its unmeasured fit line and measure action", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Config", exact: true }).click();
+  await page.getByRole("button", { name: /^Machines/ }).click();
+
+  await page.getByPlaceholder("worker.example.test").fill("worker-new.example.test");
+  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  await page.getByRole("button", { name: "model-new", exact: false }).click();
+  const saveRequest = page.waitForRequest((request) => request.url().endsWith("/api/fleet-config") && request.method() === "PUT");
+  await page.getByRole("button", { name: "Add and save", exact: true }).click();
+  const saved = (await saveRequest).postDataJSON();
+  expect(saved.nodes.some((node: { name: string; model: string }) => node.name === "worker2" && node.model === "model-new")).toBe(true);
+
+  const newCard = page.getByRole("textbox", { name: "Name" }).nth(2).locator("xpath=ancestor::div[contains(@class, 'bg-neutral-800/60')][1]");
+  await expect(newCard).toContainText("Fit not measured yet.");
+  await expect(newCard.getByRole("button", { name: "Measure", exact: true })).toBeVisible();
+});
+
+test("the Setup model list replaces a static fit claim when measurement says it does not fit", async ({ page }) => {
+  await page.route("**/api/fleet-config", async (route) => {
+    const config = JSON.parse(JSON.stringify(baseConfig));
+    config.nodes[0].url = "http://localhost:11434/v1";
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(config) });
+  });
+  await page.route("**/api/setup", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ready: true,
+        firstRun: false,
+        checks: [],
+        suggestions: [{ model: "model-x", downloadGb: 6, why: "Fits in 6 GB.", recommended: true }],
+        hub: { hostname: "localhost", addresses: ["127.0.0.1"] },
+        hardware: { ramGb: 64, gpu: "graphics card", vramGb: 6, freeDiskGb: null },
+      }),
+    });
+  });
+  await page.route("**/api/lab/fit/latest?node=hub", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        node: "hub",
+        model: "model-x",
+        results: [],
+        recommendation: { context: 16384, doesNotFullyFit: true, reason: "Measured result." },
+        measuredAtUtc: "2026-10-05T00:00:00Z",
+        stale: false,
+        staleReason: null,
+      }),
+    });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Config", exact: true }).click();
+  await expect(page.getByText(/Measured on this computer: 16K does not fully fit on the graphics card\./)).toBeVisible();
+  await expect(page.getByText("Fits in 6 GB.", { exact: true })).toHaveCount(0);
+});
+
+test("the hub measurement asks first, offers its result, and prints a save conflict", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Config", exact: true }).click();
+  await page.getByRole("button", { name: /^Machines/ }).click();
+  const hubCard = page.getByRole("textbox", { name: "Name" }).nth(0).locator("xpath=ancestor::div[contains(@class, 'bg-neutral-800/60')][1]");
+
+  await hubCard.getByRole("button", { name: "Measure", exact: true }).click();
+  await expect(hubCard).toContainText(/Loads .* on this computer for about 5 minutes; graphics-heavy apps may slow down\./);
+  const startRequest = page.waitForRequest((request) => request.url().endsWith("/api/lab/fit") && request.method() === "POST");
+  await hubCard.getByRole("button", { name: "Measure now", exact: true }).click();
+  expect((await startRequest).postDataJSON()).toEqual({ node: "hub", confirmHub: true });
+
+  const panel = hubCard.getByRole("region", { name: "Context fit measurement" });
+  await expect(panel).toContainText("16K — ✓ Measured");
+  await expect(panel).toContainText("Suggest 16K (now 32K).");
+  console.log("Fit card after measurement DOM:", await hubCard.evaluate((element) => element.outerHTML));
+  const patchRequest = page.waitForRequest((request) => request.url().endsWith("/api/fleet-config/nodes/hub/context") && request.method() === "PATCH");
+  await panel.getByRole("button", { name: "Use 16K and save", exact: true }).click();
+  expect((await patchRequest).postDataJSON()).toEqual({ contextLength: 16384, ifVersion: "fixture-version-1" });
+  await expect(panel).toContainText("The settings changed since you opened them. Reload and try again.");
+  await expect(panel.getByRole("button", { name: "Reload", exact: true })).toBeVisible();
 });

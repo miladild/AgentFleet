@@ -8,6 +8,8 @@ import { SetupSettings } from "./SetupSettings";
 import { ToolsSettings, type McpStatus, type ToolConfig } from "./ToolsSettings";
 import type { CommandToolConfig, CommandToolStatus } from "./CommandTools";
 import { CopyCommand, DownloadButton, announceFleetChanged, type HubInfo } from "./setupApi";
+import { FitProbe } from "./FitProbe";
+import { formatFitSize } from "./fitPresentation";
 
 type FleetConfigNode = {
   name: string;
@@ -39,6 +41,8 @@ type WorkerWorkspaceConfig = {
 };
 
 type FleetConfigData = {
+  version: string;
+  defaultContextLength: number;
   triageModel: string;
   nodes: FleetConfigNode[];
   tools: Record<string, ToolConfig>;
@@ -347,6 +351,11 @@ function MachineCard({
   onChange,
   onRemove,
   onMakeFallback,
+  version,
+  defaultContextLength,
+  onContextSaved,
+  onReload,
+  fallbackNodeName,
 }: {
   node: FleetConfigNode;
   index: number;
@@ -356,11 +365,18 @@ function MachineCard({
   onChange: (node: FleetConfigNode) => void;
   onRemove: () => void;
   onMakeFallback: () => void;
+  version: string;
+  defaultContextLength: number;
+  fallbackNodeName: string | null;
+  onContextSaved: (nodeName: string, contextLength: number, version: string) => void;
+  onReload: () => void;
 }) {
   const [models, setModels] = useState<FetchedModel[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
   const [open, setOpen] = useState(false);
+  const [fitOpen, setFitOpen] = useState(false);
+  const [fitMeasureSignal, setFitMeasureSignal] = useState(0);
 
   async function check() {
     setChecking(true);
@@ -444,6 +460,17 @@ function MachineCard({
           {status.reachable && !status.listsModels && <DownloadButton compact url={node.url} model={node.model} />}
         </div>
       )}
+      <FitProbe
+        node={node}
+        version={version}
+        defaultContextLength={defaultContextLength}
+        fallbackNodeName={fallbackNodeName}
+        open={fitOpen}
+        measureSignal={fitMeasureSignal}
+        onOpenChange={setFitOpen}
+        onContextSaved={(contextLength, nextVersion) => onContextSaved(node.name, contextLength, nextVersion)}
+        onReload={onReload}
+      />
       {open && (
         <div className="space-y-2 pt-1">
           <div>
@@ -494,13 +521,25 @@ function MachineCard({
                 onChange={(e) => onChange({ ...node, contextLength: e.target.value ? Number(e.target.value) : null })}
                 className="text-xs px-2 py-1 rounded bg-neutral-900 border border-neutral-700 text-neutral-200"
               >
-                <option value="">Default (32K)</option>
+                <option value="">Default ({formatFitSize(defaultContextLength)})</option>
                 {[8192, 12288, 16384, 24576, 32768, 65536, 131072].map((size) => (
                   <option key={size} value={size}>
                     {size / 1024}K
                   </option>
                 ))}
               </select>
+              {!node.vision && node.api?.toLowerCase() !== "openai" && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFitOpen(true);
+                    setFitMeasureSignal((current) => current + 1);
+                  }}
+                  className="shrink-0 text-[11px] text-sky-300 hover:underline"
+                >
+                  Measure context fit
+                </button>
+              )}
               <span className="text-[11px] text-neutral-600">
                 Each request asks for what it needs, up to this. Lower it if this machine&apos;s model spills out of graphics memory
                 (slow answers); raise it for long files.
@@ -615,7 +654,7 @@ export function ConfigPanel() {
   const [draft, setDraft] = useState<FleetConfigData | null>(null);
   const [saved, setSaved] = useState<string>("");
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
+  const [message, setMessage] = useState<{ text: string; error: boolean; reload?: boolean } | null>(null);
   const [statuses, setStatuses] = useState<NodeStatus[]>([]);
   const [feedback, setFeedback] = useState<FeedbackCount[]>([]);
   const [triageModels, setTriageModels] = useState<FetchedModel[] | null>(null);
@@ -677,6 +716,7 @@ export function ConfigPanel() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           triageModel: next.triageModel,
+          ifVersion: next.version,
           nodes: next.nodes,
           tools: Object.fromEntries(Object.entries(next.tools).map(([name, tool]) => [name, tool.enabled])),
           mcpServers: next.mcpServers,
@@ -686,10 +726,12 @@ export function ConfigPanel() {
       });
       const data = await res.json();
       if (!res.ok) {
-        setMessage({ text: data.error ?? "Save failed.", error: true });
+        setMessage({ text: data.reason ?? data.error ?? "Save failed.", error: true, reload: res.status === 409 });
         return false;
       }
       const merged: FleetConfigData = {
+        version: data.version,
+        defaultContextLength: data.defaultContextLength,
         triageModel: data.triageModel,
         nodes: data.nodes,
         tools: data.tools,
@@ -711,6 +753,32 @@ export function ConfigPanel() {
     } finally {
       setSaving(false);
     }
+  }
+
+  async function reloadConfig() {
+    try {
+      const res = await fetch("/api/fleet-config", { cache: "no-store" });
+      if (!res.ok) throw new Error("Could not reload the configuration.");
+      const data: FleetConfigData = await res.json();
+      setDraft(data);
+      setSaved(snapshot(data));
+      setMessage({ text: "Settings reloaded.", error: false });
+    } catch {
+      setMessage({ text: "Could not reload the configuration from the backend.", error: true });
+    }
+  }
+
+  function contextSaved(nodeName: string, contextLength: number, version: string) {
+    if (!draft) return;
+    const updated: FleetConfigData = {
+      ...draft,
+      version,
+      nodes: draft.nodes.map((node) => node.name === nodeName ? { ...node, contextLength } : node),
+    };
+    setDraft(updated);
+    setSaved(snapshot(updated));
+    setMessage({ text: "Context setting saved.", error: false });
+    announceFleetChanged();
   }
 
   const dirty = draft !== null && snapshot(draft) !== saved;
@@ -777,7 +845,7 @@ export function ConfigPanel() {
               ) : tab === "machines" ? (
                 <div className="space-y-3">
                   <p className="text-xs text-neutral-500">
-                    Each machine runs Ollama with one model and has a role. The router sends hard work to heavy machines,
+                    Each machine runs one model and has a role. The router sends hard work to heavy machines,
                     ordinary work to standard ones, and quick questions to light ones. Changes apply when saved.
                   </p>
                   {draft.nodes.map((node, i) => (
@@ -787,6 +855,11 @@ export function ConfigPanel() {
                       index={i}
                       status={statuses.find((s) => s.name === node.name)}
                       feedback={feedback.find((f) => f.node === node.name)}
+                      version={draft.version}
+                      defaultContextLength={draft.defaultContextLength}
+                      fallbackNodeName={fallback?.name ?? null}
+                      onContextSaved={contextSaved}
+                      onReload={() => void reloadConfig()}
                       canRemove={draft.nodes.length > 1 && !node.fallback}
                       onChange={(next) => setNode(i, next)}
                       onRemove={() => setDraft({ ...draft, nodes: draft.nodes.filter((_, j) => j !== i) })}
@@ -875,7 +948,10 @@ export function ConfigPanel() {
                 </button>
               )}
               {message ? (
-                <span className={`text-xs ${message.error ? "text-red-300" : "text-neutral-400"}`}>{message.text}</span>
+                <>
+                  <span className={`text-xs ${message.error ? "text-red-300" : "text-neutral-400"}`}>{message.text}</span>
+                  {message.reload && <button type="button" onClick={() => void reloadConfig()} className="text-xs text-sky-300 hover:underline">Reload</button>}
+                </>
               ) : (
                 <span className="text-xs text-neutral-600">Everything here applies as soon as it is saved. No restart.</span>
               )}
