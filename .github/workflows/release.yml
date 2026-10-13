@@ -1,10 +1,9 @@
 name: Release
 
-# Bumping agent-fleet/package.json on main builds and publishes that version. Pushing a v* tag also publishes;
-# Run it by hand (Actions > Release > Run workflow) to build without publishing.
+# A push to main no longer starts a release. Pushing a v* tag publishes that version; run it by hand
+# (Actions > Release > Run workflow) to build without publishing.
 on:
   push:
-    branches: [main]
     tags: ['v*']
   workflow_dispatch:
 

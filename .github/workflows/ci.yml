@@ -1,9 +1,8 @@
 name: CI
 
+# Manual only: Actions > CI > Run workflow. It no longer runs after every push or pull request, to save build minutes.
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
