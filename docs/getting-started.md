@@ -109,6 +109,12 @@ fix. Where the fleet can do the fix itself there is a button:
 
 Until the fleet can answer, a box above the chat list says what is missing and opens this tab.
 
+### Measuring what fits
+
+In **Config > Machines**, choose **Measure context fit** for a supported machine, then **Measure**. Fleet loads its configured model at up to four context sizes, asks for a short reply at each size, records speed and graphics-memory use, then unloads it. A measurement is refused while a plan is approved or running, and only one measurement can run on a machine at a time. Measuring this computer asks for confirmation because loading the model can slow graphics-heavy work.
+
+The result is a speed estimate, not a measure of coding skill and not a model ranking. **Use <size> and save** changes only that machine's context length. Fleet checks that the settings have not changed since the result was opened, then saves the setting and keeps a timestamped `fleet.config.json.*.bak` backup.
+
 ## 3. Ask something
 
 Try these in order:

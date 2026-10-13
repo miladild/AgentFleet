@@ -122,6 +122,8 @@ requirements (see [security.md](security.md)) keep them in our code.
 and persists changes. `Current` is a lock-free read; writers take a lock. Nodes, tools, MCP servers and the sandbox are read
 once at startup and baked into the clients and the agent's tool list. Mode and plan mode are read per request.
 
+Context-fit measurement is handled by `FitProbe` and `FitProbeService`: the service checks whether a measurement is allowed, runs and records it, and cancels it when plan work needs the machine. `ModelScorecards` summarizes recent plan work as counts. The context recommendation is based on measured speed and can change only a node's context length; it does not rank models or measure coding skill.
+
 ## Plan mode
 
 - **Files.** `PlanModels.cs`, `FleetPlanStore.cs` (a plan is `plans/<id>.json` plus a `.md`), `PlanTools.cs` (`propose_plan`,

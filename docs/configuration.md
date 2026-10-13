@@ -163,9 +163,23 @@ set them in your user environment variables. For a Windows service set them on t
 | `FLEET_PLAN_ROUNDS_PER_RUNG` | 3 | How many rounds (the model works, then the approved check runs) a plan step gets on each rung of the repair ladder before it climbs to the next (1 to 10) |
 | `FLEET_CONTEXT_LENGTH` | 32768 | The most tokens of context a machine is asked for when it does not set `contextLength` |
 | `FLEET_CONTEXT_FIT` | `classic` | The policy for shortening conversations that exceed the model's window: `classic` (the default), `maf-truncate` (Agent Framework's truncation), or `maf-collapse` (Agent Framework's truncation plus tool-result collapsing). Both Agent Framework policies are designed to change the start of the prompt only every few calls, which Ollama's prompt cache favours. Experimental; leave unset unless you are comparing policies. Applies to every machine's model calls except the routing model. |
+| `FLEET_LAB_DIR` | `lab` beside the plans folder | Where fit-measurement history and scorecard notification state are stored |
 | `FLEET_STEP_GUIDANCE` | unset | Set to `tests` to add experimental test-writing guidance to plan steps that list test files. |
 | `SANDBOX_*` | | The same settings as the `sandbox` section, used when the file does not give them |
 | `HUB_OLLAMA_URL`, `HUB_OLLAMA_MODEL`, `TRIAGE_OLLAMA_MODEL` | | Seed values for the first-ever start only |
+
+### Fit measurement settings
+
+The optional `lab` object in `fleet.config.json` controls the context-fit recommendation:
+
+```json
+"lab": {
+  "minSpeedFraction": 0.70,
+  "fullFitShare": 0.90
+}
+```
+
+`minSpeedFraction` is the minimum fraction of the speed at the smallest tested context that a recommended size must keep. `fullFitShare` is the GPU share threshold used for the full-fit warning at that baseline size. These defaults keep the recommendation speed-based; they do not score coding ability or rank models.
 
 For the web UI (`agent-fleet\.env.local`, or the environment):
 
@@ -209,6 +223,10 @@ The backend answers these on port 8000. They are what the web UI and the VS Code
 | `GET /api/contexts/storage?olderThanDays=`, `POST /api/contexts/cleanup` | The record's size and a preview of a cleanup; deleting chats not used for a number of days |
 | `GET /api/logs/tail?lines=` | End of today's log |
 | `GET /api/setup` | The Setup tab's checklist: this computer's hardware, suggested models and every check with its fix |
+| `POST /api/lab/fit` | Start a context-fit measurement with `{ "node": "name", "force": false, "confirmHub": false }`; returns `202` with the job id, or `409` with a refusal reason |
+| `GET /api/lab/fit`, `GET /api/lab/fit/latest?node=name`, `POST /api/lab/fit/{id}/cancel` | List recent measurement jobs, get a node's latest result, or cancel a job |
+| `GET /api/lab/scorecards?days=7` | Count recent plan-step outcomes by machine and model; `days` defaults to 7 and must be 1 to 90 |
+| `PATCH /api/fleet-config/nodes/{name}/context` | Change only one node's `contextLength` with `{ "contextLength": 24576, "ifVersion": "..." }`; a stale version returns `409`. A successful save creates the normal timestamped config backup. |
 | `GET /api/setup/hub` | This computer's name and private addresses (for the worker setup commands) |
 | `POST /api/setup/pull` `{url, model}`, `GET /api/setup/pulls`, `POST /api/setup/pulls/{id}/cancel` | Download a model onto a machine in the background, and follow or cancel it |
 | `POST /api/setup/start-ollama` | Start the Ollama app on this computer (not when the backend runs as a Windows service) |
