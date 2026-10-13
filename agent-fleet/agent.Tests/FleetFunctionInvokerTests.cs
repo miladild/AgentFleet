@@ -344,12 +344,11 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
         Assert.True(ContextText.Bool(result.Payload, "isError"));
     }
 
-    // Behaviour 7 variant 1: Tool throws OperationCanceledException with a live token - comes back as an error result, not journaled as a tool error.
-    // The Microsoft.Extensions.AI FunctionInvokingChatClient catches exceptions thrown by the function invoker
-    // and turns them into error results ONLY when the cancellation token is NOT cancelled;
-    // no ToolResult event is created because RecordToolCall is not called when an exception is turned into a result.
+    // Behaviour 7 variant 1: Tool throws OperationCanceledException with a live token - comes back as an error result AND is journaled as a tool error.
+    // The Microsoft.Extensions.AI FunctionInvokingChatClient turns the exception into an error result for the model
+    // when the cancellation token is NOT cancelled; the invoker journals it before rethrowing.
     [Fact]
-    public async Task T7b1_A_tool_that_throws_OperationCanceledException_with_a_live_token_comes_back_as_an_error_result_and_is_not_journaled_as_a_tool_error()
+    public async Task T7b1_A_tool_that_throws_OperationCanceledException_with_a_live_token_comes_back_as_an_error_result_and_is_journaled_as_a_tool_error()
     {
         var invoker = NewInvoker();
         var tool = AIFunctionFactory.Create((string path) =>
@@ -370,10 +369,37 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
         Assert.NotEmpty(results);
         Assert.NotEqual("", results[0]); // Error text is not empty
 
-        // Verify the journal contains NO ToolResult event for that call
-        // (exception was turned into a result by the framework, not recorded by RecordToolCall)
+        // The tool's own cancellation is a failed call: the journal records it as an error (the caller did not cancel)
         IReadOnlyList<FleetContextEvent> events = Store.AllEvents(contextId);
-        Assert.DoesNotContain(events, e => e.Kind == FleetContextEventKind.ToolResult);
+        FleetContextEvent result = Assert.Single(events, e => e.Kind == FleetContextEventKind.ToolResult);
+        Assert.True(ContextText.Bool(result.Payload, "isError"));
+    }
+
+    // Tool cancels itself while the caller's token is live: the invoker journals the error and rethrows.
+    [Fact]
+    public async Task A_tool_that_cancels_itself_with_a_live_token_is_journaled_as_an_error_and_the_exception_propagates()
+    {
+        var invoker = NewInvoker();
+        var tool = AIFunctionFactory.Create((string path) =>
+        {
+            throw new OperationCanceledException("tool timed out");
+        }, "read_file", "Reads a file.");
+        var context = new FunctionInvocationContext
+        {
+            Function = tool,
+            CallContent = new FunctionCallContent("c1", "read_file", new Dictionary<string, object?> { ["path"] = "f" }),
+            Arguments = new AIFunctionArguments(new Dictionary<string, object?> { ["path"] = "f" }),
+            Messages = [],
+        };
+
+        string contextId = NewContextId();
+        using IDisposable scope = Scope(contextId);
+        await Assert.ThrowsAsync<OperationCanceledException>(async () =>
+            await invoker.InvokeAsync(context, CancellationToken.None).AsTask());
+
+        IReadOnlyList<FleetContextEvent> events = Store.AllEvents(contextId);
+        FleetContextEvent result = Assert.Single(events, e => e.Kind == FleetContextEventKind.ToolResult);
+        Assert.True(ContextText.Bool(result.Payload, "isError"));
     }
 
     // Behaviour 7 variant 2: Cancelled request propagates cancellation - exception escapes and no ToolResult is journaled.

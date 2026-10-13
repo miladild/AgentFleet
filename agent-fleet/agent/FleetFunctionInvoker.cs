@@ -99,7 +99,7 @@ internal sealed class FleetFunctionInvoker(
 
             return result;
         }
-        catch (Exception exception) when (exception is not OperationCanceledException)
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             RecordToolCall(context, toolName, exception.Message, isError: true);
             throw;
