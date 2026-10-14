@@ -877,3 +877,54 @@ test("the Tools tab turns chat approvals on and leaves the wait as it was", asyn
   await expect(page.getByText("Saved. The chat now asks before it runs a command or changes a file.")).toBeVisible();
   await expect(checkbox).toBeChecked();
 });
+
+test("the Setup tab turns the weekly measurement on and shows an open regression", async ({ page }) => {
+  await page.route("**/api/lab/weekly", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      enabled: false,
+      dayOfWeek: "sunday",
+      startHour: 2,
+      hours: 4,
+      nextWindowStartUtc: null,
+      lastRunUtc: "2026-10-11T12:00:00Z",
+      nodes: [{
+        name: "worker-a",
+        model: "model-y",
+        lastMeasuredUtc: "2026-10-11T12:00:00Z",
+        regression: { since: "2026-10-11T12:00:00Z", summary: "the recommended context went from 16384 to 12288" },
+      }],
+    }),
+  }));
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Config", exact: true }).click();
+
+  await expect(page.getByText(/^Regression since /)).toContainText("the recommended context went from 16384 to 12288.");
+  const checkbox = page.getByRole("checkbox", { name: /Measure the workers once a week/ });
+  await expect(checkbox).not.toBeChecked();
+  const saveRequest = page.waitForRequest((request) => request.url().endsWith("/api/fleet-config") && request.method() === "PUT");
+  await checkbox.check();
+  const body = (await saveRequest).postDataJSON();
+
+  expect(body).toEqual({ weeklyProbe: { enabled: true, dayOfWeek: "sunday", startHour: 2, hours: 4 } });
+  await expect(page.getByText("Saved. The workers are measured once a week, inside the window.")).toBeVisible();
+  await expect(checkbox).toBeChecked();
+  await expect(page.getByRole("combobox", { name: "Window length" })).toHaveValue("4");
+});
+
+test("turning chat approvals on does not hide unsaved machine edits", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Config", exact: true }).click();
+  await page.getByRole("button", { name: /^Machines/ }).click();
+  await page.getByRole("button", { name: "Edit", exact: true }).first().click();
+  await page.getByRole("combobox", { name: "Caveman response style" }).first().selectOption("lite");
+
+  await page.getByRole("button", { name: "Tools", exact: true }).click();
+  await expect(page.getByText("Unsaved machine changes: see the Machines tab.")).toBeVisible();
+  await page.getByRole("checkbox", { name: /Ask before the chat runs a command/ }).check();
+  await expect(page.getByText("Saved. The chat now asks before it runs a command or changes a file.")).toBeVisible();
+
+  await expect(page.getByText("Unsaved machine changes: see the Machines tab.")).toBeVisible();
+});

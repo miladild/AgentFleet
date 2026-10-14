@@ -191,7 +191,8 @@ kept in `weekly-fit-state.json`, next to the measurement history.
 
 `GET /api/lab/weekly` shows these settings, the next window, the last complete run, and for each worker its last measurement
 and any open regression (see the [HTTP interface](#http-interface)). The block is read and saved through
-`GET` and `PUT /api/fleet-config` like the other blocks.
+`GET` and `PUT /api/fleet-config` like the other blocks. The Setup tab of the Config panel in the web UI has the switch, the
+day, start hour and window length, and this status.
 
 ## Environment variables
 

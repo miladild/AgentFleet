@@ -11,6 +11,7 @@ import type { CommandToolConfig, CommandToolStatus } from "./CommandTools";
 import { CopyCommand, DownloadButton, announceFleetChanged, type HubInfo } from "./setupApi";
 import { FitProbe } from "./FitProbe";
 import { formatFitSize } from "./fitPresentation";
+import type { WeeklyProbeConfig } from "./weeklyPresentation";
 
 type FleetConfigNode = {
   name: string;
@@ -51,6 +52,7 @@ type FleetConfigData = {
   mcpStatus: McpStatus[];
   history?: { deleteAfterDays: number };
   chatApprovals?: { enabled: boolean; timeoutSeconds: number };
+  weeklyProbe?: WeeklyProbeConfig;
   customTools?: Record<string, CommandToolConfig>;
   customStatus?: CommandToolStatus[];
 };
@@ -741,6 +743,7 @@ export function ConfigPanel() {
         mcpStatus: data.mcpStatus,
         history: data.history,
         chatApprovals: data.chatApprovals,
+        weeklyProbe: data.weeklyProbe,
         customTools: data.customTools,
         customStatus: data.customStatus,
       };
@@ -844,6 +847,13 @@ export function ConfigPanel() {
                   onUseModel={(nodeName, model) =>
                     save({ ...draft, nodes: draft.nodes.map((node) => (node.name === nodeName ? { ...node, model } : node)) })
                   }
+                  weeklyProbe={draft.weeklyProbe ?? { enabled: false, dayOfWeek: "sunday", startHour: 2, hours: 4 }}
+                  onWeeklySaved={(weeklyProbe, version, text) => {
+                    // The saved snapshot is left as it is: it covers only the machines and the routing model, and taking a
+                    // new one here would mark machine edits that are still unsaved as saved.
+                    setDraft({ ...draft, weeklyProbe, version: version || draft.version });
+                    setMessage({ text, error: false });
+                  }}
                 />
               ) : tab === "machines" ? (
                 <div className="space-y-3">
@@ -876,9 +886,9 @@ export function ConfigPanel() {
                   <ApprovalSettings
                     settings={draft.chatApprovals ?? { enabled: false, timeoutSeconds: 240 }}
                     onSaved={(chatApprovals, version, text) => {
-                      const updated: FleetConfigData = { ...draft, chatApprovals, version: version || draft.version };
-                      setDraft(updated);
-                      setSaved(snapshot(updated));
+                      // The saved snapshot is left as it is (machines and routing model only): taking a new one would mark
+                      // machine edits that are still unsaved as saved.
+                      setDraft({ ...draft, chatApprovals, version: version || draft.version });
                       setMessage({ text, error: false });
                     }}
                   />

@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { CopyCommand, DownloadButton, type SetupCheck, type SetupReport, announceFleetChanged } from "./setupApi";
 import { formatSetupFitSummary, type FitLatestResult } from "./fitPresentation";
+import type { WeeklyProbeConfig } from "./weeklyPresentation";
+import { WeeklyProbeSettings } from "./WeeklyProbeSettings";
 
 type NodeLite = { name: string; url: string; model: string; vision: boolean; fallback: boolean };
 
@@ -109,10 +111,14 @@ export function SetupSettings({
   nodes,
   onUseModel,
   onOpenTab,
+  weeklyProbe,
+  onWeeklySaved,
 }: {
   nodes: NodeLite[];
   onUseModel: (nodeName: string, model: string) => Promise<boolean>;
   onOpenTab: (tab: string) => void;
+  weeklyProbe: WeeklyProbeConfig;
+  onWeeklySaved: (settings: WeeklyProbeConfig, version: string, message: string) => void;
 }) {
   const [report, setReport] = useState<SetupReport | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -313,6 +319,8 @@ export function SetupSettings({
       <p className="text-[11px] text-neutral-600">
         The same checks run from a terminal with scripts/Test-Fleet.ps1. More in docs/getting-started.md and docs/troubleshooting.md.
       </p>
+
+      <WeeklyProbeSettings settings={weeklyProbe} onSaved={onWeeklySaved} />
     </div>
   );
 }
