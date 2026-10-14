@@ -163,6 +163,13 @@ foreach ($node in $health.nodes) {
     $state = if ($node.ready) { 'ready' } else { "NOT READY ($($node.reason))" }
     Write-Host ('  {0,-14} {1,-32} {2}' -f $node.name, $node.model, $state)
 }
+# Two backends were seen once, started seconds apart: the second answered for about a minute and then exited, which
+# looked like an outage. Name it when it happens, with the start times, so the cause can be found.
+$backendProcesses = @(Get-Process -Name AgentFleet -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe })
+if ($backendProcesses.Count -gt 1) {
+    $started = ($backendProcesses | Sort-Object StartTime | ForEach-Object { "{0} (started {1:HH:mm:ss})" -f $_.Id, $_.StartTime }) -join ', '
+    Write-Warn "More than one backend process is running: $started. Only one can hold port $BackendPort; the other should exit within a minute. If it does not, stop the newer one."
+}
 # The durable record is part of the backend now: prove it opened, and that old chats were imported.
 try {
     $sessions = @(Invoke-RestMethod -Uri "http://localhost:$BackendPort/api/sessions" -TimeoutSec 10 | ForEach-Object { $_ })
