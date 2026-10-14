@@ -4,8 +4,36 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { labPathAllowed } from "../app/api/lab/labPaths.ts";
+import { MAX_LAB_BODY_BYTES, readLabBody } from "../app/api/lab/labBody.ts";
 
 const id = "0123456789abcdef0123456789abcdef";
+const megabyte = 1024 * 1024;
+
+test("the lab proxy refuses a body over its limit and stops reading it there", async () => {
+  let pulled = 0;
+  const body = new ReadableStream({
+    pull(controller) {
+      if (pulled >= 32 * megabyte) {
+        controller.close();
+        return;
+      }
+      pulled += megabyte;
+      controller.enqueue(new Uint8Array(megabyte));
+    },
+  });
+  const request = new Request("http://localhost:3000/api/lab/results/import", { method: "POST", body, duplex: "half" });
+
+  // A boolean, not the text itself: a failing assertion would otherwise print the whole body.
+  const refused = (await readLabBody(request, MAX_LAB_BODY_BYTES)) === null;
+  assert.ok(refused, "a body over the limit was passed on instead of refused");
+  assert.ok(pulled <= 10 * megabyte, `read ${pulled / megabyte} MB of a 32 MB body before refusing it`);
+});
+
+test("a body within the limit is passed on whole", async () => {
+  const request = new Request("http://localhost:3000/api/lab/results/import", { method: "POST", body: '{"resultsJsonl":"x"}' });
+
+  assert.equal(await readLabBody(request, MAX_LAB_BODY_BYTES), '{"resultsJsonl":"x"}');
+});
 
 test("the lab proxy passes on the paths the web UI uses, and only with the right method", () => {
   assert.equal(labPathAllowed(["fit"], "GET"), true);

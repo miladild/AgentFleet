@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   MAX_IMPORT_FILE_BYTES,
+  clampLabel,
   formatUtcDateTime,
   groupRowText,
   importBody,
   importFileProblem,
   importSummary,
+  modelFor,
   nodeNamesFromResults,
   pluralize,
 } from "./modelsPresentation.ts";
@@ -96,6 +98,20 @@ test("the import sends the run record as text, or the typed models when there is
     importBody({ resultsJsonl: "{}\n", runJson: null, nodes: ["hub", "worker-a"], models: { hub: " model-x ", "worker-a": "  " }, label: "   " }),
     { resultsJsonl: "{}\n", models: { hub: "model-x" } },
   );
+});
+
+test("a machine named like a property every object has gets no model unless one was typed for it", () => {
+  assert.deepEqual(
+    importBody({ resultsJsonl: "{}\n", runJson: null, nodes: ["constructor", "toString"], models: {}, label: "" }),
+    { resultsJsonl: "{}\n", models: {} },
+  );
+  assert.equal(modelFor({}, "constructor"), "");
+  assert.equal(modelFor({ hub: "model-x" }, "hub"), "model-x");
+});
+
+test("a label is cut to 80 characters, and an emoji counts as one character", () => {
+  assert.equal(clampLabel("standard tier"), "standard tier");
+  assert.equal(Array.from(clampLabel("\u{1F600}".repeat(81))).length, 80);
 });
 
 test("pluralize keeps the count and uses the singular only for one", () => {

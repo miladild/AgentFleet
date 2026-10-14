@@ -161,6 +161,16 @@ export function nodeNamesFromResults(resultsJsonl: string): string[] {
   return [...names].sort();
 }
 
+/** The model typed for a machine. Only the machine's own key counts, so a name such as "constructor" finds none. */
+export function modelFor(models: Record<string, string>, node: string): string {
+  return Object.hasOwn(models, node) ? models[node] : "";
+}
+
+/** A label cut to the characters the backend keeps. An emoji is one character, as it is to the person typing. */
+export function clampLabel(value: string): string {
+  return Array.from(value).slice(0, MAX_LABEL_LENGTH).join("");
+}
+
 /**
  * The POST body. The run record goes as text, as the bench README sends it. Without one, each machine's model goes
  * along; a machine with no model typed is left out, and its runs then count as model not recorded.
@@ -181,7 +191,7 @@ export function importBody(input: {
   }
   const models: Record<string, string> = {};
   for (const node of input.nodes) {
-    const model = (input.models[node] ?? "").trim();
+    const model = modelFor(input.models, node).trim();
     if (model) models[node] = model;
   }
   body.models = models;

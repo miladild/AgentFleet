@@ -2,11 +2,12 @@
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
-  MAX_LABEL_LENGTH,
+  clampLabel,
   groupRowText,
   importBody,
   importFileProblem,
   importSummary,
+  modelFor,
   nodeNamesFromResults,
   pluralize,
   formatUtcDateTime,
@@ -88,7 +89,7 @@ export function ModelsTab() {
 
   const resultsProblem = resultsFile ? importFileProblem(resultsFile) : null;
   const runProblem = runFile ? importFileProblem(runFile) : null;
-  const missingModel = runFile === null && nodeNames.some((node) => !(models[node] ?? "").trim());
+  const missingModel = runFile === null && nodeNames.some((node) => !modelFor(models, node).trim());
   const canImport = resultsFile !== null && resultsProblem === null && runProblem === null && !missingModel && !importing;
 
   async function importRun(event: FormEvent<HTMLFormElement>) {
@@ -100,7 +101,7 @@ export function ModelsTab() {
       const resultsJsonl = await resultsFile.text();
       const runJson = runFile ? await runFile.text() : null;
       const nodes = nodeNamesFromResults(resultsJsonl);
-      const unnamed = runJson === null ? nodes.filter((node) => !(models[node] ?? "").trim()) : [];
+      const unnamed = runJson === null ? nodes.filter((node) => !modelFor(models, node).trim()) : [];
       if (unnamed.length > 0) {
         setImportMessage({ text: `Say which model ran on ${unnamed.join(", ")}.`, error: true });
         return;
@@ -267,7 +268,7 @@ export function ModelsTab() {
                   </label>
                   <input
                     id={`models-node-${index}`}
-                    value={models[node] ?? ""}
+                    value={modelFor(models, node)}
                     onChange={(event) => {
                       const value = event.target.value;
                       setModels((current) => ({ ...current, [node]: value }));
@@ -285,8 +286,7 @@ export function ModelsTab() {
             <input
               id="models-label"
               value={label}
-              maxLength={MAX_LABEL_LENGTH}
-              onChange={(event) => setLabel(event.target.value)}
+              onChange={(event) => setLabel(clampLabel(event.target.value))}
               placeholder="for example standard tier, worker only"
               className="w-full max-w-xs rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-xs text-neutral-200"
             />

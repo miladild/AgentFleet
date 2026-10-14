@@ -140,6 +140,18 @@ public sealed class BenchResultsTests : IDisposable
     }
 
     [Fact]
+    public async Task A_byte_order_mark_at_the_start_of_a_later_line_does_not_hide_that_line()
+    {
+        // Two results files joined by hand: the second one still starts with the mark its writer put at the top of the file.
+        string text = Line(1, "slugify", "done", true) + "\n" + (char)0xFEFF + Line(2, "slugify", "done", true);
+
+        BenchImportResult result = await Import(Store(), text, Run(("example-node-a", "model-alpha")));
+
+        Assert.Equal(2, result.Imported);
+        Assert.Equal(0, result.Skipped);
+    }
+
+    [Fact]
     public async Task Runs_are_grouped_by_machine_and_model_and_listed_alphabetically()
     {
         BenchResultStore store = Store();
@@ -375,6 +387,20 @@ public sealed class BenchResultsTests : IDisposable
         BenchImportRefusedException refused = await Assert.ThrowsAsync<BenchImportRefusedException>(
             () => Import(Store(), Line(1, "slugify", "done", true), run, label: new string('l', 81)));
         BenchImportResult accepted = await Import(Store(), Line(2, "slugify", "done", true), run, label: new string('l', 80));
+
+        Assert.Equal(400, refused.StatusCode);
+        Assert.Equal(1, accepted.Imported);
+    }
+
+    [Fact]
+    public async Task A_label_is_counted_in_characters_so_80_emoji_are_accepted_and_81_are_refused()
+    {
+        string run = Run(("example-node-a", "model-alpha"));
+        string eighty = string.Concat(Enumerable.Repeat("\U0001F600", 80));
+
+        BenchImportRefusedException refused = await Assert.ThrowsAsync<BenchImportRefusedException>(
+            () => Import(Store(), Line(1, "slugify", "done", true), run, label: eighty + "\U0001F600"));
+        BenchImportResult accepted = await Import(Store(), Line(2, "slugify", "done", true), run, label: eighty);
 
         Assert.Equal(400, refused.StatusCode);
         Assert.Equal(1, accepted.Imported);

@@ -108,7 +108,8 @@ internal sealed class BenchResultStore
         }
 
         string? label = string.IsNullOrWhiteSpace(envelope.Label) ? null : envelope.Label.Trim();
-        if (label is { Length: > MaximumLabelLength })
+        // Counted in characters, not UTF-16 units: an emoji is one character to the person who typed it.
+        if (label is not null && label.EnumerateRunes().Count() > MaximumLabelLength)
         {
             throw Refused(StatusCodes.Status400BadRequest, $"The label can be at most {MaximumLabelLength} characters.");
         }
@@ -120,7 +121,8 @@ internal sealed class BenchResultStore
         int skipped = 0;
         foreach (string line in resultsText.Split('\n'))
         {
-            string trimmed = line.Trim();
+            // A byte-order mark is not whitespace to Trim, and a joined file can carry one at the top of a later line too.
+            string trimmed = line.TrimStart((char)0xFEFF).Trim();
             if (trimmed.Length == 0) continue;
             BenchResultRow? row = ParseRow(trimmed, nowUtc, label, run.StartedAtUtc, models);
             if (row is null) skipped++;
