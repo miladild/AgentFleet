@@ -40,6 +40,45 @@ one machine's batch at a time and leave the other machine alone while it runs:
 Use the same explicit task list and settings for before/after comparisons. A partial run does not provide a completion
 rate for tasks it never reached. Forcing standard tasks to `light` measures a harder workload than these small repairs.
 
+## Trying a candidate model
+
+`scripts\Test-CandidateModel.ps1` runs the benchmark tasks with one model on one worker, without changing your fleet:
+
+```powershell
+.\scripts\Test-CandidateModel.ps1 -Node worker1 -Model llama3.2:3b -WhatIf   # the steps and the one configuration change; starts nothing
+.\scripts\Test-CandidateModel.ps1 -Node worker1 -Model llama3.2:3b           # the benchmark itself
+```
+
+It copies your configuration to a temporary folder with that worker's model replaced, starts a throwaway backend on port
+8010 (`-Port` picks another) with that copy and an empty plans folder, and waits up to three minutes for `/health`. It then
+runs the benchmark tasks with `-WorkerOnly`, with the hub's model kept out of the run, no second opinion (`-Review off`) and
+no automatic retries (`-AutoRetries 0`). Repair steps may still go to another worker; the summary's models column lists the
+machines that did the work. `-Tasks` and `-Repeat` work as they do for `Invoke-Bench.ps1`. The results go to
+`bench\results\candidate-<node>-<model>-<time>` (`-OutDir` picks another folder). At the end the throwaway backend is
+stopped and the temporary copy deleted, also when the run fails or is interrupted. When a run fails, the backend's log files
+are copied into the results folder.
+
+The worker is one of the machines of your live fleet, so:
+
+- The command refuses while a plan on the live backend is running or approved. It checks once, when it starts, so do not
+  start plans while it runs. `-Force` runs anyway.
+- It never writes your configuration, never uses the live backend's data folder or port, and checks afterwards that the
+  configuration file is unchanged.
+- The model must already be pulled on that machine. The command does not pull it.
+
+Before anything starts, it refuses when the node is not in the configuration (names must match exactly); when the node is
+the hub's machine, which is the node marked `"fallback": true` or a node on this machine's own Ollama (`-AllowHub` tests it
+anyway: the hub's model is then loaded, and the run is not limited to workers); when the node uses the `openai` API or is a
+vision node; when the port is a live backend's, the web UI's or Ollama's, or something already listens on it; when the output
+folder already holds results; or when the configuration marks no fallback node, because the hub's model could then not be
+kept out of the run.
+
+The fit probe in the Models tab only measures speed and how much of a model fits in graphics memory. It does not choose
+models: only the task results say whether a candidate works.
+
+To import the results, import `results.jsonl` from the results folder in the Models tab, or send it through
+`POST /api/lab/results/import`.
+
 ## What the summary checks (the gate)
 
 1. **No false accept**: no plan ends `done` while the hidden tests fail.

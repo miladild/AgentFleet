@@ -20,6 +20,9 @@
 
 .PARAMETER WorkRoot
     Where the published backend, the copied configuration, the plans and the logs live.
+
+.PARAMETER HealthTimeoutSeconds
+    How long to wait for /health before giving up. Default 90.
 #>
 [CmdletBinding()]
 param(
@@ -27,6 +30,7 @@ param(
     [string]$Config,
     [string]$InstallRoot,
     [string]$WorkRoot = (Join-Path ([IO.Path]::GetTempPath()) 'agent-fleet-bench'),
+    [ValidateRange(10, 900)][int]$HealthTimeoutSeconds = 90,
     [switch]$NoHubModel,
     [switch]$Stop
 )
@@ -88,10 +92,15 @@ $process.Id | Set-Content -LiteralPath $pidFile
 
 Write-Step "Waiting for http://localhost:$Port/health"
 $up = $false
-for ($i = 0; $i -lt 90 -and -not $up; $i++) {
+$deadline = (Get-Date).AddSeconds($HealthTimeoutSeconds)
+while (-not $up -and (Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 1
-    # With the hub node closed off on purpose the endpoint says unhealthy (503) while the workers are fine: any answer means it is up.
-    try { $null = Invoke-WebRequest "http://localhost:$Port/health" -UseBasicParsing -TimeoutSec 3 -SkipHttpErrorCheck:$NoHubModel; $up = $true } catch { }
+    try { $null = Invoke-WebRequest "http://localhost:$Port/health" -UseBasicParsing -TimeoutSec 3; $up = $true }
+    catch {
+        # With the hub node closed off on purpose the endpoint says unhealthy (503) while the workers are fine: any answer means it is up.
+        # Windows PowerShell 5.1 has no -SkipHttpErrorCheck, so an error status is read from the exception instead.
+        if ($NoHubModel -and $_.Exception.Response) { $up = $true }
+    }
 }
-if (-not $up) { throw "The benchmark backend did not answer. See $WorkRoot\backend.err.log" }
+if (-not $up) { throw "The benchmark backend did not answer within $HealthTimeoutSeconds s. See $WorkRoot\backend.err.log" }
 Write-Ok "Benchmark backend up on port $Port (pid $($process.Id)). Run: .\bench\Invoke-Bench.ps1 -BaseUrl http://localhost:$Port"
