@@ -10,7 +10,8 @@
 
     The worker is a machine of the live fleet, so the command refuses while a plan on the live backend is running or
     approved (-Force overrides that). It never writes the live configuration and never uses the live data folder or port.
-    The fit probe in the Models tab does not choose models: only the task results say whether a candidate works.
+    The fit measurement on a machine card (Config, Machines) does not choose models: only the task results say whether a
+    candidate works.
 
     Import the results afterwards: results.jsonl from the output folder, in the Models tab or through
     POST /api/lab/results/import.
@@ -105,13 +106,59 @@ function Get-FleetHubNames($Nodes) {
     return @()
 }
 
-# The hub node itself, or any node whose address is this machine: its Ollama is the hub's own.
-function Test-CandidateIsHub($Nodes, [string]$NodeName) {
+# This computer's names: its NetBIOS name and its DNS host name. A name that cannot be read is left out.
+function Get-ThisComputerNames {
+    $names = @($env:COMPUTERNAME)
+    try { $names += [Net.Dns]::GetHostName() } catch { }
+    return @($names | Where-Object { $_ })
+}
+
+# A loopback address, or one of this computer's own addresses as Get-LocalAddresses lists them.
+function Test-OwnAddress([Net.IPAddress]$Address, [string[]]$LocalAddresses) {
+    return ([Net.IPAddress]::IsLoopback($Address) -or (@($LocalAddresses) -contains $Address.ToString()))
+}
+
+# Is this host (a name or an address, the brackets of an IPv6 address optional) this computer? It is when it is
+# localhost, a loopback address, one of this computer's own IPv4 addresses, its name with or without ".local" in any
+# letter case, or a name that resolves to one of those. A name that cannot be resolved is not this computer. The names,
+# the addresses and the resolver are parameters so the offline checks can pass fixed values; by default they describe
+# this machine.
+function Test-ThisComputer {
+    param(
+        [string]$HostName,
+        [string[]]$LocalNames = (Get-ThisComputerNames),
+        [string[]]$LocalAddresses = (Get-LocalAddresses),
+        [scriptblock]$Resolve = { param([string]$Name) [Net.Dns]::GetHostAddresses($Name) }
+    )
+    $text = "$HostName".Trim().Trim('[', ']')
+    if (-not $text) { return $false }
+    if ($text -ieq 'localhost') { return $true }
+    $address = $null
+    if ([Net.IPAddress]::TryParse($text, [ref]$address)) { return (Test-OwnAddress $address $LocalAddresses) }
+    $short = $text -ireplace '\.local$', ''
+    foreach ($local in @($LocalNames | Where-Object { $_ })) {
+        if ($short -ieq ("$local" -ireplace '\.local$', '')) { return $true }
+    }
+    try { $resolved = @(& $Resolve $text) }
+    catch { return $false }
+    foreach ($item in $resolved) {
+        $resolvedAddress = $null
+        if ([Net.IPAddress]::TryParse("$item", [ref]$resolvedAddress) -and (Test-OwnAddress $resolvedAddress $LocalAddresses)) { return $true }
+    }
+    return $false
+}
+
+# The hub node itself (see Get-FleetHubNames), or a node whose URL points at this computer (see Test-ThisComputer):
+# localhost, this computer's name or one of its addresses, or a name that resolves to one of those. Its Ollama is the
+# hub's own. $LocalMachine carries fixed names, addresses or a resolver for the offline checks; a real run passes none,
+# so the machine's own values are used.
+function Test-CandidateIsHub($Nodes, [string]$NodeName, [hashtable]$LocalMachine = @{}) {
     $named = @($Nodes | Where-Object { $_.name -ceq $NodeName })
     if ($named.Count -eq 0) { return $false }
     if ((Get-FleetHubNames $Nodes) -contains $NodeName) { return $true }
     $uri = $null
-    return ([Uri]::TryCreate("$($named[0].url)", [UriKind]::Absolute, [ref]$uri) -and $uri.IsLoopback)
+    if (-not [Uri]::TryCreate("$($named[0].url)", [UriKind]::Absolute, [ref]$uri)) { return $false }
+    return (Test-ThisComputer $uri.DnsSafeHost @LocalMachine)
 }
 
 # The default address of a live backend, plus the address the installer recorded for it when there is one.
@@ -142,14 +189,14 @@ function Test-PortListening([int]$Port) {
 
 # The reason this candidate must not run, or nothing. The checks come in the order a user can act on them.
 function Get-CandidateRefusal {
-    param($Nodes, [string]$NodeName, [int]$Port, [int[]]$LivePorts, [int[]]$ReservedPorts, [bool]$PortInUse, [bool]$AllowHub)
+    param($Nodes, [string]$NodeName, [int]$Port, [int[]]$LivePorts, [int[]]$ReservedPorts, [bool]$PortInUse, [bool]$AllowHub, [hashtable]$LocalMachine = @{})
     $named = @($Nodes | Where-Object { $_.name -ceq $NodeName })
     if ($named.Count -eq 0) { return "There is no node named '$NodeName' in the configuration." }
     if ($named.Count -gt 1) { return "More than one node is named '$NodeName' in the configuration." }
     $node = $named[0]
     if (Test-IsTrue $node.vision) { return "'$NodeName' is a vision node. The candidate test needs a text model." }
     if ("$($node.api)".Trim() -ieq 'openai') { return "'$NodeName' uses the openai API. The candidate test covers Ollama machines only." }
-    $isHub = Test-CandidateIsHub $Nodes $NodeName
+    $isHub = Test-CandidateIsHub $Nodes $NodeName $LocalMachine
     if ($isHub -and -not $AllowHub) { return "'$NodeName' is the hub's machine. Pass -AllowHub to try a model there anyway; the hub's graphics memory is then loaded." }
     $markedFallback = @($Nodes | Where-Object { -not (Test-IsTrue $_.vision) -and (Test-IsTrue $_.fallback) })
     if (-not $markedFallback.Count -and -not ($isHub -and $AllowHub)) {

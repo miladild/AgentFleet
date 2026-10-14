@@ -71,15 +71,16 @@ The worker is one of the machines of your live fleet, so:
   because loading the candidate there can unload the other node's model while the run goes on.
 
 Before anything starts, it refuses when the node is not in the configuration (names must match exactly); when the node is
-the hub's machine, which is the node marked `"fallback": true` or a node on this machine's own Ollama (`-AllowHub` tests it
-anyway: the hub's model is then loaded, and the run is not limited to workers); when the node uses the `openai` API or is a
+the hub's machine, which is the node marked `"fallback": true` or a node whose address is this computer's own (localhost, this
+computer's name, one of its addresses, or a name that resolves to one of those; `-AllowHub` tests it anyway: the hub's model is
+then loaded, and the run is not limited to workers); when the node uses the `openai` API or is a
 vision node; when the port is a live backend's, the web UI's (including the address the installer recorded), Ollama's, or
 the port of any node's address in the configuration, or something already listens on it; when the output folder already
 holds results; or when the configuration marks no fallback node, because the hub's model could then not be
 kept out of the run.
 
-The fit probe in the Models tab only measures speed and how much of a model fits in graphics memory. It does not choose
-models: only the task results say whether a candidate works.
+The fit measurement, on a machine's card under Config > Machines, only measures speed and how much of a model fits in
+graphics memory. It does not choose models: only the task results say whether a candidate works.
 
 To import the results, import `results.jsonl` from the results folder in the Models tab, or send it through
 `POST /api/lab/results/import`.
@@ -110,8 +111,9 @@ Invoke-RestMethod -Uri http://localhost:8000/api/lab/results/import -Method Post
 ```
 
 The answer says how many runs were imported, how many were already stored (importing the same file again adds nothing)
-and how many lines were skipped because they could not be read. A run whose plan was never created, for example because
-the backend did not answer, has no machine or model to count it under, so it is skipped. `GET /api/lab/models` lists the
+and how many lines were skipped because they could not be read or have no plan id, task or status. A run whose plan was
+never created, for example because the backend did not answer, has no plan id, so its line is skipped. A run that has a plan
+but records no machine is not skipped: it is counted under "not recorded" for its machine and model. `GET /api/lab/models` lists the
 counts by machine and model, and `DELETE /api/lab/results/{importId}` removes one import.
 
 The counts say how many runs each machine and model did and how each one ended. A run is counted as done and correct

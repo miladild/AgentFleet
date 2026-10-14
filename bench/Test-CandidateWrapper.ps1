@@ -143,6 +143,39 @@ try {
     $localWorker = ConvertFrom-Json -InputObject '[{"name":"hub","fallback":true,"url":"http://192.0.2.10:11434/v1"},{"name":"local","url":"http://localhost:11435/v1","tier":"light"}]'
     Assert-Check (Test-CandidateIsHub $localWorker 'local') 'hub: a node on this machine is treated as the hub'
 
+    # This computer: the names, addresses and resolver are injected, so no real name is looked up and no real address is used.
+    $thisNames = @('checkbox')
+    $thisAddresses = @('192.0.2.10')
+    $thisResolve = {
+        param([string]$Name)
+        if ($Name -ieq 'mapped-box.example.test') { return [Net.IPAddress]::Parse('192.0.2.10') }
+        if ($Name -ieq 'loop-box.example.test') { return [Net.IPAddress]::Parse('127.0.0.1') }
+        if ($Name -ieq 'far-box.example.test') { return [Net.IPAddress]::Parse('192.0.2.99') }
+        throw "no such host: $Name"
+    }
+    $thisMachine = @{ LocalNames = $thisNames; LocalAddresses = $thisAddresses; Resolve = $thisResolve }
+    function Test-InjectedHost([string]$HostName) { return (Test-ThisComputer $HostName @thisMachine) }
+    Assert-Check (Test-InjectedHost 'localhost') 'this computer: localhost is this computer'
+    Assert-Check (Test-InjectedHost '127.0.0.1') 'this computer: an IPv4 loopback address is this computer'
+    Assert-Check (Test-InjectedHost '[::1]') 'this computer: an IPv6 loopback address in URL brackets is this computer'
+    Assert-Check (Test-InjectedHost '::1') 'this computer: an IPv6 loopback address without brackets is this computer'
+    Assert-Check (Test-InjectedHost '192.0.2.10') 'this computer: an address in the injected local list is this computer'
+    Assert-Check (Test-InjectedHost 'checkbox') 'this computer: the injected computer name is this computer'
+    Assert-Check (Test-InjectedHost 'checkbox.local') 'this computer: the computer name with the .local suffix is this computer'
+    Assert-Check (Test-InjectedHost 'CheckBox.LOCAL') 'this computer: the computer name in another letter case is this computer'
+    Assert-Check (Test-InjectedHost 'mapped-box.example.test') 'this computer: a name the resolver maps to a local address is this computer'
+    Assert-Check (Test-InjectedHost 'loop-box.example.test') 'this computer: a name the resolver maps to a loopback address is this computer'
+    Assert-Check (-not (Test-InjectedHost '192.0.2.99')) 'this computer: a different address is not this computer'
+    Assert-Check (-not (Test-InjectedHost 'otherbox')) 'this computer: a different name is not this computer'
+    Assert-Check (-not (Test-InjectedHost 'otherbox.local')) 'this computer: a different name with the .local suffix is not this computer'
+    Assert-Check (-not (Test-InjectedHost 'far-box.example.test')) 'this computer: a name the resolver maps to another address is not this computer'
+    $unresolvedThrew = $false
+    $unresolved = $true
+    try { $unresolved = Test-InjectedHost 'nowhere-box.example.test' } catch { $unresolvedThrew = $true }
+    Assert-Check ((-not $unresolvedThrew) -and (-not $unresolved)) 'this computer: a name that cannot be resolved is not this computer and does not throw'
+    $ownWorker = ConvertFrom-Json -InputObject '[{"name":"hub","fallback":true,"url":"http://192.0.2.21:11434/v1"},{"name":"lanworker","url":"http://192.0.2.10:11434/v1","tier":"light"}]'
+    Assert-Check (Test-CandidateIsHub $ownWorker 'lanworker' $thisMachine) 'hub: a worker at an address of this machine is treated as the hub'
+
     # The live backends: the default address, and the one the installer recorded when there is one.
     Assert-Check (((Get-LiveBackendUrls $null) -join ' ') -eq 'http://localhost:8000') 'live backend: the default address without an install record'
     $installRoot = Join-Path $scratch 'install'
@@ -239,8 +272,8 @@ try {
     Assert-Check ($hiddenInCandidate.Count -ge 1) 'backend logs: the copy in the results folder passes through the hiding function'
 
     # Refusals: pure checks on synthetic nodes; nothing is contacted.
-    function Get-Refusal($Nodes, [string]$NodeName, [int]$Port = 8010, [bool]$InUse = $false, [bool]$AllowHub = $false) {
-        return Get-CandidateRefusal -Nodes $Nodes -NodeName $NodeName -Port $Port -LivePorts $live -ReservedPorts $reserved -PortInUse $InUse -AllowHub $AllowHub
+    function Get-Refusal($Nodes, [string]$NodeName, [int]$Port = 8010, [bool]$InUse = $false, [bool]$AllowHub = $false, [hashtable]$LocalMachine = @{}) {
+        return Get-CandidateRefusal -Nodes $Nodes -NodeName $NodeName -Port $Port -LivePorts $live -ReservedPorts $reserved -PortInUse $InUse -AllowHub $AllowHub -LocalMachine $LocalMachine
     }
     Assert-Check ($null -eq (Get-Refusal $config.nodes 'worker1')) 'a text worker on the network is accepted'
     Assert-Check ((Get-Refusal $config.nodes 'nobody') -match "no node named 'nobody'") 'refused: a node that is not in the configuration'
@@ -256,6 +289,8 @@ try {
     Assert-Check ((Get-Refusal $config.nodes 'worker1' -Port 3000) -match 'web UI or by Ollama') 'refused: the web UI port'
     Assert-Check ((Get-Refusal $config.nodes 'worker1' -Port 11434) -match 'web UI or by Ollama') 'refused: the Ollama port'
     Assert-Check ((Get-Refusal $config.nodes 'worker1' -InUse $true) -match 'already listens') 'refused: a port something already listens on'
+    Assert-Check ((Get-Refusal $ownWorker 'lanworker' -LocalMachine $thisMachine) -match "the hub's machine") 'refused: a worker at an address of this machine, without -AllowHub'
+    Assert-Check ($null -eq (Get-Refusal $ownWorker 'lanworker' -AllowHub $true -LocalMachine $thisMachine)) 'accepted: a worker at an address of this machine, with -AllowHub'
 
     # The copy: the named node's model changes and nothing else.
     $candidate = New-CandidateConfig $config 'worker1' 'model-c:1b'
