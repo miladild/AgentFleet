@@ -108,6 +108,22 @@ if (-not $SkipFleet) {
         Copy-Item 'src/content/usage-guide.md' $guide -Force
         # Local settings of whoever built it never belong in a download.
         Get-ChildItem $webStage -Force -File | Where-Object { $_.Name -like '.env*' } | Remove-Item -Force
+        # Next records the folder it was built in (its trace root) in server.js and required-server-files.json. The
+        # server runs from its own folder and does not read it back, and a download should not carry the builder's
+        # folder names, so it becomes "." (the server's own folder).
+        $buildRoot = (Get-Location).Path
+        $rootPattern = (@($buildRoot, $buildRoot.Replace('\', '\\'), $buildRoot.Replace('\', '/')) | Select-Object -Unique |
+            ForEach-Object { [regex]::Escape($_) }) -join '|'
+        foreach ($recorded in 'server.js', "$distDir/required-server-files.json") {
+            $recordedPath = Join-Path $webStage $recorded
+            $recordedText = [IO.File]::ReadAllText($recordedPath)
+            $rewritten = [regex]::Replace($recordedText, $rootPattern, '.', 'IgnoreCase')
+            if ($rewritten -ne $recordedText) { [IO.File]::WriteAllText($recordedPath, $rewritten, [Text.UTF8Encoding]::new($false)) }
+        }
+        $stillNamed = @(Get-ChildItem $webStage -Recurse -Force -File -Include 'server.js', '*.json' |
+            Where-Object { $_.FullName -notmatch '[\\/]node_modules[\\/]' } |
+            Where-Object { [regex]::IsMatch([IO.File]::ReadAllText($_.FullName), $rootPattern, 'IgnoreCase') })
+        if ($stillNamed.Count -gt 0) { throw "The web build still names the build folder in: $($stillNamed.FullName -join ', ')" }
     }
     finally { Pop-Location }
     Write-Ok 'Built'

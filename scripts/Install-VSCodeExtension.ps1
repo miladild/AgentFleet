@@ -8,7 +8,7 @@
     the new one. Fully close and reopen VS Code afterwards; "Reload Window" is not enough.
 
     The extension talks to the backend at http://localhost:8000 by default. On another machine, set the VS Code
-    setting agentFleet.backendUrl to the hub's address, for example http://192.168.1.10:8000.
+    setting agentFleet.backendUrl to the hub's address, for example http://192.0.2.10:8000.
 
 .EXAMPLE
     .\scripts\Install-VSCodeExtension.ps1
@@ -49,5 +49,5 @@ finally { Pop-Location }
 
 Write-Host "`nFully close and reopen VS Code, then open Copilot Chat and type: @fleet hello" -ForegroundColor Green
 if ($BackendUrl) { Write-Host "Set the VS Code setting  agentFleet.backendUrl  to  $BackendUrl" }
-else { Write-Info 'VS Code on a different machine than the hub? Set agentFleet.backendUrl to the hub address, for example http://192.168.1.10:8000.' }
+else { Write-Info 'VS Code on a different machine than the hub? Set agentFleet.backendUrl to the hub address, for example http://192.0.2.10:8000.' }
 Write-Info 'GitHub Copilot Chat must be installed (the free tier is enough): @fleet lives inside its panel.'

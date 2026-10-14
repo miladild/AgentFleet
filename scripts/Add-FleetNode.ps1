@@ -14,7 +14,7 @@
     A short name: lowercase letters, digits and hyphens, for example worker1.
 
 .PARAMETER Address
-    The machine's address as Ollama prints it, for example http://192.168.1.21:11434. The /v1 that the
+    The machine's address as Ollama prints it, for example http://192.0.2.21:11434. The /v1 that the
     backend needs is added for you. A bare host or IP also works.
 
 .PARAMETER Model
@@ -35,7 +35,7 @@
     be the fallback; this moves the role.
 
 .EXAMPLE
-    .\scripts\Add-FleetNode.ps1 -Name worker1 -Address 192.168.1.21 -Model qwen2.5-coder:7b -Tier standard -Pull
+    .\scripts\Add-FleetNode.ps1 -Name worker1 -Address 192.0.2.21 -Model qwen2.5-coder:7b -Tier standard -Pull
 #>
 [CmdletBinding()]
 param(

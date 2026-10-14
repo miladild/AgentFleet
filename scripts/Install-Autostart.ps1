@@ -266,9 +266,9 @@ if ($Mode -eq 'Task') {
     $backendCommand = "Set-Location -LiteralPath '$backendTarget'; `$env:FLEET_FRONTEND_URL='http://localhost:$FrontendPort'; & '$exe' --urls $urls"
     $webHost = if ($WebOnLan) { '0.0.0.0' } else { '127.0.0.1' }
     $frontendCommand = if ($bundle) {
-        "Set-Location -LiteralPath '$web'; `$env:PORT='$FrontendPort'; `$env:HOSTNAME='$webHost'; `$env:AGENT_URL='http://localhost:$BackendPort'; & '$node' '$serverJs' *> '$frontendLog'"
+        "Set-Location -LiteralPath '$web'; `$env:PORT='$FrontendPort'; `$env:HOSTNAME='$webHost'; `$env:COPILOTKIT_TELEMETRY_DISABLED='true'; `$env:AGENT_URL='http://localhost:$BackendPort'; & '$node' '$serverJs' *> '$frontendLog'"
     } else {
-        "Set-Location -LiteralPath '$web'; `$env:PORT='$FrontendPort'; `$env:FLEET_WEB_HOST='$webHost'; & '$npm' start *> '$frontendLog'"
+        "Set-Location -LiteralPath '$web'; `$env:PORT='$FrontendPort'; `$env:FLEET_WEB_HOST='$webHost'; `$env:COPILOTKIT_TELEMETRY_DISABLED='true'; & '$npm' start *> '$frontendLog'"
     }
     $jobs = @(, @($BackendName, $backendCommand))
     if (-not $SkipFrontend) { $jobs += , @($FrontendName, $frontendCommand) }
@@ -307,10 +307,10 @@ else {
             $listen = if ($WebOnLan) { '0.0.0.0' } else { '127.0.0.1' }
             if ($bundle) {
                 & $nssm install $FrontendName $node $serverJs | Out-Null
-                & $nssm set $FrontendName AppEnvironmentExtra "PORT=$FrontendPort" "HOSTNAME=$listen" "AGENT_URL=http://localhost:$BackendPort" | Out-Null
+                & $nssm set $FrontendName AppEnvironmentExtra "PORT=$FrontendPort" "HOSTNAME=$listen" "COPILOTKIT_TELEMETRY_DISABLED=true" "AGENT_URL=http://localhost:$BackendPort" | Out-Null
             } else {
                 & $nssm install $FrontendName $npm start | Out-Null
-                & $nssm set $FrontendName AppEnvironmentExtra "PORT=$FrontendPort" "FLEET_WEB_HOST=$listen" | Out-Null
+                & $nssm set $FrontendName AppEnvironmentExtra "PORT=$FrontendPort" "FLEET_WEB_HOST=$listen" "COPILOTKIT_TELEMETRY_DISABLED=true" | Out-Null
             }
             & $nssm set $FrontendName AppDirectory $web | Out-Null
             & $nssm set $FrontendName AppStdout $frontendLog | Out-Null

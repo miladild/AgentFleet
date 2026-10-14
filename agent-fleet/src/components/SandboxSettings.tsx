@@ -227,7 +227,7 @@ export function SandboxSettings() {
           <div className="flex flex-wrap gap-3">
             <label className="block">
               <span className="block text-[10px] uppercase tracking-wide text-neutral-500 mb-0.5">Machine</span>
-              <input value={form.host} onChange={(e) => change({ host: e.target.value })} placeholder="192.168.1.30" className={`${input} w-44`} />
+              <input value={form.host} onChange={(e) => change({ host: e.target.value })} placeholder="192.0.2.30" className={`${input} w-44`} />
             </label>
             <label className="block">
               <span className="block text-[10px] uppercase tracking-wide text-neutral-500 mb-0.5">Port</span>

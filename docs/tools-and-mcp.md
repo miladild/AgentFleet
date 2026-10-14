@@ -86,7 +86,7 @@ The same settings are the `sandbox` section of `fleet.config.json`, if you would
 at the next start):
 
 ```json
-"sandbox": { "mode": "ssh", "host": "192.168.1.30", "user": "builder", "keyPath": "C:\\Users\\me\\.ssh\\agent-fleet_rsa",
+"sandbox": { "mode": "ssh", "host": "192.0.2.30", "user": "builder", "keyPath": "C:\\Users\\me\\.ssh\\agent-fleet_rsa",
              "hostKey": "SHA256:..." }
 ```
 

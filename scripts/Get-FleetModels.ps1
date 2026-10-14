@@ -11,7 +11,7 @@
 .EXAMPLE
     .\scripts\Get-FleetModels.ps1
 .EXAMPLE
-    .\scripts\Get-FleetModels.ps1 -Address http://192.168.1.30:11434
+    .\scripts\Get-FleetModels.ps1 -Address http://192.0.2.30:11434
 #>
 [CmdletBinding()]
 param(

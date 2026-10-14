@@ -15,7 +15,7 @@
     },
     {
       "name": "worker1",
-      "url": "http://192.168.1.21:11434/v1",
+      "url": "http://192.0.2.21:11434/v1",
       "model": "qwen2.5-coder:7b",
       "purpose": "A second machine for ordinary coding work: bug fixes, small features, running plan steps.",
       "tier": "standard",
@@ -24,7 +24,7 @@
     },
     {
       "name": "worker2",
-      "url": "http://192.168.1.22:11434/v1",
+      "url": "http://192.0.2.22:11434/v1",
       "model": "llama3.2:3b",
       "purpose": "A small, fast model for quick questions and trivial edits.",
       "tier": "light",
@@ -33,7 +33,7 @@
     },
     {
       "name": "eyes",
-      "url": "http://192.168.1.21:11434/v1",
+      "url": "http://192.0.2.21:11434/v1",
       "model": "qwen2.5vl:7b",
       "purpose": "Reads screenshots and images. Only used when a message contains an image.",
       "vision": true,
