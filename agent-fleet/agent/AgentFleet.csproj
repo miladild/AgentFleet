@@ -20,6 +20,9 @@
     <PackageReference Include="Microsoft.Agents.AI.Hosting.AGUI.AspNetCore" Version="1.19.0-preview.260822.1" />
     <PackageReference Include="Microsoft.Agents.AI.OpenAI" Version="1.19.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />
+    <!-- Microsoft.Data.Sqlite 9.0.0 brings SQLitePCLRaw 2.1.10, whose bundled SQLite has a published advisory
+         (CVE-2025-6965, fixed from 2.1.12). The direct reference raises only the native library. -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.13" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.12" />
     <PackageReference Include="ModelContextProtocol" Version="2.2.0" />
     <PackageReference Include="OllamaSharp" Version="5.4.30" />
