@@ -1,10 +1,9 @@
 name: Release
 
-# A push to main no longer starts a release. Pushing a v* tag publishes that version; run it by hand
-# (Actions > Release > Run workflow) to build without publishing.
+# Manual only, to save build minutes: nothing starts a release by itself, not a push to main and not a pushed v* tag.
+# Run it by hand (Actions > Release > Run workflow). Choosing a v* tag as the ref builds and publishes that version;
+# choosing a branch builds without publishing.
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
 
 permissions:
