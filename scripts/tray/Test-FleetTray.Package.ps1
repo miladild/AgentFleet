@@ -45,7 +45,7 @@ try {
     try { Assert-TrayPackage 'Windows icon has nine frames and loads' ([BitConverter]::ToUInt16($bytes,2) -eq 1 -and [BitConverter]::ToUInt16($bytes,4) -eq 9 -and $icon.Width -gt 0) }
     finally { $icon.Dispose() }
     [xml]$svg = Get-Content -LiteralPath (Join-Path $repo 'agent-fleet\src\app\icon.svg') -Raw
-    Assert-TrayPackage 'Web icon has the matching geometry' ($svg.svg.viewBox -eq '0 0 256 256' -and $svg.svg.rect.rx -eq '56' -and $svg.svg.path.d -eq 'M128 84 L69 179 M128 84 L187 179' -and @($svg.svg.circle).Count -eq 3 -and $svg.svg.circle[0].fill -eq '#F8FAFC' -and $svg.svg.circle[1].fill -eq '#38BDF8')
+    Assert-TrayPackage 'Web icon has the matching geometry' ($svg.svg.viewBox -eq '0 0 256 256' -and $svg.svg.rect.rx -eq '56' -and $svg.svg.path.d -eq 'M128 84 L69 179 M128 84 L187 179' -and @($svg.svg.circle).Count -eq 3 -and $svg.svg.circle[0].fill -eq '#F8FAFC' -and $svg.svg.circle[1].fill -eq '#E0F2FE')
     $starter = Get-Content -LiteralPath (Join-Path $repo 'scripts\release\Start Agent Fleet.cmd') -Raw
     Assert-TrayPackage 'Release starter keeps the console fallback' ($starter.Contains('if exist "%~dp0scripts\tray\Fleet-Tray.ps1"') -and $starter.Contains('start "" powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -STA -File "%~dp0scripts\tray\Fleet-Tray.ps1" --open') -and $starter.Contains('scripts\Start-Fleet.ps1" %*'))
     $installerText = Get-Content -LiteralPath (Join-Path $repo 'scripts\Install-FleetTray.ps1') -Raw

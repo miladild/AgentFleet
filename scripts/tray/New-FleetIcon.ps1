@@ -28,13 +28,13 @@ function New-Frame([int]$Size) {
     $path.AddArc($big - 2 * $r - 1, $big - 2 * $r - 1, 2 * $r, 2 * $r, 0, 90)
     $path.AddArc(0, $big - 2 * $r - 1, 2 * $r, 2 * $r, 90, 90)
     $path.CloseFigure()
-    $g.FillPath((New-Object System.Drawing.SolidBrush ([System.Drawing.ColorTranslator]::FromHtml('#0F172A'))), $path)
+    $g.FillPath((New-Object System.Drawing.SolidBrush ([System.Drawing.ColorTranslator]::FromHtml('#0369A1'))), $path)
 
     $hub = @{ X = 0.50 * $big; Y = 0.33 * $big }
     $left = @{ X = 0.27 * $big; Y = 0.70 * $big }
     $right = @{ X = 0.73 * $big; Y = 0.70 * $big }
 
-    $pen = New-Object System.Drawing.Pen ([System.Drawing.ColorTranslator]::FromHtml('#64748B')), ([single]($big * 0.075))
+    $pen = New-Object System.Drawing.Pen ([System.Drawing.ColorTranslator]::FromHtml('#BAE6FD')), ([single]($big * 0.075))
     $pen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
     $pen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
     $g.DrawLine($pen, [single]$hub.X, [single]$hub.Y, [single]$left.X, [single]$left.Y)
@@ -45,8 +45,8 @@ function New-Frame([int]$Size) {
         $g.FillEllipse($brush, [single]($c.X - $radius), [single]($c.Y - $radius), [single](2 * $radius), [single](2 * $radius))
     }
     Dot $g $hub ($big * 0.165) '#F8FAFC'
-    Dot $g $left ($big * 0.125) '#38BDF8'
-    Dot $g $right ($big * 0.125) '#38BDF8'
+    Dot $g $left ($big * 0.125) '#E0F2FE'
+    Dot $g $right ($big * 0.125) '#E0F2FE'
     $g.Dispose()
 
     $small = New-Object System.Drawing.Bitmap $Size, $Size, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
