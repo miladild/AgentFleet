@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { McpServerConfig } from "./mcpCatalog";
 import { ApprovalSettings } from "./ApprovalSettings";
 import { HistorySettings } from "./HistorySettings";
+import { ModelsTab } from "./ModelsTab";
 import { SandboxSettings } from "./SandboxSettings";
 import { SetupSettings } from "./SetupSettings";
 import { ToolsSettings, type McpStatus, type ToolConfig } from "./ToolsSettings";
@@ -649,7 +650,7 @@ function WorkspaceField({ label, value, onChange, placeholder }: { label: string
   </label>;
 }
 
-type Tab = "setup" | "machines" | "tools" | "sandbox" | "routing" | "history";
+type Tab = "setup" | "machines" | "tools" | "sandbox" | "routing" | "history" | "models";
 
 /** Fleet configuration: machines, tools and routing. Everything applies when saved; nothing needs a restart. */
 export function ConfigPanel() {
@@ -819,6 +820,7 @@ export function ConfigPanel() {
                   ["sandbox", "Sandbox"],
                   ["routing", "Routing"],
                   ["history", "History"],
+                  ["models", "Models"],
                 ] as const).map(([key, label]) => (
                   <button
                     key={key}
@@ -838,6 +840,8 @@ export function ConfigPanel() {
             <div className="flex-1 overflow-y-auto px-6 py-4">
               {tab === "sandbox" ? (
                 <SandboxSettings />
+              ) : tab === "models" ? (
+                <ModelsTab />
               ) : draft === null ? (
                 <p className="text-sm text-neutral-500">{message?.text ?? "Loading..."}</p>
               ) : tab === "setup" ? (

@@ -1,15 +1,10 @@
-const BACKEND_URL = (process.env.AGENT_URL || "http://localhost:8000/").replace(/\/$/, "");
+import { labPathAllowed } from "../labPaths";
 
-function allowed(path: string[], method: string): boolean {
-  const joined = path.join("/");
-  if (method === "GET") return joined === "fit" || joined === "fit/latest";
-  if (method === "POST") return joined === "fit" || /^fit\/[0-9a-f]{32}\/cancel$/.test(joined);
-  return false;
-}
+const BACKEND_URL = (process.env.AGENT_URL || "http://localhost:8000/").replace(/\/$/, "");
 
 async function forward(request: Request, path: string[] | undefined) {
   const segments = path ?? [];
-  if (!allowed(segments, request.method)) return new Response("Not found", { status: 404 });
+  if (!labPathAllowed(segments, request.method)) return new Response("Not found", { status: 404 });
   const joined = segments.join("/");
   const search = new URL(request.url).search;
   try {
@@ -31,6 +26,10 @@ async function forward(request: Request, path: string[] | undefined) {
 type Context = { params: Promise<{ path?: string[] }> };
 
 export async function GET(request: Request, { params }: Context) {
+  return forward(request, (await params).path);
+}
+
+export async function DELETE(request: Request, { params }: Context) {
   return forward(request, (await params).path);
 }
 

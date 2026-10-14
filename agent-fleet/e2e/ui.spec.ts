@@ -861,6 +861,67 @@ test("a failed answer puts the card back with a message", async ({ page }) => {
   await expect(prompts.getByText("npm test", { exact: true })).toBeVisible();
 });
 
+test("the Models tab lists the mocked counts in the order given and tags a machine with too few runs", async ({ page }) => {
+  await page.route("**/api/lab/models", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        days: null,
+        groups: [
+          { node: "worker-a", model: "model-y", runs: 7, doneAndCorrect: 5, falseAccepts: 1, parked: 1, timedOut: 0, errors: 0, tasks: ["early-close", "slugify"], tooFew: false, lastRunUtc: "2026-10-12T09:30:00Z" },
+          { node: "hub", model: "model-x", runs: 3, doneAndCorrect: 2, falseAccepts: 0, parked: 0, timedOut: 1, errors: 0, tasks: ["slugify"], tooFew: true, lastRunUtc: "2026-10-13T08:00:00Z" },
+        ],
+        imports: [],
+      }),
+    }),
+  );
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Config", exact: true }).click();
+  await page.getByRole("button", { name: "Models", exact: true }).click();
+
+  const table = page.getByRole("table", { name: "Counts by machine and model" });
+  await expect(table.locator("tbody th")).toHaveText(["worker-a", "hub"]);
+  await expect(table.locator("tbody tr").nth(0)).not.toContainText("too few to judge");
+  await expect(table.locator("tbody tr").nth(0)).toContainText("12 Oct 2026, 09:30 UTC");
+  await expect(table.locator("tbody tr").nth(1)).toContainText("too few to judge");
+});
+
+test("the Models tab posts one import with the typed model and prints what the backend kept", async ({ page }) => {
+  const resultsText = `${JSON.stringify({ planId: "plan-1", task: "slugify", status: "done", hiddenPass: true, models: "hub" })}\n${JSON.stringify({ planId: "plan-2", task: "slugify", status: "blocked", hiddenPass: false, models: "hub" })}\n`;
+  await page.route("**/api/lab/results/import", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ imported: 2, duplicates: 1, skipped: 0, models: ["model-x"] }),
+    }),
+  );
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Config", exact: true }).click();
+  await page.getByRole("button", { name: "Models", exact: true }).click();
+
+  const section = page.getByRole("region", { name: "Import a benchmark run" });
+  await section.getByLabel("results.jsonl (required)").setInputFiles({
+    name: "results.jsonl",
+    mimeType: "application/x-ndjson",
+    buffer: Buffer.from(resultsText),
+  });
+  await section.getByLabel("Model on hub").fill("model-x");
+  await section.getByLabel("Label (optional)").fill("standard tier, worker only");
+
+  const importRequest = page.waitForRequest((request) => request.url().endsWith("/api/lab/results/import") && request.method() === "POST");
+  await section.getByRole("button", { name: "Import", exact: true }).click();
+  const body = (await importRequest).postDataJSON();
+
+  expect(body.resultsJsonl).toBe(resultsText);
+  expect(body.models).toEqual({ hub: "model-x" });
+  expect(body.label).toBe("standard tier, worker only");
+  expect(body.run).toBeUndefined();
+  await expect(section.getByText("Imported 2 runs. 1 run was already stored and not added again.", { exact: true })).toBeVisible();
+});
+
 test("the Tools tab turns chat approvals on and leaves the wait as it was", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Config", exact: true }).click();

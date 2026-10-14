@@ -218,7 +218,7 @@ set them in your user environment variables. For a Windows service set them on t
 | `FLEET_PLAN_ROUNDS_PER_RUNG` | 3 | How many rounds (the model works, then the approved check runs) a plan step gets on each rung of the repair ladder before it climbs to the next (1 to 10) |
 | `FLEET_CONTEXT_LENGTH` | 32768 | The most tokens of context a machine is asked for when it does not set `contextLength` |
 | `FLEET_CONTEXT_FIT` | `classic` | The policy for shortening conversations that exceed the model's window: `classic` (the default), `maf-truncate` (Agent Framework's truncation), or `maf-collapse` (Agent Framework's truncation plus tool-result collapsing). Both Agent Framework policies are designed to change the start of the prompt only every few calls, which Ollama's prompt cache favours. Experimental; leave unset unless you are comparing policies. Applies to every machine's model calls except the routing model. |
-| `FLEET_LAB_DIR` | `lab` beside the plans folder | Where fit-measurement history, scorecard notification state and imported benchmark results are stored |
+| `FLEET_LAB_DIR` | `lab` beside the plans folder | Where fit-measurement history, scorecard notification state and imported benchmark results are stored. The Models tab of the Config panel shows the benchmark counts by machine and model and takes new imports; the counts are not a recommendation. |
 | `FLEET_STEP_GUIDANCE` | unset | Set to `tests` to add experimental test-writing guidance to plan steps that list test files. |
 | `SANDBOX_*` | | The same settings as the `sandbox` section, used when the file does not give them |
 | `HUB_OLLAMA_URL`, `HUB_OLLAMA_MODEL`, `TRIAGE_OLLAMA_MODEL` | | Seed values for the first-ever start only |
