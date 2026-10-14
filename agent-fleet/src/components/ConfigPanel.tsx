@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { McpServerConfig } from "./mcpCatalog";
+import { ApprovalSettings } from "./ApprovalSettings";
 import { HistorySettings } from "./HistorySettings";
 import { SandboxSettings } from "./SandboxSettings";
 import { SetupSettings } from "./SetupSettings";
@@ -49,6 +50,7 @@ type FleetConfigData = {
   mcpServers: Record<string, McpServerConfig>;
   mcpStatus: McpStatus[];
   history?: { deleteAfterDays: number };
+  chatApprovals?: { enabled: boolean; timeoutSeconds: number };
   customTools?: Record<string, CommandToolConfig>;
   customStatus?: CommandToolStatus[];
 };
@@ -738,6 +740,7 @@ export function ConfigPanel() {
         mcpServers: data.mcpServers,
         mcpStatus: data.mcpStatus,
         history: data.history,
+        chatApprovals: data.chatApprovals,
         customTools: data.customTools,
         customStatus: data.customStatus,
       };
@@ -869,17 +872,28 @@ export function ConfigPanel() {
                   <AddMachine nodes={draft.nodes} saving={saving} onAdd={(node) => save({ ...draft, nodes: [...draft.nodes, node] })} />
                 </div>
               ) : tab === "tools" ? (
-                <ToolsSettings
-                  servers={draft.mcpServers ?? {}}
-                  statuses={draft.mcpStatus ?? []}
-                  tools={draft.tools}
-                  customTools={draft.customTools ?? {}}
-                  customStatus={draft.customStatus ?? []}
-                  saving={saving}
-                  onSave={(mcpServers, tools) => save({ ...draft, mcpServers, tools })}
-                  onSaveCustom={(customTools) => save({ ...draft, customTools })}
-                  onReload={() => setDraft(null)}
-                />
+                <div className="space-y-6">
+                  <ApprovalSettings
+                    settings={draft.chatApprovals ?? { enabled: false, timeoutSeconds: 240 }}
+                    onSaved={(chatApprovals, version, text) => {
+                      const updated: FleetConfigData = { ...draft, chatApprovals, version: version || draft.version };
+                      setDraft(updated);
+                      setSaved(snapshot(updated));
+                      setMessage({ text, error: false });
+                    }}
+                  />
+                  <ToolsSettings
+                    servers={draft.mcpServers ?? {}}
+                    statuses={draft.mcpStatus ?? []}
+                    tools={draft.tools}
+                    customTools={draft.customTools ?? {}}
+                    customStatus={draft.customStatus ?? []}
+                    saving={saving}
+                    onSave={(mcpServers, tools) => save({ ...draft, mcpServers, tools })}
+                    onSaveCustom={(customTools) => save({ ...draft, customTools })}
+                    onReload={() => setDraft(null)}
+                  />
+                </div>
               ) : tab === "history" ? (
                 <HistorySettings
                   deleteAfterDays={draft.history?.deleteAfterDays ?? 0}

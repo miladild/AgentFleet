@@ -860,3 +860,20 @@ test("a failed answer puts the card back with a message", async ({ page }) => {
   await expect(prompts.getByText("Could not send your answer. Try again.")).toBeVisible();
   await expect(prompts.getByText("npm test", { exact: true })).toBeVisible();
 });
+
+test("the Tools tab turns chat approvals on and leaves the wait as it was", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Config", exact: true }).click();
+  await page.getByRole("button", { name: "Tools", exact: true }).click();
+
+  const checkbox = page.getByRole("checkbox", { name: /Ask before the chat runs a command/ });
+  await expect(checkbox).not.toBeChecked();
+  const saveRequest = page.waitForRequest((request) => request.url().endsWith("/api/fleet-config") && request.method() === "PUT");
+  await checkbox.check();
+  const body = (await saveRequest).postDataJSON();
+
+  expect(body.chatApprovals).toEqual({ enabled: true, timeoutSeconds: 240 });
+  expect(body.nodes).toBeUndefined();
+  await expect(page.getByText("Saved. The chat now asks before it runs a command or changes a file.")).toBeVisible();
+  await expect(checkbox).toBeChecked();
+});

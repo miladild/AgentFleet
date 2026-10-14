@@ -134,7 +134,8 @@ How long the durable record keeps chats. See [context.md](context.md#keeping-it-
 
 Off when missing. When it is on, a tool call the model makes in ordinary chat waits for your answer before it runs. Read-only
 tools never wait, nor do the fleet's own bookkeeping calls (plan proposals, decision pins and record searches). A plan never
-waits: an approved plan runs unattended, as before.
+waits: an approved plan runs unattended, as before. The Tools tab of the Config panel in the web UI has a switch for it and
+for the wait.
 
 | Field | Meaning |
 |---|---|
