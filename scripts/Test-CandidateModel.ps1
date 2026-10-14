@@ -204,6 +204,38 @@ function Get-LiveActivity([string]$Url) {
     return [pscustomobject]@{ Answered = $true; Readable = $activity.Readable; Active = $activity.Active; Detail = $detail }
 }
 
+# The ports the candidate must never take: the base list (the web UI and Ollama on every machine), the web UI's address as
+# the installer recorded it, and the port of every node's address. A node's Ollama can be stopped right now and still be
+# this machine's, so the node ports are reserved whether or not something listens on them at the moment.
+function Get-CandidateReservedPorts($Nodes, [string]$WebUrl, [int[]]$Base) {
+    $nodeUrls = @($Nodes | ForEach-Object { "$($_.url)" })
+    return @(@($Base) + @(Get-LivePorts (@($nodeUrls) + @($WebUrl))))
+}
+
+# The web UI's address as the installer recorded it, when there is one: its port is reserved as well.
+function Get-RecordedWebUrl([string]$InstallRoot) {
+    if (-not $InstallRoot) { return '' }
+    $record = Join-Path $InstallRoot 'fleet-install.json'
+    if (-not (Test-Path -LiteralPath $record)) { return '' }
+    try { return "$((Get-Content -LiteralPath $record -Raw | ConvertFrom-Json).webUrl)" } catch { return '' }
+}
+
+# The live backend's answer decides whether the candidate may run. Anything but a readable list with no plan running or
+# approved counts as busy, including no answer at all: a backend that does not answer may still be running plans.
+function Get-LiveProblem([string]$Url, $Activity) {
+    if (-not $Activity.Readable) { return "The live backend at $Url did not answer the plan check with a list of plans ($($Activity.Detail)), so it cannot be shown to be idle." }
+    if ($Activity.Active -gt 0) { return "The live backend at $Url has $($Activity.Active) plan(s) running or approved, and the candidate would share its machines." }
+    return $null
+}
+
+# The other nodes that answer on this node's Ollama address. Loading the candidate there can unload their models.
+function Get-SharedOllamaNodes($Nodes, [string]$NodeName) {
+    $named = @($Nodes | Where-Object { $_.name -ceq $NodeName })
+    if ($named.Count -eq 0 -or -not "$($named[0].url)") { return @() }
+    $base = Get-OllamaBase "$($named[0].url)"
+    return @($Nodes | Where-Object { $_.name -cne $NodeName -and "$($_.url)" -and (Get-OllamaBase "$($_.url)") -ieq $base } | ForEach-Object { $_.name })
+}
+
 if ($Config -and -not (Test-Path -LiteralPath $Config)) { Stop-Refused "The configuration file was not found: $Config" }
 $source = Find-FleetConfig $Config $null
 if (-not $source) { Stop-Refused 'No fleet.config.json found. Pass -Config <path>.' }
@@ -212,9 +244,11 @@ try { $original = Read-FleetConfig $source } catch { Stop-Refused "The configura
 if (-not $OutDir) { $OutDir = Join-Path $script:RepoRoot ('bench\results\' + (Get-CandidateOutDirName $Node $Model (Get-Date -Format 'yyyyMMdd-HHmmss'))) }
 $OutDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutDir)
 
-$liveUrls = Get-LiveBackendUrls (Resolve-InstallRoot $null)
+$installRoot = Resolve-InstallRoot $null
+$liveUrls = Get-LiveBackendUrls $installRoot
 $refusal = Get-CandidateRefusal -Nodes $original.nodes -NodeName $Node -Port $Port -LivePorts (Get-LivePorts $liveUrls) `
-    -ReservedPorts $reservedPorts -PortInUse (Test-PortListening $Port) -AllowHub:$AllowHub
+    -ReservedPorts (Get-CandidateReservedPorts $original.nodes (Get-RecordedWebUrl $installRoot) $reservedPorts) `
+    -PortInUse (Test-PortListening $Port) -AllowHub:$AllowHub
 if ($refusal) { Stop-Refused $refusal }
 if (Test-Path -LiteralPath (Join-Path $OutDir 'results.jsonl')) {
     Stop-Refused "$OutDir already holds results. Choose another -OutDir, so two candidates never share a results file."
@@ -234,6 +268,8 @@ Write-Step "Candidate model on $Node ($mode)"
 Write-Ok "Configuration read from $source"
 if ($isHubRun) { Write-Warn "$Node is the hub's machine (-AllowHub): the run uses the hub's model and is not limited to workers." }
 else { Write-Ok "$Node is a text worker on the Ollama API, not the hub's machine." }
+$sharedNodes = @(Get-SharedOllamaNodes $original.nodes $Node)
+if ($sharedNodes.Count) { Write-Warn "$Node answers on the same Ollama address as $($sharedNodes -join ', '). Loading the candidate there can unload their model while the run goes on." }
 Write-Ok "Port $Port is free and is not a live backend's, the web UI's or Ollama's port."
 Write-Info ("Configuration change (node and model only): {0}: model '{1}' -> '{2}'" -f $Node, $oldModel, $Model)
 Write-Info "The model must already be pulled on $Node. This command does not pull it."
@@ -255,20 +291,11 @@ if ($WhatIf) {
 
 foreach ($url in $liveUrls) {
     $activity = Get-LiveActivity $url
-    if (-not $activity.Answered) { Write-Info "No answer from the live backend at $url, so nothing is running there."; continue }
-    if (-not $activity.Readable) {
-        $problem = "The live backend at $url did not answer the plan check with a list of plans ($($activity.Detail)), so it cannot be shown to be idle."
-        if (-not $Force) { Stop-Refused "$problem Pass -Force to run anyway." }
-        Write-Warn "$problem Continuing because of -Force."
-        continue
-    }
-    if ($activity.Active -gt 0) {
-        $problem = "The live backend at $url has $($activity.Active) plan(s) running or approved, and the candidate would share its machines."
-        if (-not $Force) { Stop-Refused "$problem Wait for them to finish, or pass -Force to run anyway." }
-        Write-Warn "$problem Continuing because of -Force."
-        continue
-    }
-    Write-Ok "The live backend at $url has no plan running or approved."
+    $problem = Get-LiveProblem $url $activity
+    if (-not $problem) { Write-Ok "The live backend at $url has no plan running or approved."; continue }
+    $advice = if ($activity.Readable) { 'Wait for them to finish, or pass -Force to run anyway.' } else { 'Pass -Force to run anyway.' }
+    if (-not $Force) { Stop-Refused "$problem $advice" }
+    Write-Warn "$problem Continuing because of -Force."
 }
 
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('agent-fleet-candidate-' + [Guid]::NewGuid().ToString('N'))
@@ -314,10 +341,17 @@ finally {
 
     $logs = @(Get-ChildItem -LiteralPath $workRoot -Filter 'backend.*.log' -ErrorAction SilentlyContinue)
     if ($exitCode -ne 0 -and $logs.Count) {
+        # The logs can name node addresses and this machine's folders. A copy that fails must not stop the cleanup below.
         $logFolder = Join-Path $OutDir 'backend-logs'
-        New-Item -ItemType Directory -Path $logFolder -Force | Out-Null
-        $logs | Copy-Item -Destination $logFolder
-        Write-Info "The backend's logs were copied to $logFolder."
+        try {
+            $secrets = @($tempRoot, $env:USERPROFILE) + @($original.nodes | ForEach-Object { "$($_.url)"; try { ([Uri]"$($_.url)").Host } catch { } })
+            New-Item -ItemType Directory -Path $logFolder -Force | Out-Null
+            foreach ($log in $logs) {
+                [IO.File]::WriteAllText((Join-Path $logFolder $log.Name), (Hide-LocalDetail ([IO.File]::ReadAllText($log.FullName)) $secrets), (New-Object Text.UTF8Encoding($false)))
+            }
+            Write-Info "The backend's logs were copied to $logFolder, without its addresses or this machine's folder paths."
+        }
+        catch { Write-Warn "The backend's logs could not be copied: $($_.Exception.Message)" }
     }
 
     if ((Split-Path -Leaf $tempRoot) -like 'agent-fleet-candidate-*' -and (Test-Path -LiteralPath $tempRoot)) {

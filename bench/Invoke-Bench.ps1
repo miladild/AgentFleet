@@ -31,6 +31,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot\..\scripts\FleetCommon.ps1"
 $tasksRoot = Join-Path $PSScriptRoot 'tasks'
 if (-not $OutDir) { $OutDir = Join-Path $PSScriptRoot ('results\' + (Get-Date -Format 'yyyyMMdd-HHmmss')) }
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
@@ -192,15 +193,15 @@ function Invoke-Run([string]$Id, [int]$Number) {
         $result.autoRetries = @($events | Where-Object { $_.kind -eq 'step-retried' -and $_.failureClass -eq 'AutoRetry' }).Count
         $result.reviewFailed = @($events | Where-Object { $_.kind -eq 'step-review' -and $_.failureClass -eq 'Failed' }).Count
         $result.reviewPassed = @($events | Where-Object { $_.kind -eq 'step-review' -and $_.failureClass -eq 'Passed' }).Count
-        $result.parkCauses = (@($events | Where-Object kind -eq 'step-parked' | ForEach-Object { $_.failureSignature }) | Sort-Object -Unique) -join ','
+        $result.parkCauses = Hide-LocalDetail ((@($events | Where-Object kind -eq 'step-parked' | ForEach-Object { $_.failureSignature }) | Sort-Object -Unique) -join ',')
         $result.models = (@($events | Where-Object { $_.modelNode } | ForEach-Object { $_.modelNode }) | Sort-Object -Unique) -join ','
         $blocked = @($events | Where-Object kind -eq 'plan-blocked') | Select-Object -Last 1
         if ($blocked -and $blocked.detail) {
-            $reason = ($blocked.detail -replace '\s+', ' ')
+            $reason = Hide-LocalDetail ($blocked.detail -replace '\s+', ' ')
             $result.blockedReason = $reason.Substring(0, [Math]::Min(240, $reason.Length))
         }
     }
-    catch { $result.error = $_.Exception.Message }
+    catch { $result.error = Hide-LocalDetail $_.Exception.Message }
     $result.minutes = [Math]::Round(((Get-Date) - $started).TotalMinutes, 1)
 
     $hidden = Invoke-Hidden $project (Join-Path $tasksRoot "$Id\hidden") (Join-Path $OutDir "$Id-$Number\hidden")
@@ -226,7 +227,7 @@ foreach ($id in $taskIds) {
         Write-Host ("[{0}] {1} run {2} ..." -f (Get-Date -Format 'HH:mm:ss'), $id, $run)
         $r = Invoke-Run $id $run
         $results += $r
-        $r | ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $OutDir 'results.jsonl')
+        $r | ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $OutDir 'results.jsonl') -Encoding UTF8
         Write-Host ("        {0}: plan {1}, hidden tests {2} ({3}), {4} min, {5} rounds, {6} auto retries, {7} reviews failed" -f
             $id, $r.status, $(if ($r.hiddenPass) { 'PASS' } else { 'FAIL' }), $r.hiddenSummary, $r.minutes, $r.rounds, $r.autoRetries, $r.reviewFailed)
     }

@@ -56,21 +56,26 @@ no automatic retries (`-AutoRetries 0`). Repair steps may still go to another wo
 machines that did the work. `-Tasks` and `-Repeat` work as they do for `Invoke-Bench.ps1`. The results go to
 `bench\results\candidate-<node>-<model>-<time>` (`-OutDir` picks another folder). At the end the throwaway backend is
 stopped and the temporary copy deleted, also when the run fails or is interrupted. When a run fails, the backend's log files
-are copied into the results folder.
+are copied into the results folder with addresses and this machine's folder paths taken out (best effort: a name written
+without a folder path is not removed).
 
 The worker is one of the machines of your live fleet, so:
 
-- The command refuses while a plan on the live backend is running or approved. It checks once, when it starts, so do not
-  start plans while it runs. `-Force` runs anyway.
+- The command refuses while a plan on the live backend is running or approved, and when the live backend does not answer
+  its plan list, because that cannot show the fleet is idle. It checks once, when it starts, so do not start plans while it
+  runs. `-Force` runs anyway.
 - It never writes your configuration, never uses the live backend's data folder or port, and checks afterwards that the
   configuration file is unchanged.
 - The model must already be pulled on that machine. The command does not pull it.
+- A worker that answers on the same Ollama address as another node shares that machine's models. The command warns,
+  because loading the candidate there can unload the other node's model while the run goes on.
 
 Before anything starts, it refuses when the node is not in the configuration (names must match exactly); when the node is
 the hub's machine, which is the node marked `"fallback": true` or a node on this machine's own Ollama (`-AllowHub` tests it
 anyway: the hub's model is then loaded, and the run is not limited to workers); when the node uses the `openai` API or is a
-vision node; when the port is a live backend's, the web UI's or Ollama's, or something already listens on it; when the output
-folder already holds results; or when the configuration marks no fallback node, because the hub's model could then not be
+vision node; when the port is a live backend's, the web UI's (including the address the installer recorded), Ollama's, or
+the port of any node's address in the configuration, or something already listens on it; when the output folder already
+holds results; or when the configuration marks no fallback node, because the hub's model could then not be
 kept out of the run.
 
 The fit probe in the Models tab only measures speed and how much of a model fits in graphics memory. It does not choose

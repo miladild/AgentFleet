@@ -59,6 +59,7 @@ $benchAst = Get-ScriptAst $benchScript
 foreach ($definition in $wrapperAst.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
     Invoke-Expression $definition.Extent.Text
 }
+. (Join-Path $PSScriptRoot '..\scripts\FleetCommon.ps1')
 
 $configText = @'
 {
@@ -83,8 +84,12 @@ $reserved = @(3000, 11434)
 
 $prefix = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'candidate-wrapper-check-'))
 $scratch = $prefix + [Guid]::NewGuid().ToString('N')
+# The candidate script finds a live install through this variable: pointing it at an empty folder keeps the check from
+# reading the install record of a real installation.
+$previousInstallRoot = $env:AGENT_FLEET_INSTALL_ROOT
 try {
     New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+    $env:AGENT_FLEET_INSTALL_ROOT = Join-Path $scratch 'no-live-install'
     $configPath = Join-Path $scratch 'fleet.config.json'
     $noFallbackPath = Join-Path $scratch 'no-fallback.config.json'
     $utf8 = New-Object Text.UTF8Encoding($false)
@@ -166,6 +171,73 @@ try {
     Assert-Check (-not (Get-PlanActivity '[ not json').Readable) 'live plans: broken JSON is not readable'
     Assert-Check (-not (Get-PlanActivity '').Readable) 'live plans: an empty answer is not readable'
 
+    # Live backends: no answer, an unreadable answer and running or approved plans all block the candidate.
+    $closedPort = Get-FreeTestPort
+    $unanswered = Get-LiveActivity "http://127.0.0.1:$closedPort"
+    Assert-Check (-not $unanswered.Answered -and -not $unanswered.Readable) 'live backend: a port that nothing answers on gives no answer'
+    Assert-Check ($null -ne (Get-LiveProblem "http://127.0.0.1:$closedPort" $unanswered)) 'live backend: no answer counts as busy, not idle'
+    Assert-Check ($null -ne (Get-LiveProblem 'http://localhost:8000' ([pscustomobject]@{ Answered = $true; Readable = $false; Active = 0; Detail = 'not a list' }))) 'live backend: an answer that is not a plan list counts as busy'
+    Assert-Check ($null -ne (Get-LiveProblem 'http://localhost:8000' ([pscustomobject]@{ Answered = $true; Readable = $true; Active = 2; Detail = '' }))) 'live backend: running or approved plans count as busy'
+    Assert-Check ($null -eq (Get-LiveProblem 'http://localhost:8000' ([pscustomobject]@{ Answered = $true; Readable = $true; Active = 0; Detail = '' }))) 'live backend: a readable answer with no active plan lets the candidate run'
+
+    # Ports: the node addresses and the recorded web UI address are reserved, not only the defaults.
+    $portNodes = ConvertFrom-Json -InputObject '[{"name":"local","url":"http://localhost:11500/v1"},{"name":"far","url":"http://192.0.2.31:11434/v1"}]'
+    $reservedWithWeb = Get-CandidateReservedPorts $portNodes 'http://localhost:3033' @(3000, 11434)
+    Assert-Check ($reservedWithWeb -contains 11500) 'ports: the port of a node address is reserved while nothing listens on it'
+    Assert-Check ($reservedWithWeb -contains 3033 -and $reservedWithWeb -contains 3000 -and $reservedWithWeb -contains 11434) 'ports: the recorded web UI port and the default ports are reserved'
+    Assert-Check (-not ((Get-CandidateReservedPorts $portNodes '' @(3000, 11434)) -contains 3033)) 'ports: without a recorded web UI address no other port is reserved'
+    $webRoot = Join-Path $scratch 'web-install'
+    New-Item -ItemType Directory -Path $webRoot -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $webRoot 'fleet-install.json'), '{ "backendUrl": "http://localhost:8000", "webUrl": "http://localhost:3033" }', $utf8)
+    Assert-Check ((Get-RecordedWebUrl $webRoot) -eq 'http://localhost:3033') 'install record: the recorded web UI address is read'
+    [IO.File]::WriteAllText((Join-Path $webRoot 'fleet-install.json'), '{ not json', $utf8)
+    Assert-Check ((Get-RecordedWebUrl $webRoot) -eq '') 'install record: an unreadable record gives no web UI address'
+    Assert-Check ((Get-RecordedWebUrl (Join-Path $scratch 'no-such-install')) -eq '') 'install record: a missing record gives no web UI address'
+
+    # A node that answers on another node's Ollama address is named, because loading the candidate there can unload its model.
+    Assert-Check (((Get-SharedOllamaNodes $config.nodes 'worker1') -join ',') -eq 'eyes') 'shared address: the node that answers on the same Ollama address is named'
+    Assert-Check (@(Get-SharedOllamaNodes $config.nodes 'worker2').Count -eq 0) 'shared address: a node with its own address shares with nobody'
+
+    # Starting the backend: the DLL path must reach the process as one argument, also in a folder with a space in its path.
+    $argcScript = Join-Path $scratch 'argc.ps1'
+    [IO.File]::WriteAllText($argcScript, 'Write-Output ("count=" + $args.Count)', $utf8)
+    $startProcess = @($startAst.FindAll({ param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Start-Process' }, $true))[0]
+    $startElements = @($startProcess.CommandElements)
+    $argumentIndex = 0
+    for ($i = 0; $i -lt $startElements.Count; $i++) {
+        if ($startElements[$i] -is [Management.Automation.Language.CommandParameterAst] -and $startElements[$i].ParameterName -eq 'ArgumentList') { $argumentIndex = $i + 1 }
+    }
+    Assert-Check ($argumentIndex -gt 0) 'backend start: the backend is started with an argument list'
+    $bin = Join-Path (Join-Path $scratch 'with space') 'bin'
+    $dllArgument = Invoke-Expression $startElements[$argumentIndex].Extent.Text
+    $argcOut = Join-Path $scratch 'argc-out.txt'
+    Start-Process -FilePath $engine -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -File "' + $argcScript + '" ' + $dllArgument) -RedirectStandardOutput $argcOut -Wait -WindowStyle Hidden
+    Assert-Check ((Get-Content -LiteralPath $argcOut -Raw).Trim() -eq 'count=1') 'backend start: the DLL path reaches the process as one argument, also when its folder has a space'
+
+    # Config files are UTF-8 without a byte-order mark: their characters must survive a read and a write under both engines.
+    $purposeText = 'caf' + [char]0x00E9 + ' ' + [char]0x2014 + ' hub'
+    $utf8Config = Join-Path $scratch 'utf8-purpose.json'
+    [IO.File]::WriteAllText($utf8Config, ('{ "purpose": "' + $purposeText + '" }'), $utf8)
+    Assert-Check ((Read-FleetConfig $utf8Config).purpose -ceq $purposeText) 'config read: UTF-8 text without a byte-order mark keeps its characters'
+    $utf8Copy = Join-Path $scratch 'utf8-copy.json'
+    Write-FleetConfig $utf8Copy (Read-FleetConfig $utf8Config)
+    Assert-Check (([IO.File]::ReadAllText($utf8Copy, [Text.Encoding]::UTF8) | ConvertFrom-Json).purpose -ceq $purposeText) 'config copy: the characters survive a write'
+
+    # Results and copied logs: addresses and folder paths of this machine are taken out.
+    $leak = Hide-LocalDetail 'No connection (192.0.2.21:11434) at http://192.0.2.22:11434/v1 under Z:\example-profile\AppData and \\share-host\folder'
+    Assert-Check ($leak -notmatch '192\.0\.2\.2[12]' -and $leak -notmatch 'example-profile' -and $leak -notmatch 'share-host' -and $leak -notmatch 'http://') 'hidden detail: addresses, web addresses and folder paths are taken out'
+    Assert-Check ((Hide-LocalDetail 'Log in Z:\example-temp\candidate-1\work' @('Z:\example-temp\candidate-1')) -eq 'Log in <hidden>\work') 'hidden detail: an extra folder given by the caller is taken out'
+    Assert-Check ((Hide-LocalDetail 'Step 3 needs a retry.') -eq 'Step 3 needs a retry.') 'hidden detail: ordinary text is kept as it is'
+    $benchText = [IO.File]::ReadAllText($benchScript)
+    Assert-Check ($benchText -match [regex]::Escape('FleetCommon.ps1')) 'results file: the bench script loads the shared helpers'
+    $addContent = @($benchAst.FindAll({ param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Add-Content' }, $true))
+    $unencoded = @($addContent | Where-Object { @($_.CommandElements | Where-Object { $_ -is [Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -eq 'Encoding' }).Count -eq 0 })
+    Assert-Check ($addContent.Count -gt 0 -and $unencoded.Count -eq 0) 'results file: every line is written with an explicit encoding, not the system code page'
+    $hiddenInBench = @($benchAst.FindAll({ param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Hide-LocalDetail' }, $true))
+    Assert-Check ($hiddenInBench.Count -ge 3) 'results file: the blocked reason, the error and the park causes pass through the hiding function'
+    $hiddenInCandidate = @($wrapperAst.FindAll({ param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Hide-LocalDetail' }, $true))
+    Assert-Check ($hiddenInCandidate.Count -ge 1) 'backend logs: the copy in the results folder passes through the hiding function'
+
     # Refusals: pure checks on synthetic nodes; nothing is contacted.
     function Get-Refusal($Nodes, [string]$NodeName, [int]$Port = 8010, [bool]$InUse = $false, [bool]$AllowHub = $false) {
         return Get-CandidateRefusal -Nodes $Nodes -NodeName $NodeName -Port $Port -LivePorts $live -ReservedPorts $reserved -PortInUse $InUse -AllowHub $AllowHub
@@ -208,6 +280,7 @@ try {
     Assert-Check ($dry.ExitCode -eq 0) 'dry run exits with 0'
     Assert-Check ($dry.Text -match "model 'worker-model-a:7b' -> 'candidate-model:2b'") 'dry run prints the one configuration change'
     Assert-Check ($dry.Text -match 'Dry run complete') 'dry run says it started nothing'
+    Assert-Check ($dry.Text -match 'same Ollama address as eyes') 'dry run warns that the worker shares its Ollama address with another node'
     Assert-Check ($dry.Text -notmatch '== Starting' -and $dry.Text -notmatch '== Running') 'dry run has no start or run step'
     Assert-Check (-not (Test-Path -LiteralPath $outDir)) 'dry run creates no output folder'
     $tempAfter = @(Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Directory -Filter 'agent-fleet-candidate-*' -ErrorAction SilentlyContinue).Count
@@ -254,6 +327,7 @@ try {
     Assert-Check ($finalHash -eq $configHashBefore) 'the configuration is byte-identical after every check'
 }
 finally {
+    $env:AGENT_FLEET_INSTALL_ROOT = $previousInstallRoot
     if (Test-Path -LiteralPath $scratch) {
         $resolved = (Resolve-Path -LiteralPath $scratch).Path
         if ($resolved -ne $scratch -or -not $resolved.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Refusing cleanup outside the check folder.' }

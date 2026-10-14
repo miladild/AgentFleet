@@ -82,7 +82,8 @@ $env:FLEET_PLANS_DIR = $plans
 $env:FLEET_FRONTEND_URL = 'http://localhost:3005'
 $env:ASPNETCORE_URLS = "http://localhost:$Port"
 try {
-    $process = Start-Process dotnet -ArgumentList (Join-Path $bin 'AgentFleet.dll') -WorkingDirectory $bin -PassThru -WindowStyle Hidden `
+    # Start-Process passes the argument text on as it is: the quotes keep a folder with a space in its path in one piece.
+    $process = Start-Process dotnet -ArgumentList ('"' + (Join-Path $bin 'AgentFleet.dll') + '"') -WorkingDirectory $bin -PassThru -WindowStyle Hidden `
         -RedirectStandardOutput (Join-Path $WorkRoot 'backend.out.log') -RedirectStandardError (Join-Path $WorkRoot 'backend.err.log')
 }
 finally {

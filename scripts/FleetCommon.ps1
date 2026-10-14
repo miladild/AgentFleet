@@ -63,14 +63,26 @@ function Find-FleetConfig([string]$Path, [string]$InstallRoot) {
     return $null
 }
 
+# Reads the file as UTF-8: Windows PowerShell 5.1 would otherwise read a file without a byte-order mark as the system code
+# page and write the garbled text back out.
 function Read-FleetConfig([string]$Path) {
-    return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    return Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
 }
 
 # JSON without a byte-order mark, which is what the backend writes too.
 function Write-FleetConfig([string]$Path, $Config) {
     $json = $Config | ConvertTo-Json -Depth 12
     [IO.File]::WriteAllText($Path, $json + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+}
+
+# Takes out of text that a result file or a copied log should not name: web and network addresses, Windows folder paths
+# (which carry the user's name) and any extra strings given, such as this machine's temporary folder.
+function Hide-LocalDetail([string]$Text, [string[]]$Extra = @()) {
+    $clean = "$Text"
+    foreach ($item in @($Extra | Where-Object { $_ })) { $clean = $clean.Replace($item, '<hidden>') }
+    $clean = $clean -replace '[A-Za-z][A-Za-z0-9+.-]*://[^\s"''<>]+', '<address>'
+    $clean = $clean -replace '\b\d{1,3}(\.\d{1,3}){3}\b', '<address>'
+    return ($clean -replace '(\\\\|[A-Za-z]:\\)[^\s"''<>]*', '<path>')
 }
 
 # A node's chat URL ends in /v1; Ollama's own API (model list, pull) lives at the address without it.
