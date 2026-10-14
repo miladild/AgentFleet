@@ -28,7 +28,8 @@ internal sealed record FitProbeJobSnapshot(
     DateTimeOffset? FinishedAtUtc,
     string? Reason);
 
-internal sealed record FitProbeStartResult(FitProbeJobSnapshot? Job, string? Reason);
+/// <summary>NeedsConfirmation is set only for a refusal of a machine on this computer, so the browser can ask before it measures.</summary>
+internal sealed record FitProbeStartResult(FitProbeJobSnapshot? Job, string? Reason, bool NeedsConfirmation = false);
 
 internal sealed record FitProbeLatestResult(
     string Node,
@@ -128,7 +129,7 @@ internal sealed class FitProbeService
         Uri root = node.OllamaRoot;
         if (OllamaAddress.IsThisMachine(root) && !confirmHub)
         {
-            return Refused("Measuring this computer needs confirmation.");
+            return RefusedForConfirmation("Measuring this computer needs confirmation.");
         }
 
         if (_plans.List().Any(plan => plan.Status is PlanStatus.Running or PlanStatus.Approved))
@@ -544,6 +545,8 @@ internal sealed class FitProbeService
     }
 
     private static FitProbeStartResult Refused(string reason) => new(null, reason);
+
+    private static FitProbeStartResult RefusedForConfirmation(string reason) => new(null, reason, NeedsConfirmation: true);
 
     private static string NormalizeAddress(Uri root) => MeasuringMachines.NormalizeAddress(root);
 

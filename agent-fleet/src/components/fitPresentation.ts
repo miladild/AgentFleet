@@ -93,6 +93,16 @@ export function fitResultStatus(result: FitSizeResult | undefined, current: bool
   return "· Not measured yet";
 }
 
+// The machine is confirmed in the request only after the confirmation box was answered with Measure now.
+export function fitStartBody(nodeName: string, confirmed: boolean): { node: string; confirmHub?: true } {
+  return confirmed ? { node: nodeName, confirmHub: true } : { node: nodeName };
+}
+
+// A refused start for a machine on this computer asks for confirmation instead of showing its reason as an error.
+export function fitStartNeedsConfirmation(refusal: { needsConfirmation?: unknown }): boolean {
+  return refusal.needsConfirmation === true;
+}
+
 export function formatSetupFitSummary(model: string, result: FitLatestResult | null): SetupFitSummary | null {
   if (!result || taggedModel(result.model) !== taggedModel(model)) return null;
   if (result.stale) {

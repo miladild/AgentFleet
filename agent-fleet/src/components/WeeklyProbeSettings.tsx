@@ -116,8 +116,8 @@ export function WeeklyProbeSettings({
             Measure the workers once a week
             <span className="block text-[11px] text-neutral-500 mt-1">
               Workers only, never the hub. The measurement runs inside the window below, one machine at a time, and only when no
-              plan or other measurement is running. It compares speed and fit, not coding skill. A machine whose speed or fit got
-              worse since its last measurement is shown in the status below. Off by default.
+              plan or other measurement is running and no model is loaded on that machine. It compares speed and fit, not coding
+              skill. A machine whose speed or fit got worse since its last measurement is shown in the status below. Off by default.
             </span>
           </span>
         </label>

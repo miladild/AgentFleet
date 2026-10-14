@@ -1632,7 +1632,7 @@ app.MapPost("/api/lab/fit", (FitProbeRequest request) =>
 {
     FitProbeStartResult result = fitProbeService.Start(request.Node, request.Force, request.ConfirmHub);
     return result.Job is null
-        ? Results.Conflict(new { reason = result.Reason })
+        ? Results.Conflict(new { reason = result.Reason, needsConfirmation = result.NeedsConfirmation })
         : Results.Json(new { id = result.Job.Id }, statusCode: StatusCodes.Status202Accepted);
 });
 

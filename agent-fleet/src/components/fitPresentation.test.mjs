@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fitStaleReason, formatFitLine, formatFitSize, formatSetupFitSummary } from "./fitPresentation.ts";
+import { fitStaleReason, fitStartBody, fitStartNeedsConfirmation, formatFitLine, formatFitSize, formatSetupFitSummary } from "./fitPresentation.ts";
 
 const measured = {
   node: "worker-a",
@@ -60,6 +60,17 @@ test("a measured incomplete fit replaces a static claim that the model fits", ()
     replacesStaticReason: true,
   });
   assert.doesNotMatch(summary.line, /fits on the graphics card/);
+});
+
+test("a start request confirms the machine only after the confirmation box was answered", () => {
+  assert.deepEqual(fitStartBody("worker-a", false), { node: "worker-a" });
+  assert.deepEqual(fitStartBody("worker-a", true), { node: "worker-a", confirmHub: true });
+});
+
+test("only a refused start that asks for confirmation opens the confirmation box", () => {
+  assert.equal(fitStartNeedsConfirmation({ reason: "Measuring this computer needs confirmation.", needsConfirmation: true }), true);
+  assert.equal(fitStartNeedsConfirmation({ reason: "A plan is running or approved.", needsConfirmation: false }), false);
+  assert.equal(fitStartNeedsConfirmation({ reason: "A plan is running or approved." }), false);
 });
 
 test("setup measurements are shown only for their model and stale results replace static reasons", () => {

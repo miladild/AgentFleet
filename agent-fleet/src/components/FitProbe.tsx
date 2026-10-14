@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { fitResultStatus, fitStaleReason, formatFitLine, formatFitSize, type FitLatestResult, type FitSizeResult } from "./fitPresentation";
+import { fitResultStatus, fitStaleReason, fitStartBody, fitStartNeedsConfirmation, formatFitLine, formatFitSize, type FitLatestResult, type FitSizeResult } from "./fitPresentation";
 import { formatWorkLine, type WorkScorecards } from "./workPresentation";
 
 const CONTEXTS = [12288, 16384, 24576, 32768];
@@ -130,10 +130,14 @@ export function FitProbe({
       const response = await fetch("/api/lab/fit", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ node: node.name, ...(isHub && confirmedHub ? { confirmHub: true } : {}) }),
+        body: JSON.stringify(fitStartBody(node.name, confirmedHub)),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
+        if (fitStartNeedsConfirmation(data)) {
+          setConfirming(true);
+          return;
+        }
         setStartError(data.reason ?? "The measurement could not be started.");
         return;
       }
@@ -144,7 +148,7 @@ export function FitProbe({
     } finally {
       setStarting(false);
     }
-  }, [isHub, node.name, onOpenChange, refreshJob]);
+  }, [node.name, onOpenChange, refreshJob]);
 
   const requestMeasure = useCallback(() => {
     onOpenChange(true);
@@ -231,9 +235,9 @@ export function FitProbe({
         )}
       </div>
       {startError && <p className="text-[11px] text-red-300">{startError}</p>}
-      {confirming && isHub && (
+      {confirming && (
         <div className="rounded border border-amber-700/50 bg-amber-950/20 p-2 space-y-1.5">
-          <p className="text-[11px] text-amber-100">Loads {node.model} on this computer for about 5 minutes; graphics-heavy apps may slow down.</p>
+          <p className="text-[11px] text-amber-100">Loads {node.model} on this computer. It usually takes a few minutes and stops itself after 20 minutes; graphics-heavy apps may slow down.</p>
           <div className="flex gap-3">
             <button type="button" onClick={() => void start(true)} disabled={starting} className="text-[11px] text-sky-300 hover:underline">Measure now</button>
             <button type="button" onClick={() => setConfirming(false)} className="text-[11px] text-neutral-400 hover:underline">Not now</button>

@@ -782,7 +782,7 @@ test("the hub measurement asks first, offers its result, and prints a save confl
   const hubCard = page.getByRole("textbox", { name: "Name" }).nth(0).locator("xpath=ancestor::div[contains(@class, 'bg-neutral-800/60')][1]");
 
   await hubCard.getByRole("button", { name: "Measure", exact: true }).click();
-  await expect(hubCard).toContainText(/Loads .* on this computer for about 5 minutes; graphics-heavy apps may slow down\./);
+  await expect(hubCard).toContainText(/Loads .* on this computer\. It usually takes a few minutes and stops itself after 20 minutes; graphics-heavy apps may slow down\./);
   const startRequest = page.waitForRequest((request) => request.url().endsWith("/api/lab/fit") && request.method() === "POST");
   await hubCard.getByRole("button", { name: "Measure now", exact: true }).click();
   expect((await startRequest).postDataJSON()).toEqual({ node: "hub", confirmHub: true });
@@ -796,6 +796,31 @@ test("the hub measurement asks first, offers its result, and prints a save confl
   expect((await patchRequest).postDataJSON()).toEqual({ contextLength: 16384, ifVersion: "fixture-version-1" });
   await expect(panel).toContainText("The settings changed since you opened them. Reload and try again.");
   await expect(panel.getByRole("button", { name: "Reload", exact: true })).toBeVisible();
+});
+
+test("a machine on this computer that is not the hub asks before it is measured", async ({ page }) => {
+  await page.route("**/api/lab/fit", async (route) => {
+    const request = route.request();
+    if (request.method() !== "POST" || request.postDataJSON().confirmHub) return route.fallback();
+    return route.fulfill({
+      status: 409,
+      contentType: "application/json",
+      body: JSON.stringify({ reason: "Measuring this computer needs confirmation.", needsConfirmation: true }),
+    });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Config", exact: true }).click();
+  await page.getByRole("button", { name: /^Machines/ }).click();
+  const workerCard = page.getByRole("textbox", { name: "Name" }).nth(1).locator("xpath=ancestor::div[contains(@class, 'bg-neutral-800/60')][1]");
+
+  await workerCard.getByRole("button", { name: "Measure", exact: true }).click();
+  await expect(workerCard).toContainText("Loads model-y on this computer. It usually takes a few minutes and stops itself after 20 minutes; graphics-heavy apps may slow down.");
+  await expect(workerCard).not.toContainText("Measuring this computer needs confirmation.");
+  const startRequest = page.waitForRequest((request) => request.url().endsWith("/api/lab/fit") && request.method() === "POST" && request.postDataJSON().confirmHub === true);
+  await workerCard.getByRole("button", { name: "Measure now", exact: true }).click();
+  expect((await startRequest).postDataJSON()).toEqual({ node: "worker-a", confirmHub: true });
+  await expect(workerCard.getByRole("region", { name: "Context fit measurement" })).toContainText("◉ Measuring");
 });
 
 const approvalId = "d".repeat(32);

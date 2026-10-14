@@ -176,16 +176,34 @@ public sealed class FitProbeServiceTests : IDisposable
     }
 
     [Theory]
-    [InlineData("compatible-node", "compatible API")]
-    [InlineData("vision-node", "vision")]
-    [InlineData("missing-node", "not in the saved settings")]
-    [InlineData("local-node", "needs confirmation")]
-    public void Unsupported_or_unconfirmed_nodes_are_refused(string node, string reason)
+    [InlineData("compatible-node", "compatible API", false)]
+    [InlineData("vision-node", "vision", false)]
+    [InlineData("missing-node", "not in the saved settings", false)]
+    [InlineData("local-node", "needs confirmation", true)]
+    public void Unsupported_or_unconfirmed_nodes_are_refused(string node, string reason, bool needsConfirmation)
     {
         FitProbeStartResult result = Service(new FakeApi()).Start(node);
 
         Assert.Null(result.Job);
         Assert.Contains(reason, result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(needsConfirmation, result.NeedsConfirmation);
+    }
+
+    [Fact]
+    public async Task Only_a_node_on_this_computer_asks_for_confirmation()
+    {
+        FitProbeService service = Service(new FakeApi { MaximumContext = 12288 });
+
+        FitProbeStartResult confirmed = service.Start("local-node", confirmHub: true);
+        Assert.NotNull(confirmed.Job);
+        Assert.False(confirmed.NeedsConfirmation);
+        Assert.Equal("complete", (await WaitFor(service, confirmed.Job.Id)).State);
+
+        ApprovedPlan();
+        FitProbeStartResult remote = service.Start("worker-a");
+        Assert.Null(remote.Job);
+        Assert.Contains("plan", remote.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.False(remote.NeedsConfirmation);
     }
 
     [Fact]
