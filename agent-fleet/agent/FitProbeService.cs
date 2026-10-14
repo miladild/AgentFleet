@@ -318,8 +318,9 @@ internal sealed class FitProbeService
                 finalReason = "The measurement was stopped.";
             }
         }
-        catch (Exception exception) when (exception is HttpRequestException or IOException or JsonException or InvalidOperationException)
+        catch (Exception exception)
         {
+            // Any other error also ends the run as failed: a run that did not finish must never be recorded as complete.
             finalState = "failed";
             finalReason = exception.Message;
             _logger.LogWarning(exception, "A fit measurement for {Node} stopped unexpectedly.", job.Node);

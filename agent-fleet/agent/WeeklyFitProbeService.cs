@@ -130,6 +130,12 @@ internal sealed class WeeklyFitProbeService : BackgroundService
                 continue;
             }
 
+            // Checking a machine can take seconds, so the window may have closed while it was checked.
+            if (!WeeklyFitWindow.IsOpen(LocalNow(), settings))
+            {
+                return;
+            }
+
             lock (_gate)
             {
                 FitProbeStartResult result = _fitProbes.Start(node.Name, force: true);
@@ -218,9 +224,14 @@ internal sealed class WeeklyFitProbeService : BackgroundService
         DateTimeOffset finishedUtc = job.FinishedAtUtc ?? _time.GetUtcNow();
         _state.LastRunUtc = finishedUtc;
 
-        // The history is kept in the order it was written, so the last entry of another run is that run's latest.
+        // The history is kept in the order it was written, so a run's entries are together and the latest run comes last.
+        // Only a run that measured the same sizes is a fair baseline: one stopped early says less, and would hide a regression.
         FitProbeHistoryEntry[] history = _fitProbes.HistoryFor(job.Node, job.Model);
-        string? previousJob = history.LastOrDefault(entry => entry.JobId != job.Id)?.JobId;
+        int[] sizes = history.Where(entry => entry.JobId == job.Id).Select(entry => entry.Context).Order().ToArray();
+        string? previousJob = history
+            .Where(entry => entry.JobId != job.Id)
+            .GroupBy(entry => entry.JobId)
+            .LastOrDefault(run => run.Select(entry => entry.Context).Order().SequenceEqual(sizes))?.Key;
         if (previousJob is null)
         {
             return null;
@@ -279,7 +290,8 @@ internal sealed class WeeklyFitProbeService : BackgroundService
     private IReadOnlyList<FleetNodeDefinition> Candidates(DateTimeOffset nowUtc) => _options.Nodes
         .Where(IsWorker)
         .Select(node => (Node: node, LastMeasuredUtc: LastMeasuredUtc(node)))
-        .Where(item => item.LastMeasuredUtc is null || nowUtc - item.LastMeasuredUtc.Value > MaximumAge)
+        // A measurement dated after now cannot be trusted as recent (the clock was set back since), so the machine is measured again.
+        .Where(item => item.LastMeasuredUtc is null || item.LastMeasuredUtc > nowUtc || nowUtc - item.LastMeasuredUtc.Value > MaximumAge)
         .OrderBy(item => item.LastMeasuredUtc.HasValue)
         .ThenBy(item => item.LastMeasuredUtc)
         .Select(item => item.Node)
@@ -292,8 +304,16 @@ internal sealed class WeeklyFitProbeService : BackgroundService
     {
         using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(ProbeTimeout);
-        return await new FitProbe(_clients.CreateClient(FleetHealthMonitor.HttpClientName))
-            .AnyModelLoadedAsync(node.OllamaRoot, timeout.Token);
+        try
+        {
+            return await new FitProbe(_clients.CreateClient(FleetHealthMonitor.HttpClientName))
+                .AnyModelLoadedAsync(node.OllamaRoot, timeout.Token);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // The machine did not answer in time. It is unknown, so the others are checked now and it is tried again later.
+            return null;
+        }
     }
 
     private WeeklyFitRegressionView? RegressionFor(FleetNodeDefinition node)
@@ -311,8 +331,13 @@ internal sealed class WeeklyFitProbeService : BackgroundService
 
     private DateTime LocalNow() => _time.GetLocalNow().DateTime;
 
-    private DateTimeOffset UtcOf(DateTime local) =>
-        new DateTimeOffset(local, _time.LocalTimeZone.GetUtcOffset(local)).ToUniversalTime();
+    // On the night the clocks go back, a local time in the repeated hour means its first occurrence, the summer-time one.
+    private DateTimeOffset UtcOf(DateTime local)
+    {
+        TimeZoneInfo zone = _time.LocalTimeZone;
+        TimeSpan offset = zone.IsAmbiguousTime(local) ? zone.GetAmbiguousTimeOffsets(local).Max() : zone.GetUtcOffset(local);
+        return new DateTimeOffset(local, offset).ToUniversalTime();
+    }
 
     private WeeklyFitState LoadState()
     {
@@ -320,6 +345,9 @@ internal sealed class WeeklyFitProbeService : BackgroundService
         {
             if (File.Exists(_statePath) && JsonSerializer.Deserialize<WeeklyFitState>(File.ReadAllText(_statePath), JsonOptions) is { } saved)
             {
+                // A hand-edited file can hold nulls where the regressions belong. They are dropped, so one bad entry cannot fail every status read.
+                saved.Regressions = (saved.Regressions ?? new()).Where(entry => entry.Value is not null)
+                    .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
                 return saved;
             }
         }

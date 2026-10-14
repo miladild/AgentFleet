@@ -96,6 +96,19 @@ public sealed class WeeklyFitProbeTests : IDisposable
             WeeklyFitWindow.NextOpening(DateTime.Parse(now, CultureInfo.InvariantCulture), SundayMornings));
 
     [Fact]
+    public void On_the_night_the_clocks_go_back_the_window_is_shown_at_its_first_two_oclock()
+    {
+        // On 2026-10-25 the clocks go back at 03:00 summer time, so 02:00 happens twice. The window opens at the first one.
+        TimeZoneInfo central = TimeZoneInfo.FindSystemTimeZoneById("Central European Standard Time");
+        Configure();
+        UseNodes(HubNode, WorkerA);
+
+        WeeklyFitStatus status = Weekly(Fit(), Clock(new DateTimeOffset(2026, 10, 24, 12, 0, 0, TimeSpan.Zero), central)).Status();
+
+        Assert.Equal(new DateTimeOffset(2026, 10, 25, 0, 0, 0, TimeSpan.Zero), status.NextWindowStartUtc);
+    }
+
+    [Fact]
     public async Task The_window_follows_the_machine_clock_not_utc()
     {
         // 00:30 UTC on a Sunday is 02:30 at UTC+2, inside the window. In UTC it is still before the window opens.
@@ -121,6 +134,20 @@ public sealed class WeeklyFitProbeTests : IDisposable
 
         Assert.Empty(fit.List());
         Assert.Empty(_api.Requests);
+    }
+
+    [Fact]
+    public async Task Nothing_starts_once_the_window_has_closed_even_when_checking_an_earlier_machine_runs_past_its_end()
+    {
+        Configure();
+        UseNodes(HubNode, WorkerA, WorkerB);
+        WindowClock clock = Clock(SundayAt(5, 59).AddSeconds(50));
+        _api.OnPs = () => clock.UtcNow = SundayAt(6, 0).AddSeconds(10);
+        FitProbeService fit = Fit();
+
+        await Weekly(fit, clock).TickAsync(CancellationToken.None);
+
+        Assert.Empty(fit.List());
     }
 
     [Fact]
@@ -199,6 +226,20 @@ public sealed class WeeklyFitProbeTests : IDisposable
         Assert.Equal("worker-a", (await RunWeeklyAsync(weekly, fit)).Node);
     }
 
+    [Fact]
+    public async Task A_measurement_dated_in_the_future_does_not_keep_its_machine_out_of_the_weekly_run()
+    {
+        Configure();
+        UseNodes(HubNode, WorkerA);
+        WindowClock clock = Clock(SundayAt(2, 30));
+        SeedHistory("worker-a", "model-x", clock.UtcNow.AddDays(10));
+        FitProbeService fit = Fit();
+
+        await Weekly(fit, clock).TickAsync(CancellationToken.None);
+
+        Assert.Equal("worker-a", Assert.Single(fit.List()).Node);
+    }
+
     [Theory]
     [InlineData(PlanStatus.Running)]
     [InlineData(PlanStatus.Approved)]
@@ -240,6 +281,19 @@ public sealed class WeeklyFitProbeTests : IDisposable
         _api.ExternallyLoaded = false;
         FitProbeJobSnapshot started = await RunWeeklyAsync(weekly, fit);
         Assert.Equal("worker-a", started.Node);
+    }
+
+    [Fact]
+    public async Task A_machine_that_does_not_answer_is_skipped_for_this_wake_up_and_the_others_are_still_measured()
+    {
+        Configure();
+        UseNodes(HubNode, WorkerA, WorkerB);
+        _api.Unresponsive.Add("192.0.2.10");
+        FitProbeService fit = Fit();
+
+        await Weekly(fit, Clock(SundayAt(2, 30))).TickAsync(CancellationToken.None);
+
+        Assert.Equal("worker-b", Assert.Single(fit.List()).Node);
     }
 
     [Fact]
@@ -391,6 +445,50 @@ public sealed class WeeklyFitProbeTests : IDisposable
     }
 
     [Fact]
+    public async Task A_run_that_was_cut_short_is_not_the_baseline_for_the_next_comparison()
+    {
+        UseNodes(HubNode, WorkerA);
+        WindowClock clock = RealWeekClock();
+        var sender = new RecordingSender();
+        FitProbeService fit = Fit();
+        WeeklyFitProbeService weekly = Weekly(fit, clock, sender);
+        await RunWeeklyAsync(weekly, fit);
+
+        clock.UtcNow = clock.UtcNow.AddDays(7);
+        _api.HoldChatFromContext = 24576;
+        await weekly.TickAsync(CancellationToken.None);
+        await _api.ChatStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        string stoppedId = fit.List().Single(job => job.State == "running").Id;
+        Assert.True(fit.Cancel(stoppedId));
+        await WaitUntilAsync(() => fit.List().Single(job => job.Id == stoppedId).State == "cancelled", "The stopped measurement did not stop.");
+        _api.HoldChatFromContext = null;
+
+        clock.UtcNow = clock.UtcNow.AddDays(7);
+        _api.Behaviour = context => (1.0, context == 32768 ? 50 : 100);
+        FitProbeJobSnapshot complete = await RunWeeklyAsync(weekly, fit);
+
+        Assert.Equal("complete", complete.State);
+        WeeklyFitNotice notice = Assert.Single(sender.Notices);
+        Assert.Contains("from 32768 to 24576", notice.Summary);
+    }
+
+    [Fact]
+    public async Task A_measurement_that_stops_on_an_unexpected_error_is_recorded_as_failed_not_as_a_complete_run()
+    {
+        Configure();
+        UseNodes(HubNode, WorkerA);
+        _api.BreakTags = true;
+        FitProbeService fit = Fit();
+        WeeklyFitProbeService weekly = Weekly(fit, Clock(SundayAt(2, 30)));
+
+        await weekly.TickAsync(CancellationToken.None);
+        await WaitUntilAsync(() => fit.List().Single().State != "running", "The measurement did not stop.");
+
+        Assert.Equal("failed", fit.List().Single().State);
+        Assert.Null(weekly.Status().LastRunUtc);
+    }
+
+    [Fact]
     public async Task A_regression_that_stays_open_is_announced_once_and_one_that_clears_is_announced_again_later()
     {
         UseNodes(HubNode, WorkerA);
@@ -488,6 +586,19 @@ public sealed class WeeklyFitProbeTests : IDisposable
         Assert.False(status.Enabled);
         Assert.Null(status.NextWindowStartUtc);
         Assert.Null(status.LastRunUtc);
+    }
+
+    [Fact]
+    public void A_state_file_with_an_empty_regression_entry_does_not_break_the_status()
+    {
+        Configure();
+        UseNodes(HubNode, WorkerA);
+        FitProbeService fit = Fit();
+        File.WriteAllText(StatePath, "{\"regressions\":{\"worker-a\":null}}");
+
+        WeeklyFitStatus status = Weekly(fit, Clock(SundayAt(0, 0))).Status();
+
+        Assert.Null(status.Nodes.Single().Regression);
     }
 
     [Fact]
@@ -735,6 +846,15 @@ public sealed class WeeklyFitProbeTests : IDisposable
 
         public bool HoldChat { get; set; }
 
+        // Holds the reply to a size from this context up, so a measurement can be stopped part way through.
+        public int? HoldChatFromContext { get; set; }
+
+        public HashSet<string> Unresponsive { get; } = new(StringComparer.Ordinal);
+
+        public Action? OnPs { get; set; }
+
+        public bool BreakTags { get; set; }
+
         public TaskCompletionSource ChatStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public IReadOnlyList<(string Host, string Path)> Requests
@@ -750,7 +870,21 @@ public sealed class WeeklyFitProbeTests : IDisposable
             string body = request.Content is null ? string.Empty : await request.Content.ReadAsStringAsync(cancellationToken);
             string path = request.RequestUri!.AbsolutePath;
             lock (_gate) _requests.Add((request.RequestUri.Host, path));
-            if (path == "/api/chat" && HoldChat)
+            if (path == "/api/tags" && BreakTags)
+            {
+                throw new NotSupportedException("The server answered in a form this probe does not expect.");
+            }
+
+            if (path == "/api/ps")
+            {
+                OnPs?.Invoke();
+                if (Unresponsive.Contains(request.RequestUri.Host))
+                {
+                    await Task.Delay(Timeout.Infinite, cancellationToken);
+                }
+            }
+
+            if (path == "/api/chat" && (HoldChat || (HoldChatFromContext is { } from && ContextOf(body) >= from)))
             {
                 ChatStarted.TrySetResult();
                 await Task.Delay(Timeout.Infinite, cancellationToken);
@@ -787,6 +921,12 @@ public sealed class WeeklyFitProbeTests : IDisposable
                 return "{\"models\":[{\"name\":\"model-x:latest\",\"size\":100,\"size_vram\":" +
                        share.ToString(CultureInfo.InvariantCulture) + "}]}";
             }
+        }
+
+        private static int ContextOf(string body)
+        {
+            using JsonDocument request = JsonDocument.Parse(body);
+            return request.RootElement.GetProperty("options").GetProperty("num_ctx").GetInt32();
         }
 
         private string Chat(string body)
