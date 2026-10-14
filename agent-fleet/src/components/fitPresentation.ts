@@ -23,6 +23,9 @@ export type FitLatestResult = {
   measuredAtUtc: string;
   stale: boolean;
   staleReason: string | null;
+  // The share of the model that had to sit in graphics memory for a size to count as on the card, as the backend
+  // judged this result. A backend that does not send it is read with DEFAULT_FULL_CARD_SHARE.
+  fullFitShare?: number;
 };
 
 export type SetupFitSummary = {
@@ -41,12 +44,17 @@ function measuredDate(value: string): string {
     : new Intl.DateTimeFormat("en-NZ", { day: "numeric", month: "short", timeZone: "UTC" }).format(date);
 }
 
-// A size counts as sitting on the card only when this size's own share is high; the recommendation's flag looks at
-// the smallest size, so a larger size can spill even when that flag is false.
-export const FULL_CARD_SHARE = 0.9;
+export const DEFAULT_FULL_CARD_SHARE = 0.9;
 
-function sizeIsFullyOnCard(point: FitSizeResult | undefined): boolean {
-  return point?.gpuShare == null || point.gpuShare >= FULL_CARD_SHARE;
+function fullCardShare(result: FitLatestResult): number {
+  const share = result.fullFitShare;
+  return typeof share === "number" && Number.isFinite(share) && share > 0 && share <= 1 ? share : DEFAULT_FULL_CARD_SHARE;
+}
+
+// A size counts as sitting on the card only when this size's own share is high enough; the recommendation's flag looks
+// at the smallest size, so a larger size can spill even when that flag is false.
+function sizeIsFullyOnCard(point: FitSizeResult | undefined, result: FitLatestResult): boolean {
+  return point?.gpuShare == null || point.gpuShare >= fullCardShare(result);
 }
 
 export function formatFitLine(result: FitLatestResult | null): string {
@@ -63,7 +71,7 @@ export function formatFitLine(result: FitLatestResult | null): string {
   const point = result.results.find((item) => item.context === recommendation.context);
   const fit = recommendation.doesNotFullyFit
     ? "does not fully fit on the graphics card"
-    : sizeIsFullyOnCard(point)
+    : sizeIsFullyOnCard(point, result)
       ? "stays on the graphics card"
       : "runs partly on the processor";
   const share = point?.gpuShare === null || point?.gpuShare === undefined
@@ -129,7 +137,7 @@ export function formatSetupFitSummary(model: string, result: FitLatestResult | n
   }
 
   const point = result.results.find((item) => item.context === context);
-  if (!sizeIsFullyOnCard(point)) {
+  if (!sizeIsFullyOnCard(point, result)) {
     return {
       line: `Measured on this computer: ${size} runs partly on the processor.`,
       replacesStaticReason: true,

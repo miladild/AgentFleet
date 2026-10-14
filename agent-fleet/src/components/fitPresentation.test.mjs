@@ -80,3 +80,27 @@ test("setup measurements are shown only for their model and stale results replac
     replacesStaticReason: true,
   });
 });
+
+test("the share that counts as on the card is the one the backend judged the result by", () => {
+  const withShare = (gpuShare, extra = {}) => ({ ...measured, results: [{ ...measured.results[0], gpuShare }], ...extra });
+
+  // Nothing sent: the long-standing 90% applies.
+  assert.match(formatFitLine(withShare(0.8)), /runs partly on the processor/);
+  assert.match(formatFitLine(withShare(0.9)), /stays on the graphics card/);
+
+  // A lower configured share counts the same size as on the card; a higher one moves it off.
+  assert.match(formatFitLine(withShare(0.8, { fullFitShare: 0.75 })), /stays on the graphics card/);
+  assert.match(formatFitLine(withShare(0.95, { fullFitShare: 0.97 })), /runs partly on the processor/);
+
+  // A value that is not a share is ignored.
+  for (const nonsense of [0, -1, 1.5, Number.NaN, "0.5", null]) {
+    assert.match(formatFitLine(withShare(0.8, { fullFitShare: nonsense })), /runs partly on the processor/);
+  }
+
+  // The setup summary uses the same share.
+  assert.equal(formatSetupFitSummary("model-x", withShare(0.8)).replacesStaticReason, true);
+  assert.deepEqual(formatSetupFitSummary("model-x", withShare(0.8, { fullFitShare: 0.75 })), {
+    line: "Measured on this computer: 16K stays on the graphics card.",
+    replacesStaticReason: false,
+  });
+});

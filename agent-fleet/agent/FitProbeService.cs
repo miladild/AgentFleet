@@ -31,6 +31,10 @@ internal sealed record FitProbeJobSnapshot(
 /// <summary>NeedsConfirmation is set only for a refusal of a machine on this computer, so the browser can ask before it measures.</summary>
 internal sealed record FitProbeStartResult(FitProbeJobSnapshot? Job, string? Reason, bool NeedsConfirmation = false);
 
+/// <summary>
+/// <see cref="FullFitShare"/> is the share of the model that had to sit in graphics memory for a size to count as fully
+/// on the card when the recommendation was worked out, so the browser words each size the same way the backend judged it.
+/// </summary>
 internal sealed record FitProbeLatestResult(
     string Node,
     string Model,
@@ -38,7 +42,8 @@ internal sealed record FitProbeLatestResult(
     FitRecommendation Recommendation,
     DateTimeOffset MeasuredAtUtc,
     bool Stale,
-    string? StaleReason);
+    string? StaleReason,
+    double FullFitShare = 0.90);
 
 internal sealed record FitProbeHistoryEntry(
     string JobId,
@@ -225,14 +230,16 @@ internal sealed class FitProbeService
         }
 
         FitPoint[] points = run.Select(ToPoint).ToArray();
+        FitThresholds thresholds = Thresholds();
         return new FitProbeLatestResult(
             node.Name,
             newest.Model,
             run.Select(entry => ToResult(entry)).ToArray(),
-            FitProbe.Recommend(points, Thresholds()),
+            FitProbe.Recommend(points, thresholds),
             newest.WhenUtc,
             staleReason is not null,
-            staleReason);
+            staleReason,
+            thresholds.FullFitShare);
     }
 
     private async Task RunAsync(Job job)

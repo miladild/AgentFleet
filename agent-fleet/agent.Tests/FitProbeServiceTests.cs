@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -391,5 +392,22 @@ public sealed class FitProbeServiceTests : IDisposable
 
         Assert.True(latest.Stale);
         Assert.Contains("model changed", latest.StaleReason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task The_latest_result_names_the_share_that_counts_as_fully_on_the_card()
+    {
+        FakeApi api = new() { MaximumContext = 12288 };
+        FitProbeService service = Service(api);
+        await WaitFor(service, service.Start("worker-a").Job!.Id);
+
+        FitProbeLatestResult byDefault = (await service.LatestAsync("worker-a", CancellationToken.None))!;
+        _configStore.Save(_configStore.Current with { Lab = new FleetLabConfig(FullFitShare: 0.60) });
+        FitProbeLatestResult changed = (await service.LatestAsync("worker-a", CancellationToken.None))!;
+
+        Assert.Equal(0.90, byDefault.FullFitShare);
+        Assert.Equal(0.60, changed.FullFitShare);
+        using JsonDocument json = JsonDocument.Parse(JsonSerializer.Serialize(changed, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        Assert.Equal(0.60, json.RootElement.GetProperty("fullFitShare").GetDouble());
     }
 }

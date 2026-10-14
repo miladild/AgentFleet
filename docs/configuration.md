@@ -235,7 +235,7 @@ The optional `lab` object in `fleet.config.json` controls the context-fit recomm
 }
 ```
 
-`minSpeedFraction` is the minimum fraction of the speed at the smallest tested context that a recommended size must keep. `fullFitShare` is the share of the model that must sit on the graphics card: a machine whose model fits at the smallest size is only offered sizes that still fit, and one that already spills at the smallest size is flagged "does not fully fit". For that second case `constrainedSpeedFraction` (the larger of it and `minSpeedFraction` applies) is the stricter speed floor, because each larger size spills more. These defaults keep the recommendation speed-based; they do not score coding ability or rank models.
+`minSpeedFraction` is the minimum fraction of the speed at the smallest tested context that a recommended size must keep. `fullFitShare` is the share of the model that must sit on the graphics card: a machine whose model fits at the smallest size is only offered sizes that still fit, and one that already spills at the smallest size is flagged "does not fully fit". For that second case `constrainedSpeedFraction` (the larger of it and `minSpeedFraction` applies) is the stricter speed floor, because each larger size spills more. The web UI words each size ("stays on the graphics card" or "runs partly on the processor") by the same `fullFitShare`, which the latest measurement carries. These defaults keep the recommendation speed-based; they do not score coding ability or rank models.
 
 For the web UI (`agent-fleet\.env.local`, or the environment):
 
