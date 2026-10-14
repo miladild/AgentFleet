@@ -6,7 +6,9 @@
     For every task (and repeat): copies the task's starting project to a scratch folder, makes it a git repository,
     submits the task's steps as a plan to -BaseUrl, approves it with the defaults (or the options given), waits until
     the plan is done or blocked, then runs the task's HIDDEN acceptance tests on what the fleet produced. A run is judged by
-    those tests, not by the plan's own status. Results are written to -OutDir as results.json and summary.md.
+    those tests, not by the plan's own status. Results are written to -OutDir as results.jsonl, results.json and summary.md.
+    run.json is written first: the batch's options and the machines and models it ran on (no addresses or paths), so the
+    results can be grouped by model when they are imported.
 
     It needs a backend with ready machines. Use .\bench\Start-BenchBackend.ps1 for a separate one on port 8010.
 
@@ -113,6 +115,29 @@ function Invoke-Hidden([string]$Project, [string]$HiddenDir, [string]$EvidenceDi
     return [pscustomobject]@{ Ok = ($ok -and $passed -gt 0); Passed = $passed; Failed = $failed; TimedOut = $timedOut; Summary = $summary }
 }
 
+function Get-RunNodes {
+    # Names and models only: the backend's address for a machine is never written to run.json. A failed call gives an
+    # empty list instead of stopping the batch.
+    try {
+        $config = Invoke-RestMethod -Uri "$BaseUrl/api/fleet-config" -TimeoutSec 30
+        return @($config.nodes | Where-Object { $_.name } | ForEach-Object { [ordered]@{ name = [string]$_.name; model = [string]$_.model } })
+    }
+    catch { return @() }
+}
+
+function Write-RunRecord([datetime]$Started, [string[]]$TaskIds) {
+    $record = [ordered]@{
+        startedAtUtc = $Started.ToUniversalTime().ToString('o')
+        options = [ordered]@{
+            tier = $Tier; repeat = $Repeat; workerOnly = [bool]$WorkerOnly; review = $Review
+            autoRetries = $(if ($AutoRetries -ge 0) { $AutoRetries } else { $null })
+            timeoutMinutes = $TimeoutMinutes; tasks = @($TaskIds)
+        }
+        nodes = @(Get-RunNodes)
+    }
+    $record | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $OutDir 'run.json') -Encoding utf8
+}
+
 function Invoke-Run([string]$Id, [int]$Number) {
     $task = Get-Content -LiteralPath (Join-Path $tasksRoot "$Id\task.json") -Raw | ConvertFrom-Json
     $project = Join-Path $scratchRoot "$Id-$Number\project"
@@ -191,7 +216,9 @@ function Invoke-Run([string]$Id, [int]$Number) {
 $batchStarted = Get-Date
 $stopReason = ''
 $results = @()
-foreach ($id in Get-TaskIds) {
+$taskIds = @(Get-TaskIds)
+Write-RunRecord $batchStarted $taskIds
+foreach ($id in $taskIds) {
     for ($run = 1; $run -le $Repeat; $run++) {
         $now = Get-Date
         $awakeMinutes = Get-BatchAwakeMinutes $batchStarted $now

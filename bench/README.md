@@ -14,7 +14,8 @@ those tests, not by the plan saying "done".
 ```
 
 The benchmark uses the machines in your fleet configuration, so they are busy while it runs. `Invoke-Bench.ps1` writes
-`results.json` and `summary.md` under `bench\results\<time>`. Useful options: `-Tasks early-close,slugify`,
+`results.jsonl`, `results.json` and `summary.md` under `bench\results\<time>`, and `run.json` describing the batch
+(see [Importing results](#importing-results)). Useful options: `-Tasks early-close,slugify`,
 `-WorkerOnly` (never use the hub), `-Review off` (no second opinion), `-AutoRetries 0`, `-TimeoutMinutes`, and
 `-Tier light` (send every step at that tier). The eight algorithm tasks are written as `standard`. Two small repairs to
 existing code, `light-display-label` and `light-request-options`, are written as `light` and each changes one helper plus its
@@ -48,6 +49,36 @@ rate for tasks it never reached. Forcing standard tasks to `light` measures a ha
 
 It cannot promise that the models solve every task. It shows, with numbers, how often they do, and whether a failure
 is honest.
+
+## Importing results
+
+`run.json` is written first in each batch folder. It holds when the batch started, the options it used, and the machines
+and models of the backend it ran on: names and models only, no addresses or paths. To keep a finished batch in the
+fleet's own record, send its two files to the backend that should keep them (normally the fleet's backend on port 8000):
+
+```powershell
+$body = @{
+    resultsJsonl = Get-Content -Raw .\bench\results\<time>\results.jsonl
+    run          = Get-Content -Raw .\bench\results\<time>\run.json
+    label        = 'standard tier, worker only'
+} | ConvertTo-Json
+Invoke-RestMethod -Uri http://localhost:8000/api/lab/results/import -Method Post -ContentType 'application/json' -Body $body
+```
+
+The answer says how many runs were imported, how many were already stored (importing the same file again adds nothing)
+and how many lines were skipped because they could not be read. A run whose plan was never created, for example because
+the backend did not answer, has no machine or model to count it under, so it is skipped. `GET /api/lab/models` lists the
+counts by machine and model, and `DELETE /api/lab/results/{importId}` removes one import.
+
+The counts say how many runs each machine and model did and how each one ended. A run is counted as done and correct
+only when its plan finished and the hidden tests passed. A plan that said done while the hidden tests failed is a false
+accept and is counted on its own, never as a success. Parked, timed-out and errored runs are counted as well. A machine
+and model with fewer than five runs is marked too few to judge.
+
+The counts do not rank models, do not measure speed (run times are not shown) and do not promise anything about other
+tasks or settings. Every import still stored is added up, so runs with different tiers or settings add together when they
+share a machine and model. Import only the batches you want to compare, or delete the others. The label helps tell them
+apart.
 
 ## A task
 

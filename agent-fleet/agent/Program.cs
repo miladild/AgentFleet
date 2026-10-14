@@ -1625,6 +1625,9 @@ app.Lifetime.ApplicationStarted.Register(() => _ = weeklyFitProbe.StartAsync(app
 var setupService = new FleetSetupService(fleetConfigStore, fleetOptions, healthMonitor, sandbox, httpClientFactory,
     planStore, fitProbeService, modelRegressionNotifier, weeklyFitProbe);
 
+// Benchmark batches imported by hand (see BenchResults.cs). They sit in the same lab folder as the fit history.
+BenchResultStore benchResults = new(fitProbeService.LabDirectory);
+
 app.MapPost("/api/lab/fit", (FitProbeRequest request) =>
 {
     FitProbeStartResult result = fitProbeService.Start(request.Node, request.Force, request.ConfirmHub);
@@ -1655,6 +1658,35 @@ app.MapGet("/api/lab/scorecards", (int? days) =>
     }
 
     return Results.Json(ModelScorecards.Build(planStore.ListRecords(), sinceUtc));
+});
+
+// The import answers 413 or 400 with a reason when the body cannot be an import. Counts only, never a ranking.
+app.MapPost("/api/lab/results/import", async (HttpRequest request, CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return Results.Json(await benchResults.ImportAsync(request.Body, DateTimeOffset.UtcNow, cancellationToken));
+    }
+    catch (BenchImportRefusedException refused)
+    {
+        return Results.Json(new { error = refused.Message }, statusCode: refused.StatusCode);
+    }
+});
+
+app.MapGet("/api/lab/models", (int? days) =>
+{
+    if (!BenchResultStore.IsValidDays(days))
+    {
+        return Results.BadRequest(new { error = $"days must be between 1 and {BenchResultStore.MaximumDays}." });
+    }
+
+    return Results.Json(benchResults.Models(days, DateTimeOffset.UtcNow));
+});
+
+app.MapDelete("/api/lab/results/{importId}", (string importId) =>
+{
+    int? removed = benchResults.Delete(importId);
+    return removed is null ? Results.NotFound() : Results.Json(new { removed });
 });
 
 IReadOnlyList<string> BackendUrls() =>

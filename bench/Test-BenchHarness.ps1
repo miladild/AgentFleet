@@ -15,7 +15,7 @@ Invoke-Expression $awakeFunction.Extent.Text
 Invoke-Expression $limitFunction.Extent.Text
 $source = $ast.Extent.Text
 if ($ast.ParamBlock.Extent.Text -notmatch '\[double\]\$MaxHours = 4') { throw 'MaxHours must default to four hours.' }
-foreach ($pattern in '\$result\.asleepMinutes\s*=\s*Get-AsleepMinutes', '\| task \| run \| plan \| hidden tests \| minutes \| asleep minutes \|', "stopped: MaxHours", 'Batch stopped: \$stopReason') {
+foreach ($pattern in '\$result\.asleepMinutes\s*=\s*Get-AsleepMinutes', '\| task \| run \| plan \| hidden tests \| minutes \| asleep minutes \|', "stopped: MaxHours", 'Batch stopped: \$stopReason', 'Write-RunRecord\s+\$batchStarted', "'run\.json'") {
     if ($source -notmatch $pattern) { throw "Benchmark timing output is missing: $pattern" }
 }
 $httpCalls = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -in 'Invoke-RestMethod', 'Invoke-WebRequest' }, $true))
@@ -49,6 +49,56 @@ if ((Get-AsleepMinutes $batchStart $batchEnd) -ne 45) { throw 'Kernel-Power 506/
 if ($script:observedPowerFilter.LogName -ne 'System' -or $script:observedPowerFilter.ProviderName -ne 'Microsoft-Windows-Kernel-Power' -or ($script:observedPowerFilter.Id -join ',') -ne '506,507' -or $script:observedPowerFilter.StartTime -ne $batchStart -or $script:observedPowerFilter.EndTime -ne $batchEnd) { throw 'Kernel-Power query did not use the row time window and 506/507 IDs.' }
 if ((Get-BatchAwakeMinutes $batchStart $batchEnd) -ne 75) { throw 'Batch awake time did not subtract sleep.' }
 if ((Test-MaxHours 239.9 4) -or (Test-MaxHours 240 4) -or -not (Test-MaxHours 240.1 4)) { throw 'The MaxHours boundary is wrong.' }
+
+# run.json holds the batch's machines and models: names and models only, never an address or a path. A failed
+# configuration call must still leave the file, with no machines in it. The configuration call is stubbed here.
+$runNodesFunction = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-RunNodes' }, $true)
+$runRecordFunction = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Write-RunRecord' }, $true)
+if (-not $runNodesFunction -or -not $runRecordFunction) { throw 'Get-RunNodes or Write-RunRecord was not found.' }
+Invoke-Expression $runNodesFunction.Extent.Text
+Invoke-Expression $runRecordFunction.Extent.Text
+$script:fleetConfig = $null
+function Invoke-RestMethod {
+    param([string]$Uri, [int]$TimeoutSec)
+    if ($Uri -notlike '*/api/fleet-config' -or $TimeoutSec -ne 30) { throw "Unexpected request: $Uri" }
+    if ($null -eq $script:fleetConfig) { throw 'The fleet configuration is not reachable.' }
+    $script:fleetConfig
+}
+$runPrefix = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'agent-fleet-bench-run-'))
+$runScratch = $runPrefix + [Guid]::NewGuid().ToString('N')
+$BaseUrl = 'http://192.0.2.10:8010'
+$OutDir = Join-Path $runScratch 'out'
+$Tier = 'as-written'; $Repeat = 2; $WorkerOnly = $true; $Review = 'auto'; $AutoRetries = -1; $TimeoutMinutes = 120
+try {
+    New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+    $script:fleetConfig = [pscustomobject]@{ version = 3; nodes = @(
+        [pscustomobject]@{ name = 'node-one'; url = 'http://192.0.2.11:11434/v1'; model = 'model-alpha:7b' },
+        [pscustomobject]@{ name = 'node-two'; url = 'http://192.0.2.12:11434/v1'; model = 'model-beta:3b' }) }
+    # The raw text is checked: ConvertFrom-Json turns date strings into local DateTime values, which hides the UTC form.
+    Write-RunRecord ([datetime]::SpecifyKind([datetime]'2026-10-14T09:00:00', [DateTimeKind]::Utc)) @('semver-compare', 'slugify')
+    $runText = Get-Content -LiteralPath (Join-Path $OutDir 'run.json') -Raw
+    $run = $runText | ConvertFrom-Json
+    if ($runText -notmatch '"startedAtUtc":\s*"2026-10-14T09:00:00(\.\d+)?Z"') { throw 'run.json does not record the batch start in UTC.' }
+    if (($run.options.tasks -join ',') -ne 'semver-compare,slugify' -or $run.options.repeat -ne 2 -or $run.options.workerOnly -ne $true -or $null -ne $run.options.autoRetries) { throw 'run.json options are wrong.' }
+    $nodePairs = @($run.nodes | ForEach-Object { "$($_.name)=$($_.model)" })
+    if (($nodePairs -join ' ') -ne 'node-one=model-alpha:7b node-two=model-beta:3b') { throw "run.json nodes are wrong: $($nodePairs -join ' ')" }
+    foreach ($leak in '192\.0\.2\.', 'http', '11434', [regex]::Escape($runScratch)) {
+        if ($runText -match $leak) { throw "run.json holds an address or a path: $leak" }
+    }
+    $script:fleetConfig = $null
+    Write-RunRecord ([datetime]::SpecifyKind([datetime]'2026-10-14T10:00:00', [DateTimeKind]::Utc)) @('slugify')
+    $failedText = Get-Content -LiteralPath (Join-Path $OutDir 'run.json') -Raw
+    $run = $failedText | ConvertFrom-Json
+    if (@($run.nodes).Count -ne 0 -or $failedText -notmatch '"startedAtUtc":\s*"2026-10-14T10:00:00') { throw 'A failed configuration call must still leave run.json, with no machines.' }
+    Write-Host 'PASS: run.json holds names and models only, and a failed configuration call leaves it without machines.' -ForegroundColor Green
+}
+finally {
+    if (Test-Path -LiteralPath $runScratch) {
+        $resolved = (Resolve-Path -LiteralPath $runScratch).Path
+        if ($resolved -ne $runScratch -or -not $resolved.StartsWith($runPrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Refusing cleanup outside the test scratch directory.' }
+        Remove-Item -LiteralPath $resolved -Recurse -Force
+    }
+}
 
 $prefix = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'agent-fleet-bench-harness-'))
 $scratch = $prefix + [Guid]::NewGuid().ToString('N')
