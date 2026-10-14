@@ -115,8 +115,15 @@ if (-not $SkipFleet) {
     Write-Step 'Scripts, docs and license'
     $scripts = 'Start-Fleet.ps1', 'start-fleet.sh', 'Install-Autostart.ps1', 'Install-FleetToolchains.ps1', 'install-autostart.sh', 'Test-Fleet.ps1', 'Add-FleetNode.ps1',
         'Get-FleetModels.ps1', 'Setup-Worker.ps1', 'setup-worker.sh', 'Setup-WorkerWorkspace.ps1', 'setup-worker-workspace.sh', 'FleetCommon.ps1'
+    if ($Runtime -like 'win-*') { $scripts += 'Install-FleetTray.ps1' }
     $null = New-Item -ItemType Directory -Path (Join-Path $stage 'scripts')
     foreach ($script in $scripts) { Copy-Item (Join-Path $root "scripts/$script") (Join-Path $stage 'scripts') }
+    if ($Runtime -like 'win-*') {
+        $trayFiles = @('Fleet-Tray.ps1','FleetTray.Functions.ps1','AgentFleet.ico','New-FleetIcon.ps1')
+        $trayStage = Join-Path $stage 'scripts\tray'
+        $null = New-Item -ItemType Directory -Path $trayStage
+        foreach ($file in $trayFiles) { Copy-Item -LiteralPath (Join-Path $root "scripts\tray\$file") -Destination $trayStage }
+    }
     Copy-Tracked 'docs' $stage
     Copy-Item (Join-Path $root 'LICENSE') $stage
     Copy-Item (Join-Path $web 'fleet.config.example.json') $stage

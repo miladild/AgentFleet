@@ -23,8 +23,8 @@ If you only want to use the fleet, not change it, take the ready-built download 
 1. Install [Node.js 20 or newer](https://nodejs.org), and [Ollama](https://ollama.com) if this computer will run a
    model. No .NET, no build tools. (Forgot Ollama? The web UI tells you.)
 2. Unpack `AgentFleet-<version>-win-x64.zip` (or the `linux-x64.tar.gz`) somewhere it can stay.
-3. Windows: double-click **Start Agent Fleet.cmd** in that folder. Linux or macOS: `bash scripts/start-fleet.sh`. Keep
-   the window open; the web UI opens in your browser when it is ready (<http://localhost:3000>).
+3. Windows: double-click **Start Agent Fleet.cmd** in that folder; it leaves the tray icon running. Linux or macOS:
+   `bash scripts/start-fleet.sh`, keeping that terminal open. The web UI opens in your browser (<http://localhost:3000>).
 4. The first time, a **Welcome** box points to [the Setup tab](#the-setup-tab). It suggests a model that suits this
    computer and downloads it with one button.
 
@@ -199,6 +199,21 @@ without changing anything. The logs are in `journalctl --user -u agent-fleet-bac
 
 The Linux path was tested on Ubuntu 24.04 (install, reboot, update, `--at-boot`, uninstall). The macOS path is written to
 the same plan but has not been run on a Mac yet.
+
+## The tray icon and the shortcut
+
+The tray uses a direct hidden PowerShell launch with `-STA`. A second launch opens the existing tray instance.
+
+On Windows, installation adds an **Agent Fleet** shortcut under the **Agent Fleet** Start Menu folder and an icon in
+the notification area near the clock. Windows may hide a new icon under the up-arrow; drag it onto the bar to keep it
+visible. To add the tray to an existing install, run `.\scripts\Install-FleetTray.ps1` from a lasting scripts folder.
+
+**Open Agent Fleet**, or a double-click on the icon, opens the web UI and starts the fleet if it is closed.
+**Close Agent Fleet** stops it and exits the tray. If a plan is running or approved, Close asks first; the default is No.
+With the usual scheduled-task installation, Close also disables repeated and logon starts, so it stays closed after a
+reboot until you use the Start Menu shortcut again. In service mode, Open and Close start and stop the services.
+`Install-FleetTray.ps1 -DesktopShortcut` adds a Desktop copy; `-Uninstall` removes the tray and shortcuts while keeping
+the fleet. Linux and macOS keep their existing startup behavior.
 
 ## Where things live
 

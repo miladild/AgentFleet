@@ -23,7 +23,20 @@ dry-run option (`-DryRun` in PowerShell, `--dry-run` in shell scripts). Get Powe
 | `Build-Release.ps1` | when making a release (PowerShell 7) | Builds the downloads: the fleet for one platform, and the VS Code extension. GitHub Actions publishes when `agent-fleet/package.json` gets a new version on `main`; pushing a matching `v*` tag also publishes. Manual workflow runs build without publishing |
 | `install-autostart.sh` | on a Linux or macOS hub, as yourself | Builds, publishes and registers the fleet as user services that start at login (systemd user units, launchd agents); run again to update, `--uninstall` to remove |
 | `FleetCommon.ps1` | not run directly | Helpers the other scripts share |
+| `Install-FleetTray.ps1` | Windows, for an existing install | Adds the tray, Start Menu shortcut and logon task; supports `-DesktopShortcut`, `-DryRun` and `-Uninstall` |
+| `tray/Fleet-Tray.ps1` | Windows, through the shortcut | The notification-area icon and direct hidden PowerShell launch with `-STA` |
+| `tray/FleetTray.Functions.ps1` | not run directly | Shared install discovery and tray decisions with injectable actions for checks |
+| `tray/New-FleetIcon.ps1` | Windows, when reproducing the icon | Draws the multi-size icon and local PNG previews with the system drawing library |
+| `tray/Test-FleetTray.ps1`, `tray/Test-FleetTray.Windows.ps1`, `tray/Test-FleetTray.Package.ps1`, `tray/Test-FleetTray.Docs.ps1` | Windows, when checking tray changes | Fake logic checks, isolated Windows integration, release file-list and documentation checks |
 | `workstation/` | optional | Hardware inventory and Windows tuning helpers for an AI workstation. Not needed to run the fleet. |
+
+## The Windows tray
+
+The tray offers **Open Agent Fleet** and **Close Agent Fleet**. Open shows the web UI and starts a closed fleet;
+Close disables its repeating tasks and stops it. Use the **Agent Fleet** Start Menu shortcut to start it again.
+`Install-Autostart.ps1` adds the tray unless you pass `-NoTray`; `Install-FleetTray.ps1` adds it to an existing install.
+Remove the tray with `Install-FleetTray.ps1 -Uninstall`. Its `fleet-install.json` record lives in the install root.
+Linux and macOS keep their existing startup behavior.
 
 ## The usual order
 

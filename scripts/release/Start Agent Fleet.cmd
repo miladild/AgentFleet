@@ -1,6 +1,9 @@
 @echo off
-rem Starts Agent Fleet from this folder: the backend and the web UI, which opens in your browser.
-rem Double-click this file. Keep the window open while you use the fleet; close it to stop the fleet.
+rem Opens Agent Fleet through the tray when included; older downloads use the console starter.
+if exist "%~dp0scripts\tray\Fleet-Tray.ps1" (
+  start "" powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -STA -File "%~dp0scripts\tray\Fleet-Tray.ps1" --open
+  exit /b
+)
 title Agent Fleet
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Start-Fleet.ps1" %*
 if errorlevel 1 (

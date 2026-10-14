@@ -196,6 +196,35 @@ For the PowerShell scripts in `scripts\`:
 |---|---|---|
 | `AGENT_FLEET_INSTALL_ROOT` | the configured install folder, else the standard application-data folder | Where `Install-Autostart.ps1` installs, and where `Deploy-Fleet.ps1`, `Test-Fleet.ps1`, `Add-FleetNode.ps1` and `Get-FleetModels.ps1` look. `-InstallRoot` on any of them wins. |
 
+## Windows tray configuration
+
+`Install-FleetTray.ps1` writes `fleet-install.json` in the install root, alongside the `backend` folder. The tray reads
+this record to find the install and its two programs. It contains no credentials. When it is absent, the tray derives
+the location and addresses from the registered backend and frontend, using the shared install resolver. An uninstalled
+release folder with `backend\AgentFleet.exe` beside `scripts` can also be opened as a portable install.
+
+| Field | Meaning |
+|---|---|
+| `installRoot` | Absolute install folder |
+| `backendUrl` | Backend address used for health and plan checks |
+| `webUrl` | Web UI address opened in the browser |
+| `backendTask` | Backend scheduled task name, or service name in Service mode |
+| `frontendTask` | Frontend scheduled task name, or service name in Service mode |
+| `mode` | `Task` or `Service` |
+| `version` | Version recorded by the installer |
+
+`scripts\Install-FleetTray.ps1` adds or updates the tray registration without rebuilding or copying the fleet. It
+supports `-InstallRoot`, `-BackendName`, `-FrontendName`, `-TrayName`, `-DesktopShortcut`, `-DryRun` and `-Uninstall`.
+The task and shortcuts launch the tray directly with
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -STA -File "<scripts>\tray\Fleet-Tray.ps1"`.
+Shortcuts add `--open` and use a minimized window style. `--open` opens or starts the fleet and
+`--close` closes it. `Install-Autostart.ps1` adds the tray unless `-NoTray` is supplied and removes it on uninstall.
+Keep the scripts folder in place because the task and shortcuts run from it. Linux and macOS are unchanged.
+
+For isolated scripted checks, set `FLEET_TRAY_NO_BROWSER=1` in the tray's environment. Open then records the web URL in
+`<install-root>\tray-open-url.txt`, and the resident tray records its PID in `tray.pid` for cleanup. It launches no
+browser. `-StartMenuFolder` and `-DesktopFolder` let installer checks keep shortcuts in a temporary folder.
+
 ## Ports
 
 | Port | What |

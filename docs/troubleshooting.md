@@ -222,6 +222,32 @@ this.
   `http://localhost:8000`; from another machine it is the hub's address and the hub must listen on the network
   ([security.md](security.md)).
 
+## The tray icon is missing
+
+Before running the Windows integration check, add an antivirus exclusion for its fixed fixture folder
+`C:\fleet-test-tray`. The check prints "Antivirus exclusion needed for this folder before running", refuses to reuse
+an existing folder, and removes its fixture folder when finished. It does not change antivirus settings.
+
+On Windows, check the up-arrow beside the clock. A new notification-area icon may be hidden there; drag it onto the bar.
+When the fleet is closed, a tray launch at logon exits silently. Use the **Agent Fleet** Start Menu shortcut to start it
+again. If the shortcut is missing, run `scripts\Install-FleetTray.ps1` from a lasting scripts folder; `-DryRun` previews
+what it would add. The tray and shortcut are Windows-only.
+
+## Close did not stop everything
+
+If the confirmation for a running or approved plan was answered No, nothing was stopped. Close acts on the install
+recorded in `<install-root>\fleet-install.json`; check its root and task or service names if you have more than one
+install. It stops that install's backend and production web processes. A separate development session is closed from
+its own terminal.
+
+## The fleet starts again after Close
+
+In a scheduled-task install, Close disables both fleet tasks before stopping them. A later install or update can enable
+those tasks again. Check that `fleet-install.json` names the tasks for the install you closed; rerun
+`Install-FleetTray.ps1` with the correct `-InstallRoot`, `-BackendName` and `-FrontendName` if the record is out of date.
+The tray's own logon task can stay enabled: it exits silently while both fleet tasks are disabled. In service mode,
+Close stops services, and their configured boot behavior still applies.
+
 ## Still stuck
 
 Open an issue with the output of `Test-Fleet.ps1` and the last lines of the backend log. Remove anything private first: the

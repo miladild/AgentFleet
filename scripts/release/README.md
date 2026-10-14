@@ -24,8 +24,9 @@ On Linux or macOS, install the required runtimes through that system's package m
 
 ## Start it
 
-Windows: double-click **Start Agent Fleet.cmd** in this folder. Keep its window open while you use the fleet; close it to
-stop the fleet.
+Windows: double-click **Start Agent Fleet.cmd** in this folder. It opens the web UI and leaves the tray icon running.
+The tray launches directly through hidden PowerShell with `-STA`; a second launch opens the existing tray instance.
+Older downloads without the tray keep a console window open; closing that window stops them.
 
 Linux:
 
@@ -44,6 +45,14 @@ The very first start of a new download can be slow: the web UI is about 11,000 s
 may scan each one before it runs. If <http://localhost:3000> does not answer after a minute, give it another minute;
 the next starts take a few seconds. `docs/troubleshooting.md` ("Antivirus") explains how to add an exclusion.
 
+## The Windows tray and shortcut
+
+The tray has **Open Agent Fleet** and **Close Agent Fleet**. Close stops the fleet and disables its repeating tasks;
+the **Agent Fleet** Start Menu shortcut starts it again. Installation adds the shortcut and a logon task for the tray.
+To add these to an existing install, run `scripts\Install-FleetTray.ps1`; remove them with
+`scripts\Install-FleetTray.ps1 -Uninstall`. The install root holds `fleet-install.json`, which records the location and
+addresses used by the tray. Linux and macOS retain their existing startup behavior.
+
 ## Keep it running
 
 ```powershell
@@ -58,7 +67,7 @@ Both run the fleet from this folder, so keep it where it is. `-Uninstall` / `--u
 
 ## Update
 
-Stop the fleet (Ctrl+C, or `Install-Autostart.ps1 -Uninstall`), unpack the new version over this folder, and start it
+Stop the fleet (Close from the Windows tray, Ctrl+C for a console run, or `Install-Autostart.ps1 -Uninstall`), unpack the new version over this folder, and start it
 again. Your settings, conversations and plans (`backend/fleet.config.json`, `backend/contexts`, `backend/plans`,
 `backend/logs`) are not part of the download, so they are kept.
 

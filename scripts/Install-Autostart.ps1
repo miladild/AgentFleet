@@ -40,6 +40,12 @@
 .PARAMETER SkipBuild
     Register or switch autostart using the already-published backend and existing web build. No project code is run.
 
+.PARAMETER NoTray
+    Leave out the Windows tray and Start Menu shortcut. Uninstall still removes the tray registration.
+
+.PARAMETER TrayName
+    The tray logon task name. StartMenuFolder and DesktopFolder can override its shortcut locations for isolated checks.
+
 .EXAMPLE
     .\scripts\Install-Autostart.ps1
 .EXAMPLE
@@ -57,6 +63,10 @@ param(
     [switch]$WebOnLan,
     [switch]$SkipFrontend,
     [switch]$SkipBuild,
+    [switch]$NoTray,
+    [string]$TrayName = 'AgentFleetTray',
+    [string]$StartMenuFolder,
+    [string]$DesktopFolder,
     [switch]$Uninstall,
     [switch]$DryRun
 )
@@ -135,9 +145,13 @@ function Stop-FleetProcesses {
 
 $existingService = Get-Service -Name $BackendName -ErrorAction SilentlyContinue
 $existingTask = Get-ScheduledTask -TaskName $BackendName -ErrorAction SilentlyContinue
+$trayOptions = @{ InstallRoot=$InstallRoot; BackendName=$BackendName; FrontendName=$FrontendName; TrayName=$TrayName; Mode=$Mode; BackendPort=$BackendPort; FrontendPort=$FrontendPort; DryRun=[bool]$DryRun }
+if ($StartMenuFolder) { $trayOptions.StartMenuFolder=$StartMenuFolder }
+if ($DesktopFolder) { $trayOptions.DesktopFolder=$DesktopFolder }
 
 # --- remove -------------------------------------------------------------------------------------
 if ($Uninstall) {
+    & (Join-Path $PSScriptRoot 'Install-FleetTray.ps1') @trayOptions -Uninstall
     Write-Step 'Removing autostart'
     foreach ($name in $BackendName, $FrontendName) {
         if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
@@ -342,3 +356,5 @@ if (-not $DryRun) {
 Write-Host "`nDone. Web UI: http://localhost:$FrontendPort   Backend: http://localhost:$BackendPort" -ForegroundColor Green
 if ($bundle) { Write-Host 'Update: stop it (-Uninstall), unpack a newer download over this folder, run this again. Remove with .\scripts\Install-Autostart.ps1 -Uninstall.' }
 else { Write-Host 'Update later with .\scripts\Deploy-Fleet.ps1. Remove with .\scripts\Install-Autostart.ps1 -Uninstall.' }
+
+if (-not $NoTray) { & (Join-Path $PSScriptRoot 'Install-FleetTray.ps1') @trayOptions }
