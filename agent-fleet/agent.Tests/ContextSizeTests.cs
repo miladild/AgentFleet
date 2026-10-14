@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AgentFleet.Tests;
@@ -374,6 +375,247 @@ public sealed class ContextSizeTests
 
         Assert.Equal(4096, (await client.WithContextAsync(Text(100_000), options, default)).AdditionalProperties!["num_ctx"]);
     }
+
+    // Keeps every line the client logs, with its level, so that the diagnostics can be read back.
+    private sealed class Entries : ILogger
+    {
+        public List<(LogLevel Level, string Text)> Logged { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            Logged.Add((logLevel, formatter(state, exception)));
+    }
+
+    // Answers every call with the same reply, except that a turn holding an exception makes that call throw it.
+    private sealed class Replies(params Exception?[] turns) : IChatClient
+    {
+        public readonly ChatResponse Reply = new(new ChatMessage(ChatRole.Assistant, "answer")) { Usage = new UsageDetails { InputTokenCount = 1000 } };
+        private int _calls;
+
+        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+        {
+            Exception? turn = _calls < turns.Length ? turns[_calls] : null;
+            _calls++;
+            return turn is null ? Task.FromResult(Reply) : Task.FromException<ChatResponse>(turn);
+        }
+
+        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            ChatResponse response = await GetResponseAsync(messages, options, cancellationToken);
+            yield return new ChatResponseUpdate(ChatRole.Assistant, [new TextContent(response.Text), new UsageContent(response.Usage!)]);
+        }
+
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+
+        public void Dispose()
+        {
+        }
+    }
+
+    // Streams one update and then fails, as a model server does when it drops the connection after its first words.
+    private sealed class BreaksMidStream(Exception failure) : IChatClient
+    {
+        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            yield return new ChatResponseUpdate(ChatRole.Assistant, "first words");
+            throw failure;
+        }
+
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+
+        public void Dispose()
+        {
+        }
+    }
+
+    // Far more than the window holds, so the fitter has to shorten it.
+    private static List<ChatMessage> Outgrowing()
+    {
+        List<ChatMessage> conversation = [new(ChatRole.System, "You carry out one plan step."), new(ChatRole.User, "Implement the holidays. " + new string('t', 2_000))];
+        for (int round = 0; round < 20; round++)
+        {
+            conversation.Add(new ChatMessage(ChatRole.Assistant, [new FunctionCallContent($"c{round}", "write_file", new Dictionary<string, object?> { ["path"] = "src/a.ts", ["content"] = new string('w', 3_000) })]));
+            conversation.Add(new ChatMessage(ChatRole.Tool, [new FunctionResultContent($"c{round}", new string('r', 4_000))]));
+        }
+
+        return conversation;
+    }
+
+    private static ContextSizeChatClient LoggingClient(IChatClient inner, Entries logger) =>
+        new(inner, new HttpClient(new Show("{}")) { BaseAddress = new Uri("http://node:11434/") }, "m", 32768, logger);
+
+    [Fact]
+    public async Task A_failed_request_is_reported_once_with_its_status_and_the_error_is_rethrown_as_it_was()
+    {
+        var failure = new HttpRequestException("Response status code does not indicate success: 500 (Internal Server Error).", null, HttpStatusCode.InternalServerError);
+        var logger = new Entries();
+        ContextSizeChatClient client = LoggingClient(new Replies(failure), logger);
+
+        HttpRequestException thrown = await Assert.ThrowsAsync<HttpRequestException>(() => client.GetResponseAsync(Outgrowing()));
+
+        Assert.Same(failure, thrown);
+        string warning = Assert.Single(logger.Logged, entry => entry.Level == LogLevel.Warning).Text;
+        Assert.Contains("HTTP status 500", warning);
+        Assert.Contains("followed a shortening True", warning);
+        Assert.Contains("HttpRequestException: Response status code does not indicate success: 500", warning);
+    }
+
+    [Fact]
+    public async Task A_failed_request_reports_how_much_of_its_start_the_request_before_it_shared()
+    {
+        List<ChatMessage> first =
+        [
+            new(ChatRole.System, "You carry out one plan step."),
+            new(ChatRole.User, "Implement the holidays."),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("c0", "read_file", new Dictionary<string, object?> { ["path"] = "src/a.ts" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("c0", "first file")]),
+            new ChatMessage(ChatRole.Assistant, [new FunctionCallContent("c1", "read_file", new Dictionary<string, object?> { ["path"] = "src/b.ts" })]),
+            new ChatMessage(ChatRole.Tool, [new FunctionResultContent("c1", "second file")])
+        ];
+
+        // The second request keeps the first three messages and changes the fourth.
+        List<ChatMessage> second = [.. first];
+        second[3] = new ChatMessage(ChatRole.Tool, [new FunctionResultContent("c0", "a different first file")]);
+        var logger = new Entries();
+        ContextSizeChatClient client = LoggingClient(new Replies(null, new HttpRequestException("Bad gateway.", null, HttpStatusCode.BadGateway)), logger);
+
+        await client.GetResponseAsync(first);
+        Assert.Empty(logger.Logged);
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => client.GetResponseAsync(second));
+
+        string warning = Assert.Single(logger.Logged).Text;
+        Assert.Contains("shared prefix 3 of 6 messages", warning);
+        Assert.Contains("HTTP status 502", warning);
+        Assert.Contains("previous request", warning);
+        Assert.Contains("followed a shortening False", warning);
+    }
+
+    [Fact]
+    public async Task A_request_is_marked_as_following_a_shortening_only_when_the_fitter_shortened_it()
+    {
+        var logger = new Entries();
+        ContextSizeChatClient client = LoggingClient(new Replies(), logger);
+
+        await client.GetResponseAsync(Text(10_000)); // About 4000 tokens: well inside the window.
+        Assert.Empty(logger.Logged);
+
+        await client.GetResponseAsync(Outgrowing());
+        string report = Assert.Single(logger.Logged, entry => entry.Text.Contains("succeeded")).Text;
+        Assert.Contains("followed a shortening True", report);
+    }
+
+    [Fact]
+    public async Task A_successful_request_returns_the_models_answer_and_logs_no_warning()
+    {
+        var inner = new Replies();
+        var logger = new Entries();
+        ContextSizeChatClient client = LoggingClient(inner, logger);
+
+        ChatResponse plain = await client.GetResponseAsync(Text(10_000));
+        ChatResponse shortened = await client.GetResponseAsync(Outgrowing());
+        var streamed = new List<ChatResponseUpdate>();
+        await foreach (ChatResponseUpdate update in client.GetStreamingResponseAsync(Outgrowing()))
+        {
+            streamed.Add(update);
+        }
+
+        Assert.Same(inner.Reply, plain);
+        Assert.Same(inner.Reply, shortened);
+        Assert.Equal("answer", Assert.Single(streamed).Text);
+        Assert.DoesNotContain(logger.Logged, entry => entry.Level == LogLevel.Warning);
+    }
+
+    [Fact]
+    public async Task A_streamed_request_that_followed_a_shortening_logs_one_success_line_and_no_warning()
+    {
+        var logger = new Entries();
+        ContextSizeChatClient client = LoggingClient(new Replies(), logger);
+
+        await foreach (ChatResponseUpdate _ in client.GetStreamingResponseAsync(Outgrowing()))
+        {
+        }
+
+        string report = Assert.Single(logger.Logged, entry => entry.Text.Contains("succeeded")).Text;
+        Assert.Contains("followed a shortening True", report);
+        Assert.DoesNotContain(logger.Logged, entry => entry.Level == LogLevel.Warning);
+    }
+
+    [Fact]
+    public async Task A_stream_that_fails_partway_is_reported_once_and_the_error_is_rethrown_as_it_was()
+    {
+        var failure = new HttpRequestException("The response ended early.", null, HttpStatusCode.InternalServerError);
+        var logger = new Entries();
+        ContextSizeChatClient client = LoggingClient(new BreaksMidStream(failure), logger);
+        var received = new List<ChatResponseUpdate>();
+
+        HttpRequestException thrown = await Assert.ThrowsAsync<HttpRequestException>(async () =>
+        {
+            await foreach (ChatResponseUpdate update in client.GetStreamingResponseAsync(Text(10_000)))
+            {
+                received.Add(update);
+            }
+        });
+
+        Assert.Same(failure, thrown);
+        Assert.Single(received);
+        string warning = Assert.Single(logger.Logged, entry => entry.Level == LogLevel.Warning).Text;
+        Assert.Contains("HTTP status 500", warning);
+    }
+
+    [Fact]
+    public async Task A_stream_that_fails_before_its_first_update_is_reported_once()
+    {
+        var failure = new HttpRequestException("Connection refused.", null, HttpStatusCode.ServiceUnavailable);
+        var logger = new Entries();
+        ContextSizeChatClient client = LoggingClient(new Replies(failure), logger);
+
+        HttpRequestException thrown = await Assert.ThrowsAsync<HttpRequestException>(async () =>
+        {
+            await foreach (ChatResponseUpdate _ in client.GetStreamingResponseAsync(Text(10_000)))
+            {
+            }
+        });
+
+        Assert.Same(failure, thrown);
+        string warning = Assert.Single(logger.Logged, entry => entry.Level == LogLevel.Warning).Text;
+        Assert.Contains("HTTP status 503", warning);
+    }
+
+    [Fact]
+    public async Task A_request_the_caller_cancels_is_not_reported_as_a_failure()
+    {
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        var logger = new Entries();
+        ContextSizeChatClient client = LoggingClient(new Replies(new OperationCanceledException(cancelled.Token)), logger);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.GetResponseAsync(Text(10_000), null, cancelled.Token));
+
+        Assert.DoesNotContain(logger.Logged, entry => entry.Level == LogLevel.Warning);
+    }
+
+    [Fact]
+    public async Task A_timeout_of_the_http_client_is_reported_as_a_failure()
+    {
+        var timeout = new TaskCanceledException("The request was canceled due to the configured HttpClient.Timeout elapsing.");
+        var logger = new Entries();
+        ContextSizeChatClient client = LoggingClient(new Replies(timeout), logger);
+
+        TaskCanceledException thrown = await Assert.ThrowsAsync<TaskCanceledException>(() => client.GetResponseAsync(Text(10_000)));
+
+        Assert.Same(timeout, thrown);
+        string warning = Assert.Single(logger.Logged, entry => entry.Level == LogLevel.Warning).Text;
+        Assert.Contains("HTTP status none", warning);
+        Assert.Contains("TaskCanceledException", warning);
+    }
+
     [Theory]
     [InlineData(null, OllamaNodeClient.DefaultContextLength)]
     [InlineData("16384", 16384)]

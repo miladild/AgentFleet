@@ -1,4 +1,5 @@
 using System.ClientModel;
+using System.Diagnostics;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.Extensions.AI;
@@ -109,11 +110,19 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
     private DateTimeOffset _keptUntil;
     private double _scale = 1.0;
     private readonly IContextWindowFitter _fitter = fitter ?? ClassicContextWindowFitter.Instance;
+    private SentRequest? _lastSent; // Guarded by _gate.
 
     // The latest turns stay whole when a conversation is shortened to fit: the model is in the middle of them.
     internal const int KeepRecentMessages = 6;
 
-    internal sealed record Sized(ChatOptions Options, int Estimate, int Size, bool Chosen, IReadOnlyList<ChatMessage> Messages);
+    internal sealed record Sized(ChatOptions Options, int Estimate, int Size, bool Chosen, IReadOnlyList<ChatMessage> Messages, bool FollowedShortening = false);
+
+    // Diagnostics only. The last request sent, as one hash per message rather than the messages themselves, so that the next
+    // request can say how much of its start it shares with this one.
+    private sealed record SentRequest(int[] Fingerprints, int Estimate, int Size, DateTimeOffset SentAt);
+
+    // One request on its way to the model, with what is reported about it if it fails or follows a shortening.
+    private sealed record Attempt(Sized Prepared, int SharedPrefix, string Previous, Stopwatch Clock);
 
     /// <summary>How much bigger this machine's prompts have turned out than estimated (1 until one did).</summary>
     internal double Scale
@@ -131,7 +140,7 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
     {
         IReadOnlyList<ChatMessage> list = messages as IReadOnlyList<ChatMessage> ?? messages.ToList();
         Sized sized = await PrepareAsync(list, options, cancellationToken);
-        ChatResponse response = await base.GetResponseAsync(sized.Messages, sized.Options, cancellationToken);
+        ChatResponse response = await AskAsync(sized, cancellationToken);
         if (!Observe(sized, response.Usage))
         {
             return response;
@@ -145,7 +154,7 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
         }
 
         logger.LogWarning("Asking {Model} again with {Size} tokens of context instead of {Previous}.", model, bigger.Size, sized.Size);
-        response = await base.GetResponseAsync(bigger.Messages, bigger.Options, cancellationToken);
+        response = await AskAsync(bigger, cancellationToken);
         Observe(bigger, response.Usage);
         return response;
     }
@@ -157,12 +166,19 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
     {
         IReadOnlyList<ChatMessage> list = messages as IReadOnlyList<ChatMessage> ?? messages.ToList();
         Sized sized = await PrepareAsync(list, options, cancellationToken);
+        Attempt attempt = StartAttempt(sized);
         UsageDetails? usage = null;
-        await foreach (ChatResponseUpdate update in base.GetStreamingResponseAsync(sized.Messages, sized.Options, cancellationToken))
+
+        // Read by hand rather than with await foreach: a failure must be reported before it leaves the iterator, and a yield
+        // cannot sit inside a try block that catches.
+        await using IAsyncEnumerator<ChatResponseUpdate> updates = StartStream(attempt, cancellationToken);
+        while (await NextUpdateAsync(updates, attempt, cancellationToken))
         {
-            usage = update.Contents.OfType<UsageContent>().LastOrDefault()?.Details ?? usage;
-            yield return update;
+            usage = updates.Current.Contents.OfType<UsageContent>().LastOrDefault()?.Details ?? usage;
+            yield return updates.Current;
         }
+
+        ReportSuccess(attempt);
 
         // Too late to ask again (the answer is already on its way), but the next request gets the bigger window.
         Observe(sized, usage);
@@ -224,6 +240,7 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
         int ceiling = Math.Min(maximum, await ModelMaximumAsync(cancellationToken) ?? int.MaxValue);
         double scale = Scale;
         int estimate = EstimateTokens(messages, options);
+        bool shortened = false;
         if (estimate * scale + 4096 > ceiling)
         {
             IReadOnlyList<ChatMessage> fitted = await _fitter.FitAsync(messages, options, ceiling - 4096, scale, cancellationToken);
@@ -231,6 +248,7 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
             {
                 int before = estimate;
                 messages = fitted;
+                shortened = true;
                 estimate = EstimateTokens(messages, options);
                 string policy = _fitter.Name == "classic" ? "" : $" using {_fitter.Name}";
                 logger.LogInformation(
@@ -267,7 +285,154 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
         // could hold a machine past the network timeout (measured: a worker ran for over five minutes on one call). 4096
         // tokens is room for a file of a few hundred lines in one write_file call; bigger files are what edit_file is for.
         sized.MaxOutputTokens ??= Math.Min(MaxAnswerTokens, size / 2);
-        return new Sized(sized, estimate, size, Chosen: true, messages);
+        return new Sized(sized, estimate, size, Chosen: true, messages, FollowedShortening: shortened);
+    }
+
+    // The request is sent from here so that a failure can be reported with what it looked like. A failure is logged once,
+    // then rethrown as it was. A success is logged only when the request followed a shortening: the first request after the
+    // start of the conversation changed is the one the logs have to show.
+    private async Task<ChatResponse> AskAsync(Sized sized, CancellationToken cancellationToken)
+    {
+        Attempt attempt = StartAttempt(sized);
+        ChatResponse response;
+        try
+        {
+            response = await base.GetResponseAsync(sized.Messages, sized.Options, cancellationToken);
+        }
+        catch (Exception exception) when (!IsCallerCancellation(exception, cancellationToken))
+        {
+            ReportFailure(attempt, exception);
+            throw;
+        }
+
+        ReportSuccess(attempt);
+        return response;
+    }
+
+    private IAsyncEnumerator<ChatResponseUpdate> StartStream(Attempt attempt, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return base.GetStreamingResponseAsync(attempt.Prepared.Messages, attempt.Prepared.Options, cancellationToken).GetAsyncEnumerator();
+        }
+        catch (Exception exception) when (!IsCallerCancellation(exception, cancellationToken))
+        {
+            ReportFailure(attempt, exception);
+            throw;
+        }
+    }
+
+    private async ValueTask<bool> NextUpdateAsync(IAsyncEnumerator<ChatResponseUpdate> updates, Attempt attempt, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await updates.MoveNextAsync();
+        }
+        catch (Exception exception) when (!IsCallerCancellation(exception, cancellationToken))
+        {
+            ReportFailure(attempt, exception);
+            throw;
+        }
+    }
+
+    // Records the request as the last one sent. The shared start is what tells a request that changed the start of the
+    // conversation (after a shortening, or a new message in front) from one that only added to its end.
+    private Attempt StartAttempt(Sized sized)
+    {
+        int[] fingerprints = new int[sized.Messages.Count];
+        for (int index = 0; index < fingerprints.Length; index++)
+        {
+            fingerprints[index] = Fingerprint(sized.Messages[index]);
+        }
+
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        SentRequest? last;
+        lock (_gate)
+        {
+            last = _lastSent;
+            _lastSent = new SentRequest(fingerprints, sized.Estimate, sized.Size, now);
+        }
+
+        if (last is null)
+        {
+            return new Attempt(sized, 0, "first request on this client", Stopwatch.StartNew());
+        }
+
+        int shared = 0;
+        int comparable = Math.Min(last.Fingerprints.Length, fingerprints.Length);
+        while (shared < comparable && last.Fingerprints[shared] == fingerprints[shared])
+        {
+            shared++;
+        }
+
+        string previous = FormattableString.Invariant($"previous request {(now - last.SentAt).TotalSeconds:0.0} s earlier with num_ctx {last.Size} and about {last.Estimate} tokens");
+        return new Attempt(sized, shared, previous, Stopwatch.StartNew());
+    }
+
+    private void ReportFailure(Attempt attempt, Exception exception)
+    {
+        string error = exception.Message.ReplaceLineEndings(" ");
+        logger.LogWarning(
+            "A request to {Model} failed after {ElapsedMs} ms with HTTP status {Status}: shared prefix {SharedPrefix} of {MessageCount} messages, " +
+            "about {Tokens} tokens, num_ctx {NumCtx}, {ToolCount} tools, followed a shortening {Shortened}, {Previous}. {ErrorType}: {Error}",
+            model, attempt.Clock.ElapsedMilliseconds, StatusOf(exception), attempt.SharedPrefix, attempt.Prepared.Messages.Count,
+            attempt.Prepared.Estimate, attempt.Prepared.Size, attempt.Prepared.Options.Tools?.Count ?? 0, attempt.Prepared.FollowedShortening,
+            attempt.Previous, exception.GetType().Name, error[..Math.Min(200, error.Length)]);
+    }
+
+    private void ReportSuccess(Attempt attempt)
+    {
+        if (!attempt.Prepared.FollowedShortening)
+        {
+            return;
+        }
+
+        logger.LogInformation(
+            "A request to {Model} succeeded after {ElapsedMs} ms with HTTP status ok: shared prefix {SharedPrefix} of {MessageCount} messages, " +
+            "about {Tokens} tokens, num_ctx {NumCtx}, {ToolCount} tools, followed a shortening {Shortened}, {Previous}.",
+            model, attempt.Clock.ElapsedMilliseconds, attempt.SharedPrefix, attempt.Prepared.Messages.Count, attempt.Prepared.Estimate,
+            attempt.Prepared.Size, attempt.Prepared.Options.Tools?.Count ?? 0, attempt.Prepared.FollowedShortening, attempt.Previous);
+    }
+
+    // A caller that stops its own request is not a failure of the model's server; a timeout of the HTTP client is.
+    private static bool IsCallerCancellation(Exception exception, CancellationToken cancellationToken) =>
+        exception is OperationCanceledException && cancellationToken.IsCancellationRequested;
+
+    // The HTTP status when the failure carries one, directly or inside another exception.
+    private static string StatusOf(Exception exception)
+    {
+        HttpRequestException? http = (exception as HttpRequestException) ?? (exception.InnerException as HttpRequestException);
+        return http?.StatusCode is { } status ? $"{(int)status}" : "none";
+    }
+
+    // Diagnostics only: a hash of what a message says, so that requests can be compared without keeping them.
+    private static int Fingerprint(ChatMessage message)
+    {
+        var hash = new HashCode();
+        hash.Add(message.Role);
+        foreach (AIContent content in message.Contents)
+        {
+            switch (content)
+            {
+                case TextContent text:
+                    hash.Add(text.Text);
+                    break;
+                case FunctionCallContent call:
+                    hash.Add(call.CallId);
+                    hash.Add(call.Name);
+                    hash.Add(JsonSerializer.Serialize(call.Arguments));
+                    break;
+                case FunctionResultContent result:
+                    hash.Add(result.CallId);
+                    hash.Add(result.Result?.ToString());
+                    break;
+                default:
+                    hash.Add(content.GetType());
+                    break;
+            }
+        }
+
+        return hash.ToHashCode();
     }
 
     /// <summary>
