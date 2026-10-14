@@ -94,6 +94,12 @@ if (-not $SkipFrontend) {
     Push-Location $web
     try {
         if (-not (Test-Path 'node_modules')) { npm install --no-audit --no-fund; if ($LASTEXITCODE) { throw 'npm install failed' } }
+        # The packages only change when someone installs them. A lockfile newer than the installed tree (a security update,
+        # say) is not in use yet, and installing replaces files the running web UI serves from, so it is left to the owner.
+        $installedLock = Join-Path 'node_modules' '.package-lock.json'
+        if ((Test-Path $installedLock) -and (Get-Item 'package-lock.json').LastWriteTimeUtc -gt (Get-Item $installedLock).LastWriteTimeUtc) {
+            Write-Warn 'package-lock.json is newer than the installed web UI packages, so its updates are not in use yet. To install them: stop the web UI, run "npm ci" in agent-fleet, then deploy again.'
+        }
         npm run build
         if ($LASTEXITCODE) { throw 'npm run build failed' }
     }
