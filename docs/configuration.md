@@ -145,9 +145,9 @@ for the wait.
 
 A call that is rejected, or not answered in time, does not run. The model is told so and carries on, and can say what did not
 run. The web UI shows each waiting call as a card with **Approve** and **Reject** on the chat page and on the live view, so a
-request that arrives while you look at the other page is still seen. A chat in VS Code is asked too and has no card of its
-own: keep the web UI open, or answer through the API. Waiting calls are listed at `GET /api/approvals` and answered with
-`POST /api/approvals/{id}/approve` or `/reject`; see the [HTTP interface](#http-interface).
+request that arrives while you look at the other page is still seen. A chat started from VS Code is asked too: the
+extension shows its own Allow and Refuse prompt for it, and the web UI card still works. Waiting calls are listed at
+`GET /api/approvals` and answered with `POST /api/approvals/{id}/approve` or `/reject`; see the [HTTP interface](#http-interface).
 
 ### `notifyUrl`
 
@@ -183,7 +183,7 @@ machines and OpenAI-compatible servers are not measured either.
 
 When a machine's fit is worse than at its previous measurement of the same model, the Setup tab shows a warning named "Weekly
 fit measurement" with the reason, and, if `notifyUrl` is set, one message goes to that address. The message names the machine
-and the model, gives the old and new numbers, and says it is about speed only, not coding skill. A regression is sent once:
+and the model, gives the reason with the old and new numbers where it has them, and says it is about speed only, not coding skill. A regression is sent once:
 one that is still there the following week is not sent again. The reasons are: the recommended context size went down by at
 least one size, the model no longer fully fits on the graphics card, or the speed at one size fell by more than a quarter.
 A first measurement, or a machine whose model has changed, is never a regression. The last run and any open regression are
@@ -314,7 +314,7 @@ The backend answers these on port 8000. They are what the web UI and the VS Code
 | `GET /api/lab/fit`, `GET /api/lab/fit/latest?node=name`, `POST /api/lab/fit/{id}/cancel` | List recent measurement jobs, get a node's latest result, or cancel a job |
 | `GET /api/lab/weekly` | The weekly fit measurement (see [`weeklyProbe`](#weeklyprobe)): its settings, its next window, its last complete run, and each worker's last measurement and any open regression. Read only |
 | `GET /api/lab/scorecards?days=7` | Count recent plan-step outcomes by machine and model; `days` defaults to 7 and must be 1 to 90 |
-| `POST /api/lab/results/import` | Keep a finished benchmark batch: `{ "resultsJsonl": "...", "run": the run.json content (optional), "models": { "node": "model" } (optional, used when run.json names no machines), "label": up to 80 characters (optional) }`. Answers `{ imported, duplicates, skipped, models }`. A plan already stored counts as a duplicate, so the same file twice adds nothing. `413` for text over 2 MB or a body over 8 MB, `400` for an empty results file or a body that is not an import. See [importing results](../bench/README.md#importing-results) |
+| `POST /api/lab/results/import` | Keep a finished benchmark batch: `{ "resultsJsonl": "...", "run": the run.json content (optional), "models": { "node": "model" } (optional, used when run.json names no machines), "label": up to 80 characters (optional) }`. Answers `{ imported, duplicates, skipped, models }`. A plan already stored counts as a duplicate, so the same file twice adds nothing. `413` for text over 2 MB or a body over 8 MB, `400` for an empty results file, a label over 80 characters, or a body that is not an import. See [importing results](../bench/README.md#importing-results) |
 | `GET /api/lab/models?days=` | Benchmark counts by machine and model: runs, done and correct, false accepts, parked, timed out, errors, distinct tasks, too few to judge, and the last run, plus the imports they came from. `days` (1 to 3650) counts only runs that started in that window (the import time, when the batch start is not recorded); omitted means all. Counts only: no ranking, no fraction, no speed |
 | `DELETE /api/lab/results/{importId}` | Remove one import. `200` with `{ removed }`, or `404` when there is no such import |
 | `PATCH /api/fleet-config/nodes/{name}/context` | Change only one node's `contextLength` with `{ "contextLength": 24576, "ifVersion": "..." }`; a stale version returns `409`. A successful save creates the normal timestamped config backup. |

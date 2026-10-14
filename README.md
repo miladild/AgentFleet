@@ -142,6 +142,7 @@ anything. [docs/security.md](docs/security.md) explains the exact exposure and h
 | [Durable context](docs/context.md) | What the fleet remembers across machines, front ends and restarts, and how to pin a decision |
 | [Tools and MCP](docs/tools-and-mcp.md) | What the assistant can do, adding your own tools |
 | [Configuration](docs/configuration.md) | Every setting in `fleet.config.json` and the environment |
+| [Model lab](docs/model-lab.md) | Which context size fits each machine, weekly checks, benchmark counts and candidate models |
 | [Security](docs/security.md) | What is exposed, and how to keep it small |
 | [Troubleshooting](docs/troubleshooting.md) | A machine turns red, the model is slow, and other common problems |
 | [Architecture](docs/architecture.md) | How it works, for people changing the code |
