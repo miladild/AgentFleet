@@ -126,10 +126,11 @@ Details, including which model suits which machine: [docs/adding-machines.md](do
 
 ## Read this before you expose it to anyone
 
-The fleet has **no login and no approval step**. Anything that can reach the backend can make it read your files and run
-commands with your account's permissions. It is designed for a network you trust, bound to your own machine by default,
-and it must never be reachable from the internet. Plan mode is the safety valve: it makes the assistant look and propose
-before it acts. [docs/security.md](docs/security.md) explains the exact exposure and how to keep it small.
+The fleet has **no login**, and chat has **no approval step** unless you turn on chat approvals. Anything that can reach
+the backend can make it read your files and run commands with your account's permissions. It is designed for a network you
+trust, bound to your own machine by default, and it must never be reachable from the internet. Plan mode is the safety
+valve: it makes the assistant look and propose before it acts, and chat approvals ask before a chat tool call changes
+anything. [docs/security.md](docs/security.md) explains the exact exposure and how to keep it small.
 
 ## Documentation
 

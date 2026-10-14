@@ -184,8 +184,9 @@ To work on a project, give the full path:
 
 You can attach a screenshot: it goes to the vision machine, if one is set up.
 
-There is **no approval step and no folder restriction** outside plan mode:
-tools run immediately with the permissions of the account the backend runs as.
+There is **no folder restriction**, and **no approval step unless you turn one on** (Config, Tools tab): outside plan
+mode, tools run immediately with the permissions of the account the backend runs as. With approvals on, a tool call that can
+change something waits as a card for your Approve or Reject; reading tools and approved plans never wait.
 Use plan mode for anything you would want to look at first.
 
 ## What the fleet remembers
