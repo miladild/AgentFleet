@@ -39,8 +39,14 @@ try {
 
     foreach ($cli in $clis) {
         Write-Step "Installing into $cli"
-        & $cli --uninstall-extension local.agent-fleet-chat 2>&1 | Out-Null
-        & $cli --install-extension $vsix --force 2>&1 | Where-Object { $_ -notmatch 'DEP0169|trace-deprecation' } | ForEach-Object { Write-Info $_ }
+        # The VS Code command line prints a Node deprecation warning on stderr. Windows PowerShell 5.1 turns native stderr
+        # into an error record, which would end this script here, after the install and before the check below.
+        $savedPreference = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try {
+            & $cli --uninstall-extension local.agent-fleet-chat 2>&1 | Out-Null
+            & $cli --install-extension $vsix --force 2>&1 | Where-Object { $_ -notmatch 'DEP0169|trace-deprecation|url.parse|CVEs are not issued|Use `node --trace' } | ForEach-Object { Write-Info "$_" }
+        }
+        finally { $ErrorActionPreference = $savedPreference }
         $listed = @(& $cli --list-extensions --show-versions 2>$null | Where-Object { $_ -like 'local.agent-fleet-chat*' })
         if ($listed.Count -gt 0) { Write-Ok "$cli now has $($listed[0])" } else { Write-Bad "$cli does not list the extension after installing." }
     }
