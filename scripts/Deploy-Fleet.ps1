@@ -10,7 +10,7 @@
     Run it from anywhere:  .\scripts\Deploy-Fleet.ps1
 
 .PARAMETER InstallRoot
-    Where the backend is published. fleet.config.json, sessions and logs live in <InstallRoot>\backend and are
+    Where the backend is published. fleet.config.json, conversations, plans and logs live in <InstallRoot>\backend and are
     never overwritten by a publish. Default: AGENT_FLEET_INSTALL_ROOT, else the folder the registered service or task
     runs from, else the standard application-data folder.
 

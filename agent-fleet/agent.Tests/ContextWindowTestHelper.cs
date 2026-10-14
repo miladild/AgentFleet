@@ -5,7 +5,7 @@ using Microsoft.Extensions.Logging;
 namespace AgentFleet.Tests;
 
 /// <summary>
-/// Test helpers for context window fitter tests. Patterns adapted from planner's review probe.
+/// Test helpers for context window fitter tests.
 /// </summary>
 internal static class ContextWindowTestHelper
 {

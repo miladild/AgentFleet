@@ -115,11 +115,11 @@ test("workspace context rejects control characters and keeps only complete paths
 test("the rest of the chat is what @fleet has not seen, without this request or the fleet's own turns", () => {
   const plan = "1. Add src/slug.js with slugify(text).\n2. Add test/slug.test.js and run node --test.\n" + "Details. ".repeat(40);
   const transcript = [
-    "milad: plan a slug helper for the text-tools project",
+    "dev: plan a slug helper for the text-tools project",
     `GitHub Copilot: Here is the plan:\n${plan}`,
-    "milad: @fleet what is the time on the hub please",
+    "dev: @fleet what is the time on the hub please",
     "Agent Fleet: It is 21:00 on the hub, and all machines are ready for work.",
-    "milad: @fleet run the plan above overnight",
+    "dev: @fleet run the plan above overnight",
     "Agent Fleet: ",
   ].join("\n\n");
 
@@ -136,13 +136,13 @@ test("the rest of the chat is what @fleet has not seen, without this request or 
 });
 
 test("a chat with only @fleet in it has nothing else to add", () => {
-  const transcript = "milad: @fleet list the files in the project folder\n\nAgent Fleet: There are three files: a.js, b.js and c.js, all small.\n\nmilad: @fleet and now?";
+  const transcript = "dev: @fleet list the files in the project folder\n\nAgent Fleet: There are three files: a.js, b.js and c.js, all small.\n\ndev: @fleet and now?";
   assert.equal(otherChatTurns(transcript, "and now?", ["list the files in the project folder", "There are three files: a.js, b.js and c.js, all small."]), null);
-  assert.equal(otherChatTurns("milad: @fleet /plan", "", []), null);
+  assert.equal(otherChatTurns("dev: @fleet /plan", "", []), null);
 });
 
 test("a bare /plan is cut at its @fleet, and a long chat keeps its end", () => {
-  const transcript = `milad: plan it\n\nGitHub Copilot: ${"x".repeat(20000)} THE END\n\nmilad: @fleet /plan\n\nAgent Fleet: `;
+  const transcript = `dev: plan it\n\nGitHub Copilot: ${"x".repeat(20000)} THE END\n\ndev: @fleet /plan\n\nAgent Fleet: `;
   const other = otherChatTurns(transcript, "", []);
   assert.ok(other.endsWith("THE END"));
   assert.ok(other.startsWith("(the start of the chat is cut)"));

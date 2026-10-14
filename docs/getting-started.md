@@ -220,9 +220,8 @@ the fleet. Linux and macOS keep their existing startup behavior.
 | What | Where (development run) | Where (installed, default folder) |
 |---|---|---|
 | Machines, models, tools, settings | `agent-fleet\fleet.config.json` | `<install-root>\backend\fleet.config.json` |
-| Conversations | `agent-fleet\data\sessions\` | `<install-root>\backend\sessions\` |
 | Plans | `agent-fleet\data\plans\` | `<install-root>\backend\plans\` |
-| Durable record (what the fleet remembers) | `agent-fleet\data\contexts\` | `<install-root>\backend\contexts\` |
+| Conversations and what the fleet remembers (the durable record) | `agent-fleet\data\contexts\` | `<install-root>\backend\contexts\` |
 | Logs | `agent\bin\...\logs\` | `<install-root>\backend\logs\` |
 
 Installed on Linux, the same folders are under `~/.local/share/agent-fleet/backend/`; on macOS under

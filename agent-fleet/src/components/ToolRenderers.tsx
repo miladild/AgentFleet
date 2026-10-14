@@ -36,7 +36,7 @@ function CodeBlock({ text }: { text: string }) {
 
 /** Registers renderers for the fleet's tools, replacing plain prose descriptions
  * with a small code-block-style view (path/language header, output or new content
- * below), so tool activity reads more like Copilot/Claude Code's inline diffs than
+ * below), so tool activity reads more like an editor's inline diffs than
  * a wall of text, plus one fallback for every other tool (MCP servers, command
  * tools). Must render inside the CopilotKit provider. */
 export function ToolRenderers() {

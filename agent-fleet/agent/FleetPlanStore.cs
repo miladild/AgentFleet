@@ -9,7 +9,7 @@ namespace AgentFleet;
 /// Plans as files: one JSON document per plan in a "plans" folder next to the running
 /// exe (or FLEET_PLANS_DIR), same convention as sessions/ and logs/ so a redeploy never
 /// overwrites them. Ids are 32 hex characters and validated on every access, which closes
-/// off path traversal the same way the session store does.
+/// off path traversal.
 /// </summary>
 internal sealed partial class FleetPlanStore
 {

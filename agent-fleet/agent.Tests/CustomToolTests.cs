@@ -177,7 +177,7 @@ public sealed class McpImportTests
     }
 
     [Fact]
-    public void Vs_code_claude_and_settings_formats_are_all_read()
+    public void Server_list_formats_from_editors_and_settings_are_all_read()
     {
         Assert.Single(Parse("""{ "servers": { "Docs": { "type": "http", "url": "https://learn.microsoft.com/api/mcp" } } }"""));
         Assert.Single(Parse("""{ "mcpServers": { "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:\\code"] } } }"""));

@@ -33,7 +33,7 @@ public sealed class FailureLocationTests : IDisposable
     public void A_node_stack_frame_from_another_machine_is_found_by_the_tail_of_its_path()
     {
         string output = "TypeError: Cannot read properties of undefined (reading 'split')\n" +
-                        "    at validate (C:\\AgentFleet\\Workspaces\\agentfleet\\plans\\abc\\worker-a\\project\\src\\semver.js:4:28)\n" +
+                        "    at validate (C:\\FleetData\\Workspaces\\agentfleet\\plans\\abc\\worker-a\\project\\src\\semver.js:4:28)\n" +
                         "    at Test.runInAsyncScope (node:async_hooks:227:14)";
 
         string? where = FailureLocation.Describe(output, _root);
@@ -123,7 +123,7 @@ public sealed class FailureLocationTests : IDisposable
     }
 
     [Theory]
-    [InlineData(@"at validate (C:\AgentFleet\Workspaces\agentfleet\plans\0123456789abcdef0123456789abcdef\worker-a\project\src\semver.js:35:28)", @"at validate (src\semver.js:35:28)")]
+    [InlineData(@"at validate (C:\FleetData\Workspaces\agentfleet\plans\0123456789abcdef0123456789abcdef\worker-a\project\src\semver.js:35:28)", @"at validate (src\semver.js:35:28)")]
     [InlineData("at f (/home/runner/Workspaces/plans/0123456789abcdef0123456789abcdef/worker-b/project/test/a.test.js:4:1)", "at f (test/a.test.js:4:1)")]
     [InlineData("nothing to cut: src/a.js:1:1 and plans/short/project/x", "nothing to cut: src/a.js:1:1 and plans/short/project/x")]
     public void A_workers_project_folder_is_taken_off_the_paths_of_its_output(string output, string expected)
