@@ -13,6 +13,7 @@ import {
   type WireMessage,
 } from "./fleetLink";
 import { parkedNotice } from "./planNotices";
+import { approvalText, isHyphenatedGuid, watchApprovals } from "./approvalPrompts";
 
 // Talks directly to the .NET AG-UI backend - no CopilotKit, no Next.js proxy,
 // no Copilot model or tokens involved at any point. The address is the
@@ -30,6 +31,7 @@ function backendBase(): string {
 const backendUrl = () => `${backendBase()}/`;
 const sessionsUrl = () => `${backendBase()}/api/sessions`;
 const plansUrl = () => `${backendBase()}/api/plans`;
+const approvalsUrl = () => `${backendBase()}/api/approvals`;
 const fleetToolsUrl = () => `${backendBase()}/api/fleet-tools`;
 
 // The web UI, for the live view of a plan (see webUiBase).
@@ -44,6 +46,44 @@ async function watchPlanLive(planId?: string, contextId?: string): Promise<void>
   } catch {
     await vscode.env.openExternal(vscode.Uri.parse(url));
   }
+}
+
+// A tool call the backend holds for an answer (the chatApprovals setting) is answered here as well as in the web UI,
+// because a chat started from VS Code has no card there. Only this chat's calls are shown (see includeUnattributed).
+// The returned function ends the watch; the watch also ends by itself when the request is cancelled.
+function watchChatApprovals(threadId: string, token: vscode.CancellationToken): () => void {
+  const controller = new AbortController();
+  const cancellation = token.onCancellationRequested(() => controller.abort());
+  void watchApprovals({
+    threadId,
+    signal: controller.signal,
+    // Only a hyphenated GUID thread id gets a durable context on the backend. Other chats (the model picker's default
+    // mode) have their calls labelled with no chat id, so for them those calls are shown too.
+    includeUnattributed: !isHyphenatedGuid(threadId),
+    list: async () => {
+      const response = await fetch(approvalsUrl(), { signal: controller.signal });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    },
+    decide: async (id, approve) => {
+      const response = await fetch(`${approvalsUrl()}/${encodeURIComponent(id)}/${approve ? "approve" : "reject"}`, {
+        method: "POST",
+      });
+      // 404: the call was already answered or timed out, so there is nothing left to decide.
+      if (!response.ok && response.status !== 404) throw new Error(`HTTP ${response.status}`);
+    },
+    ask: async (item) => {
+      const { message } = approvalText(item);
+      const choice = await vscode.window.showWarningMessage(message, "Allow", "Refuse");
+      if (choice === "Allow") return "approve";
+      if (choice === "Refuse") return "reject";
+      return undefined;
+    },
+  });
+  return () => {
+    controller.abort();
+    cancellation.dispose();
+  };
 }
 
 const PLAN_MARKER = /\[plan:([0-9a-f]{32})\]/;
@@ -1127,6 +1167,7 @@ class FleetLanguageModelProvider implements vscode.LanguageModelChatProvider {
 
     const controller = new AbortController();
     const cancellation = token.onCancellationRequested(() => controller.abort());
+    const stopApprovals = watchChatApprovals(routing.threadId, token);
     try {
       const response = await fetch(backendUrl(), {
         method: "POST",
@@ -1236,6 +1277,7 @@ class FleetLanguageModelProvider implements vscode.LanguageModelChatProvider {
       if (token.isCancellationRequested || (error instanceof Error && error.name === "AbortError")) return;
       progress.report(new vscode.LanguageModelTextPart(`\n\nAgent Fleet error: ${clip(errorText(error), 1600)}`));
     } finally {
+      stopApprovals();
       cancellation.dispose();
     }
   }
@@ -1362,6 +1404,7 @@ const handler: vscode.ChatRequestHandler = async (request, chatContext, stream, 
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     const runId = randomId();
+    const stopApprovals = watchChatApprovals(threadId, token);
     let response: globalThis.Response;
     try {
       response = await fetch(backendUrl(), {
@@ -1380,6 +1423,7 @@ const handler: vscode.ChatRequestHandler = async (request, chatContext, stream, 
         }),
       });
     } catch (error) {
+      stopApprovals();
       stream.markdown(
         `Could not reach the fleet backend at ${backendUrl()} - is it running? Check the "agentFleet.backendUrl" setting if VS Code is on a different machine.\n\n${error}`,
       );
@@ -1387,6 +1431,7 @@ const handler: vscode.ChatRequestHandler = async (request, chatContext, stream, 
     }
 
     if (!response.ok || !response.body) {
+      stopApprovals();
       const details = (await response.text().catch(() => "")).trim();
       stream.markdown(`Fleet backend returned HTTP ${response.status}${details ? `:\n\n${clip(details, 1200)}` : "."}`);
       return chatResult;
@@ -1484,6 +1529,7 @@ const handler: vscode.ChatRequestHandler = async (request, chatContext, stream, 
         stream.markdown(`\n\n**Agent Fleet stream error:** ${clip(errorText(error), 1600)}\n\nUse @fleet /status to check whether a plan is still running.`);
       }
     } finally {
+      stopApprovals();
       reader.releaseLock();
     }
 

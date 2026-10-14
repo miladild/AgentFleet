@@ -138,7 +138,7 @@ third is VS Code's own configuration.
 | Runs | On the hub, inside the backend | On the hub, started by the backend | Through VS Code: a local process it launches, or a remote server it calls |
 | In the web UI at `localhost:3000` | Yes | Yes | **No** |
 | In `@fleet` inside VS Code | Yes | Yes | Yes |
-| Confirmation | No prompt | No prompt | The tool can ask inline through VS Code's native confirmation flow; MCP servers also have a trust prompt |
+| Confirmation | No prompt, unless "Ask before the chat runs a command" is on (then an Allow / Refuse prompt) | No prompt, unless "Ask before the chat runs a command" is on (then an Allow / Refuse prompt) | The tool can ask inline through VS Code's native confirmation flow; MCP servers also have a trust prompt |
 
 The rule of thumb: **`.vscode/mcp.json` configures VS Code, not the fleet.** The
 backend never reads that file. If the web UI should have a tool too, add the MCP
@@ -154,6 +154,11 @@ requests and hands the result back so the fleet can continue. In the `@fleet`
 flow, the extension passes VS Code's chat invocation token to
 `vscode.lm.invokeTool`, so a tool that requests confirmation through its
 `prepareInvocation` hook gets the native inline Continue/Cancel prompt.
+
+When the web UI's "Ask before the chat runs a command" switch is on, a tool call
+that can change something waits for your answer before it runs. The extension
+shows its own Allow and Refuse prompt for the chats it started, and the web UI
+card still works.
 
 ## Editor context
 
