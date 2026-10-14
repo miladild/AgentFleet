@@ -12,6 +12,8 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
 {
     private readonly string _plansDir = Path.Combine(Path.GetTempPath(), "fleet-invoker-plans-" + Guid.NewGuid().ToString("N"));
 
+    private static readonly TimeSpan SafetyLimit = ChatApprovalsTests.SafetyLimit;
+
     private FleetPlanModeService PlanMode(bool on)
     {
         string configPath = Path.Combine(Path.GetTempPath(), $"fleet-{Guid.NewGuid():N}.json");
@@ -24,7 +26,7 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
         return new FleetPlanModeService(configStore, RequestContext);
     }
 
-    private FleetFunctionInvoker NewInvoker(bool planMode = false, int rounds = 25)
+    private FleetFunctionInvoker NewInvoker(bool planMode = false, int rounds = 25, ChatApprovals? approvals = null, bool approvalsOn = false, IReadOnlySet<string>? readOnly = null)
     {
         Directory.CreateDirectory(_plansDir);
         var plans = new FleetPlanStore(new ConfigurationBuilder().AddInMemoryCollection(
@@ -33,7 +35,8 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
         Func<string, string?, CancellationToken, Task<string>> checkCommand = (command, _, _) =>
             Task.FromResult("Exit code: 0\n--- stdout ---\nok");
         var tools = new PlanTools(plans, validator, checkCommand);
-        return new FleetFunctionInvoker(Journal, PlanMode(planMode), plans, new SwappableNameSet(PlanGate.BuiltInReadOnlyTools), tools, NullLogger.Instance, rounds);
+        return new FleetFunctionInvoker(Journal, PlanMode(planMode), plans, new SwappableNameSet(readOnly ?? PlanGate.BuiltInReadOnlyTools), tools, NullLogger.Instance, rounds,
+            approvals, () => approvalsOn);
     }
 
     private sealed class ScriptedModel(Func<int, FunctionCallContent?> call) : IChatClient
@@ -430,5 +433,151 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
         // Verify the journal contains NO ToolResult event for that call
         IReadOnlyList<FleetContextEvent> events = Store.AllEvents(contextId);
         Assert.DoesNotContain(events, e => e.Kind == FleetContextEventKind.ToolResult);
+    }
+
+    // Chat approvals (see ChatApprovals): a chat tool that can change something waits for the user when the setting is on.
+    // The plan runner, read-only tools and the fleet's own bookkeeping never wait.
+
+    private static ChatApprovals NewApprovals(ManualClock? clock = null) =>
+        new(clock ?? new ManualClock(), () => 240, NullLogger.Instance);
+
+    private static ScriptedModel OneWriteCall(string toolName) =>
+        new(round => round == 0
+            ? new FunctionCallContent("c" + round, toolName, new Dictionary<string, object?> { ["path"] = "f", ["content"] = "x" })
+            : null);
+
+    [Fact]
+    public async Task With_chat_approvals_off_a_chat_tool_runs_without_asking()
+    {
+        var approvals = NewApprovals();
+        var invoker = NewInvoker(approvals: approvals, approvalsOn: false);
+        int runs = 0;
+        var tool = AIFunctionFactory.Create((string path, string content) => { runs++; return "wrote"; }, "write_file", "Writes a file.");
+
+        string[] results = await RunAsync(invoker, OneWriteCall("write_file"), tool, runner: false).WaitAsync(SafetyLimit);
+
+        Assert.Equal(1, runs);
+        Assert.Equal("wrote", results[0]);
+        Assert.Empty(approvals.Pending());
+    }
+
+    [Fact]
+    public async Task With_chat_approvals_on_a_chat_tool_waits_for_the_user_and_runs_once_approved()
+    {
+        var approvals = NewApprovals();
+        var invoker = NewInvoker(approvals: approvals, approvalsOn: true);
+        int runs = 0;
+        var tool = AIFunctionFactory.Create((string path, string content) => { runs++; return "wrote"; }, "write_file", "Writes a file.");
+        string contextId = NewContextId();
+
+        Task<string[]> turn = RunAsync(invoker, OneWriteCall("write_file"), tool, runner: false, contextId: contextId);
+        PendingApproval waiting = (await ChatApprovalsTests.WaitForPendingAsync(approvals)).Single();
+
+        Assert.Equal(0, runs);
+        Assert.Equal("write_file", waiting.Tool);
+        Assert.Equal(contextId, waiting.ContextId);
+        Assert.True(approvals.Decide(waiting.Id, approve: true));
+
+        string[] results = await turn.WaitAsync(SafetyLimit);
+        Assert.Equal(1, runs);
+        Assert.Equal("wrote", results[0]);
+    }
+
+    [Fact]
+    public async Task A_rejected_chat_tool_is_not_run_the_model_is_told_and_the_call_is_recorded_as_an_error()
+    {
+        var approvals = NewApprovals();
+        var invoker = NewInvoker(approvals: approvals, approvalsOn: true);
+        int runs = 0;
+        var tool = AIFunctionFactory.Create((string path, string content) => { runs++; return "wrote"; }, "write_file", "Writes a file.");
+        var model = OneWriteCall("write_file");
+        string contextId = NewContextId();
+
+        Task<string[]> turn = RunAsync(invoker, model, tool, runner: false, contextId: contextId);
+        PendingApproval waiting = (await ChatApprovalsTests.WaitForPendingAsync(approvals)).Single();
+        Assert.True(approvals.Decide(waiting.Id, approve: false));
+
+        string[] results = await turn.WaitAsync(SafetyLimit);
+        Assert.Equal(0, runs);
+        Assert.Equal("The user did not approve running write_file.", results[0]);
+        FleetContextEvent recorded = Assert.Single(Store.AllEvents(contextId), e => e.Kind == FleetContextEventKind.ToolResult);
+        Assert.True(ContextText.Bool(recorded.Payload, "isError"));
+        // The turn goes on after a refusal, so the model is asked again to answer.
+        Assert.Equal(2, model.Requests);
+    }
+
+    [Fact]
+    public async Task A_chat_tool_nobody_answers_is_not_run_and_the_model_is_told_it_was_not_approved_in_time()
+    {
+        var clock = new ManualClock();
+        var approvals = NewApprovals(clock);
+        var invoker = NewInvoker(approvals: approvals, approvalsOn: true);
+        int runs = 0;
+        var tool = AIFunctionFactory.Create((string path, string content) => { runs++; return "wrote"; }, "write_file", "Writes a file.");
+
+        Task<string[]> turn = RunAsync(invoker, OneWriteCall("write_file"), tool, runner: false);
+        await ChatApprovalsTests.WaitForPendingAsync(approvals);
+        clock.Advance(TimeSpan.FromSeconds(240));
+
+        string[] results = await turn.WaitAsync(SafetyLimit);
+        Assert.Equal(0, runs);
+        Assert.Equal("write_file was not approved in time.", results[0]);
+        Assert.Empty(approvals.Pending());
+    }
+
+    [Fact]
+    public async Task A_read_only_tool_never_waits_for_approval()
+    {
+        var approvals = NewApprovals();
+        var invoker = NewInvoker(approvals: approvals, approvalsOn: true);
+        int runs = 0;
+        var tool = AIFunctionFactory.Create((string path) => { runs++; return "a.cs"; }, "read_file", "Reads a file.");
+        var model = new ScriptedModel(round =>
+            round == 0 ? new FunctionCallContent("c" + round, "read_file", new Dictionary<string, object?> { ["path"] = "f" }) : null);
+
+        string[] results = await RunAsync(invoker, model, tool, runner: false).WaitAsync(SafetyLimit);
+
+        Assert.Equal(1, runs);
+        Assert.Equal("a.cs", results[0]);
+        Assert.Empty(approvals.Pending());
+    }
+
+    [Fact]
+    public async Task A_plan_runner_call_never_waits_for_approval()
+    {
+        var approvals = NewApprovals();
+        var invoker = NewInvoker(approvals: approvals, approvalsOn: true);
+        int runs = 0;
+        var tool = AIFunctionFactory.Create((string path, string content) => { runs++; return "wrote"; }, "write_file", "Writes a file.");
+
+        string[] results = await RunAsync(invoker, OneWriteCall("write_file"), tool, runner: true).WaitAsync(SafetyLimit);
+
+        Assert.Equal(1, runs);
+        Assert.Equal("wrote", results[0]);
+        Assert.Empty(approvals.Pending());
+    }
+
+    [Theory]
+    [InlineData("propose_plan")]
+    [InlineData("record_decision")]
+    public async Task Fleet_bookkeeping_never_waits_for_approval(string toolName)
+    {
+        var approvals = NewApprovals();
+        // No tool counts as read-only here, so only the bookkeeping exemption can keep these calls from waiting.
+        var invoker = NewInvoker(approvals: approvals, approvalsOn: true, readOnly: new HashSet<string>());
+        int runs = 0;
+        var tool = AIFunctionFactory.Create((string value) => { runs++; return "noted"; }, toolName, "Bookkeeping.");
+        int callCount = 0;
+        var model = new ScriptedModel(round =>
+        {
+            callCount++;
+            return callCount <= 1 ? new FunctionCallContent("c" + round, toolName, new Dictionary<string, object?> { ["value"] = "x" }) : null;
+        });
+
+        string[] results = await RunAsync(invoker, model, tool, runner: false).WaitAsync(SafetyLimit);
+
+        Assert.Equal(1, runs);
+        Assert.Equal("noted", results[0]);
+        Assert.Empty(approvals.Pending());
     }
 }

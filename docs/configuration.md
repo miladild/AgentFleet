@@ -32,6 +32,7 @@ fallback, found 2."
   "mcpServers": { ... },
   "sandbox": { ... },
   "history": { "deleteAfterDays": 90 },
+  "chatApprovals": { "enabled": false, "timeoutSeconds": 240 },
   "notifyUrl": "http://192.0.2.10:8080/fleet"
 }
 ```
@@ -128,6 +129,21 @@ How long the durable record keeps chats. See [context.md](context.md#keeping-it-
 | Field | Meaning |
 |---|---|
 | `deleteAfterDays` | Delete a chat and its record once nothing has happened in it for this many days, 1 to 3650. `0` or missing keeps everything. A chat an unfinished plan runs in is kept. |
+
+### `chatApprovals`
+
+Off when missing. When it is on, a tool call the model makes in ordinary chat waits for your answer before it runs. Read-only
+tools never wait, nor do the fleet's own bookkeeping calls (plan proposals, decision pins and record searches). A plan never
+waits: an approved plan runs unattended, as before.
+
+| Field | Meaning |
+|---|---|
+| `enabled` | `true` to ask before a chat tool that can change something runs. Missing or `false` means chat runs tools without a question, as it always has. |
+| `timeoutSeconds` | How long a call waits for an answer before it is refused. Missing means 240. A value outside 30 to 280 is brought into that range: the web proxy drops a stream that stays silent for 300 seconds, and the chat is silent while a call waits. |
+
+A call that is rejected, or not answered in time, does not run. The model is told so and carries on, and can say what did not
+run. Waiting calls are listed at `GET /api/approvals` and answered with `POST /api/approvals/{id}/approve` or `/reject`; see
+the [HTTP interface](#http-interface).
 
 ### `notifyUrl`
 
@@ -248,6 +264,8 @@ The backend answers these on port 8000. They are what the web UI and the VS Code
 | `POST /api/plans/{id}/approve`, `/reject`, `/stop` | Act on a plan. Approve accepts `recoveryScope` (`allow-hub-rescue`, the default, or `worker-only`), `healChecks` (`auto`, the default, or `ask`), `autoRetries` (0 to 5, default 2: how many times a parked step is retried by the fleet itself before it waits for you), and `review` (`auto` or `off`, default `off`: whether a second opinion reviewer reads each step's changed files) |
 | `POST /api/plans/{id}/retry?step=`, `/skip?step=` | Try one parked or stopped step again with a fresh repair ladder, or count it as done without its check; the rest of the plan is left alone |
 | `POST /api/plans` | Save a plan written elsewhere (the VS Code extension's Copilot tool uses it): `title`, `goal`, `workingDirectory` and `steps` as in `propose_plan`; each step may also include optional `retries` (0 to 5), `rescue` (`worker-only` or `allow-hub-rescue`), and `review` (`off` or `auto`) to override the plan's settings for that step only; unknown values are ignored. `dryRun` only reviews it, `approve` starts it. A plan that would fail is refused with its `problems` |
+| `GET /api/approvals` | Chat tool calls waiting for an answer (see [`chatApprovals`](#chatapprovals)): each one's id, chat, tool, arguments, the times, and `secondsLeft` |
+| `POST /api/approvals/{id}/approve`, `/reject` | Answer one waiting call. `200` with `{"decided": true}`, or `404` when the call is unknown or was already answered or timed out |
 | `GET`, `PUT`, `DELETE /api/sessions[/{id}]` | Saved conversations (the visible chats of the durable record) |
 | `GET /api/contexts[/{id}[/events|deliveries|artifacts|export]]`, `POST .../decisions|compact` | The durable record. See [context.md](context.md) |
 | `GET /api/contexts/storage?olderThanDays=`, `POST /api/contexts/cleanup` | The record's size and a preview of a cleanup; deleting chats not used for a number of days |

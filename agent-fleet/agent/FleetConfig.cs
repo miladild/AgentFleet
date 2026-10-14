@@ -138,13 +138,18 @@ internal sealed record FleetConfig(
     FleetHistoryConfig? History = null,
     IReadOnlyDictionary<string, FleetCustomToolConfig>? CustomTools = null,
     string? NotifyUrl = null,
-    FleetLabConfig? Lab = null)
+    FleetLabConfig? Lab = null,
+    FleetChatApprovalConfig? ChatApprovals = null)
 {
     public const int MaxHistoryDays = 3650;
 
     [System.Text.Json.Serialization.JsonIgnore]
     public IReadOnlyDictionary<string, FleetMcpServerConfig> McpServerMap =>
         McpServers ?? new Dictionary<string, FleetMcpServerConfig>(StringComparer.Ordinal);
+
+    /// <summary>What applies when the file has no chatApprovals block: approval off, and the default wait.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public FleetChatApprovalConfig ChatApprovalSettings => ChatApprovals ?? new FleetChatApprovalConfig();
 
     /// <summary>Tools made from commands in the Config panel (see CustomTools.cs).</summary>
     [System.Text.Json.Serialization.JsonIgnore]
@@ -156,3 +161,20 @@ internal sealed record FleetConfig(
 }
 
 internal sealed record FleetLabConfig(double MinSpeedFraction = 0.70, double FullFitShare = 0.90, double ConstrainedSpeedFraction = 0.80);
+
+/// <summary>
+/// Whether a chat tool that can change something waits for the user before it runs (see ChatApprovals). Off by
+/// default: a chat that runs tools without a question is how the fleet has always behaved. Plan runs are never asked.
+/// </summary>
+/// <param name="Enabled">Ask before a chat tool call that is not read-only runs.</param>
+/// <param name="TimeoutSeconds">
+/// How long a call waits for an answer before it is refused. Kept between 30 and 280 seconds: the web proxy drops a
+/// stream that stays silent for 300 seconds, and the chat is silent while a call waits.
+/// </param>
+internal sealed record FleetChatApprovalConfig(bool Enabled = false, int TimeoutSeconds = 240)
+{
+    public const int MinTimeoutSeconds = 30;
+    public const int MaxTimeoutSeconds = 280;
+
+    public static int ClampTimeout(int seconds) => Math.Clamp(seconds, MinTimeoutSeconds, MaxTimeoutSeconds);
+}

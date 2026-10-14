@@ -353,4 +353,40 @@ public sealed class FleetConfigStoreTests : IDisposable
     {
         Assert.True(Open().Current.IsToolEnabled("something_added_later"));
     }
+
+    [Fact]
+    public void Chat_approvals_are_off_and_wait_four_minutes_when_the_file_has_no_block()
+    {
+        FleetConfig config = Open().Current;
+
+        Assert.Null(config.ChatApprovals);
+        Assert.False(config.ChatApprovalSettings.Enabled);
+        Assert.Equal(240, config.ChatApprovalSettings.TimeoutSeconds);
+    }
+
+    [Theory]
+    [InlineData(5, 30)]
+    [InlineData(240, 240)]
+    [InlineData(900, 280)]
+    public void The_chat_approval_wait_is_kept_between_30_and_280_seconds(int written, int expected)
+    {
+        File.WriteAllText(
+            ConfigPath,
+            "{\"triageModel\":\"t\",\"mode\":\"conservative\",\"planModeEnabled\":false,\"nodes\":[{\"name\":\"hub\",\"url\":\"http://127.0.0.1:11434/v1\",\"model\":\"m\",\"purpose\":\"local\",\"tier\":\"heavy\",\"fallback\":true}],\"tools\":{},\"chatApprovals\":{\"enabled\":true,\"timeoutSeconds\":" + written + "}}");
+
+        FleetChatApprovalConfig settings = Open().Current.ChatApprovalSettings;
+
+        Assert.True(settings.Enabled);
+        Assert.Equal(expected, settings.TimeoutSeconds);
+    }
+
+    [Fact]
+    public void A_saved_chat_approval_setting_is_kept_on_reopen()
+    {
+        FleetConfigStore store = Open();
+
+        store.Save(store.Current with { ChatApprovals = new FleetChatApprovalConfig(Enabled: true, TimeoutSeconds: 120) });
+
+        Assert.Equal(new FleetChatApprovalConfig(Enabled: true, TimeoutSeconds: 120), Open().Current.ChatApprovals);
+    }
 }

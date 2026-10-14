@@ -61,6 +61,11 @@ builder.Services.AddSingleton<FleetRequestContext>();
 builder.Services.AddSingleton<ContextRetentionService>();
 builder.Services.AddSingleton<ModelPullService>();
 builder.Services.AddSingleton<FitProbeService>();
+// Chat tool calls can wait for the user when the config turns that on (see ChatApprovals). The wait is read at each call.
+builder.Services.AddSingleton(services => new ChatApprovals(
+    TimeProvider.System,
+    () => fleetConfigStore.Current.ChatApprovalSettings.TimeoutSeconds,
+    services.GetRequiredService<ILoggerFactory>().CreateLogger("AgentFleet.ChatApprovals")));
 builder.Services.AddHostedService(services => services.GetRequiredService<ContextRetentionService>());
 
 // How much conversation each model sees, when a machine does not set its own (see OllamaNodeClient).
@@ -101,6 +106,7 @@ if (contextStore.RecoveredFrom is { } damagedDatabase)
         "Nothing else was lost: plans, sessions from before the record existed, and the configuration are separate files.", damagedDatabase);
 }
 FleetPlanStore planStore = app.Services.GetRequiredService<FleetPlanStore>();
+ChatApprovals chatApprovals = app.Services.GetRequiredService<ChatApprovals>();
 FitProbeService fitProbeService = app.Services.GetRequiredService<FitProbeService>();
 ILoggerFactory loggerFactory = app.Services.GetRequiredService<ILoggerFactory>();
 
@@ -591,7 +597,8 @@ int planRoundsPerRung = int.TryParse(builder.Configuration["FLEET_PLAN_ROUNDS_PE
     ? roundsPerRung
     : RepairLadder.DefaultRoundsPerRung;
 
-var invoker = new FleetFunctionInvoker(contextJournal, planModeService, planStore, readOnlyTools, planTools, toolLoopLogger, planStepToolRounds);
+var invoker = new FleetFunctionInvoker(contextJournal, planModeService, planStore, readOnlyTools, planTools, toolLoopLogger, planStepToolRounds,
+    chatApprovals, () => fleetConfigStore.Current.ChatApprovalSettings.Enabled);
 IChatClient agentClient = FleetHarness.BuildAgentClient(fleetClient, toolRegistry, contextJournal, planModeService, invoker, loggerFactory);
 
 var fleetAgent = new ChatClientAgent(
@@ -658,11 +665,13 @@ var fleetAgent = new ChatClientAgent(
         concluding you can't help. The fleet has real internet access via web_search
         and web_fetch - don't claim you can't look something up online. Use whichever
         tool actually fits the request rather than describing what you would do.
-        There is no approval step before any tool runs, including run_command and
-        run_git_command - be as careful as if you were typing the command yourself,
-        and confirm with the user before anything destructive or hard to reverse
-        (force-push, reset --hard, deleting files, etc.) rather than guessing what
-        they meant.
+        Tools run as soon as you call them, including run_command and run_git_command,
+        unless the user has turned on approvals: then a call that can change something
+        waits for their answer, and a refused call comes back saying it was not
+        approved. Say what did not run instead of calling it again. Either way, be as
+        careful as if you were typing the command yourself, and confirm with the user
+        before anything destructive or hard to reverse (force-push, reset --hard,
+        deleting files, etc.) rather than guessing what they meant.
         """,
     name: "fleet",
     description: "Local coding assistant routed across the available fleet",
@@ -804,6 +813,7 @@ app.MapGet("/api/fleet-config", () =>
         mcpStatus = toolRegistry.Mcp.Statuses,
         history = new { deleteAfterDays = config.History?.DeleteAfterDays ?? 0 },
         customTools = config.CustomToolMap,
+        chatApprovals = config.ChatApprovalSettings,
         customStatus = toolRegistry.CustomStatuses
     });
 });
@@ -932,6 +942,7 @@ app.MapPut("/api/fleet-config", async (FleetConfigUpdateRequest request, Cancell
                 ? request.McpServers.ToDictionary(kv => kv.Key.Trim(), kv => kv.Value, StringComparer.Ordinal)
                 : current.McpServers,
             History = request.History ?? current.History,
+            ChatApprovals = request.ChatApprovals ?? current.ChatApprovals,
             // Like MCP servers, an empty object is meaningful: it removes every command tool.
             CustomTools = request.CustomTools is not null
                 ? request.CustomTools.ToDictionary(kv => kv.Key.Trim(), kv => kv.Value, StringComparer.Ordinal)
@@ -981,6 +992,7 @@ app.MapPut("/api/fleet-config", async (FleetConfigUpdateRequest request, Cancell
             mcpStatus = toolRegistry.Mcp.Statuses,
             history = new { deleteAfterDays = saved.History?.DeleteAfterDays ?? 0 },
             customTools = saved.CustomToolMap,
+            chatApprovals = saved.ChatApprovalSettings,
             customStatus = toolRegistry.CustomStatuses,
             restartRequired,
             message = machinesChanged
@@ -1166,6 +1178,25 @@ app.MapPost("/api/plans/{id}/reject", (string id) =>
         ? Results.BadRequest(new { error = "This plan is already done." })
         : Results.Json(planStore.Reject(id));
 });
+
+// Chat tool calls waiting for the user (see ChatApprovals). The list is what to decide from; approve or reject answers one
+// call, and the chat that made it carries on. A call that was already answered, or timed out, is not found.
+app.MapGet("/api/approvals", () => Results.Json(chatApprovals.Pending().Select(item => new
+{
+    id = item.Id,
+    contextId = item.ContextId,
+    tool = item.Tool,
+    arguments = item.Arguments,
+    requestedAtUtc = item.RequestedAtUtc,
+    expiresAtUtc = item.ExpiresAtUtc,
+    secondsLeft = item.SecondsLeft(DateTimeOffset.UtcNow)
+})));
+
+app.MapPost("/api/approvals/{id}/approve", (string id) =>
+    chatApprovals.Decide(id, approve: true) ? Results.Json(new { decided = true }) : Results.NotFound());
+
+app.MapPost("/api/approvals/{id}/reject", (string id) =>
+    chatApprovals.Decide(id, approve: false) ? Results.Json(new { decided = true }) : Results.NotFound());
 
 // A plan written outside the fleet, for example by GitHub Copilot in VS Code (the extension's "Run a plan on Agent
 // Fleet" tool). It gets the same review and store as propose_plan, and a durable record of its own, so every machine
@@ -1890,6 +1921,7 @@ internal sealed record FleetConfigUpdateRequest(
     IReadOnlyDictionary<string, FleetMcpServerConfig>? McpServers = null,
     FleetHistoryConfig? History = null,
     IReadOnlyDictionary<string, FleetCustomToolConfig>? CustomTools = null,
+    FleetChatApprovalConfig? ChatApprovals = null,
     string? IfVersion = null);
 
 internal sealed record FleetConfigContextUpdateRequest(int? ContextLength, string? IfVersion = null);

@@ -6,7 +6,8 @@ namespace AgentFleet;
 
 /// <summary>
 /// The tool call invoker policy: enforces plan approval, tool availability by phase,
-/// iteration limits, and termination conditions for plan steps.
+/// iteration limits, termination conditions for plan steps, and, when the config turns it on,
+/// the user's approval of chat tool calls (see ChatApprovals).
 /// </summary>
 internal sealed class FleetFunctionInvoker(
     FleetContextJournal journal,
@@ -15,7 +16,9 @@ internal sealed class FleetFunctionInvoker(
     SwappableNameSet readOnlyTools,
     PlanTools planTools,
     ILogger toolLoopLogger,
-    int planStepToolRounds)
+    int planStepToolRounds,
+    ChatApprovals? chatApprovals = null,
+    Func<bool>? chatApprovalsOn = null)
 {
     public async ValueTask<object?> InvokeAsync(FunctionInvocationContext context, CancellationToken cancellationToken)
     {
@@ -67,6 +70,24 @@ internal sealed class FleetFunctionInvoker(
             context.Arguments["workingDirectory"] = stepFolder;
         }
 
+        // The user answers a chat tool call before it runs, after the gate and the argument fixes above, so the arguments
+        // shown are the ones that run. The plan runner is exempt: an approved plan runs unattended by design.
+        if (!fromRunner && chatApprovals is not null && chatApprovalsOn?.Invoke() == true &&
+            !readOnlyTools.Contains(toolName) && !IsFleetBookkeeping(toolName))
+        {
+            ApprovalDecision decision = await chatApprovals.RequestAsync(
+                journal.Current?.ContextId ?? string.Empty, toolName, SerializeArguments(context), cancellationToken);
+            if (decision != ApprovalDecision.Approved)
+            {
+                // Returned to the model as the tool's result, not as a stop: the model can say what did not run and carry on.
+                string refusal = decision == ApprovalDecision.Rejected
+                    ? $"The user did not approve running {toolName}."
+                    : $"{toolName} was not approved in time.";
+                RecordToolCall(context, toolName, refusal, isError: true);
+                return refusal;
+            }
+        }
+
         try
         {
             object? result = await ToolLoopGuard.InvokeAsync(context, fromRunner, cancellationToken);
@@ -113,18 +134,25 @@ internal sealed class FleetFunctionInvoker(
             return;
         }
 
-        string arguments;
+        journal.RecordToolExecution(context.CallContent?.CallId, toolName, SerializeArguments(context), result, isError || ToolReturnedError(result));
+    }
+
+    private static string SerializeArguments(FunctionInvocationContext context)
+    {
         try
         {
-            arguments = System.Text.Json.JsonSerializer.Serialize(context.Arguments);
+            return System.Text.Json.JsonSerializer.Serialize(context.Arguments);
         }
         catch (Exception)
         {
-            arguments = "(arguments could not be serialised)";
+            return "(arguments could not be serialised)";
         }
-
-        journal.RecordToolExecution(context.CallContent?.CallId, toolName, arguments, result, isError || ToolReturnedError(result));
     }
+
+    // The plan proposal and the durable record change nothing on a machine, and a plan is approved separately in its
+    // review, so asking about these would only repeat the question.
+    private static bool IsFleetBookkeeping(string toolName) =>
+        toolName is "propose_plan" or "record_decision" or "search_context" or PlanGate.BlockedToolName;
 
     private static bool ToolReturnedError(string result) => ToolLoopGuard.IsError(result);
 }

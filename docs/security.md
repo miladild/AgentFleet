@@ -4,8 +4,9 @@ Read this before you put the fleet anywhere except one PC you sit at.
 
 ## The short version
 
-- The fleet has **no login and no approval step**. Its tools read and write your files and run commands as the account the
-  backend runs under. Whoever can send a request to the backend can do all of that.
+- The fleet has **no login**. Unless you turn on [chat approvals](configuration.md#chatapprovals), it has no approval step:
+  its tools read and write your files and run commands as the account the backend runs under. Whoever can send a request
+  to the backend can do all of that, and can answer approval requests too.
 - By default the backend listens **only on the machine it runs on**. Keep it that way unless you need otherwise.
 - It is designed for a network you trust. **Never expose it, the web UI or any Ollama port to the internet.** No port
   forwarding, no public tunnel.
@@ -94,22 +95,25 @@ that account low privilege and free of secrets.
 ## What the model can do to you
 
 Local models make mistakes and can be steered by text they read. A web page, a file or a tool result that contains
-instructions can push the model to act on them. Because there is no approval step, treat the assistant like a junior
-colleague with your keyboard: useful, fast, and worth checking.
+instructions can push the model to act on them. Unless chat approvals are on, there is no approval step, so treat the
+assistant like a junior colleague with your keyboard: useful, fast, and worth checking.
 
 Practical limits:
 
 - Switch off tools you do not need (Config panel). Without `run_command`, `run_git_command` and `write_file` it cannot
   change anything.
 - Use plan mode. During planning only read-only tools exist, and that is enforced in code, not by asking nicely.
+- Turn on **chat approvals** (`chatApprovals` in `fleet.config.json`, see [configuration.md](configuration.md#chatapprovals))
+  to answer each change or command before it runs in ordinary chat. Plans are not asked: read a plan before you approve it.
 - Work in a git repository so every change can be reviewed and undone.
 - Do not point it at a folder that holds secrets. It can read anything your account can.
 - Pinned decisions are handed to every later agent as "still in force". The assistant can pin one itself, so text it read
   (a page, a file) could steer it into pinning something you did not intend. They are labelled "noted by the assistant" versus
   "from the user", and the Context panel lists them with an **unpin** button. Look at that list before you leave a long plan
   running overnight.
-- Be careful with MCP servers you did not write in ordinary chat. They run with the same lack of approval, and some expose dangerous
-  tools (the reference `server-everything` has one that returns all environment variables).
+- Be careful with MCP servers you did not write in ordinary chat. They run with the same lack of approval unless chat
+  approvals are on, and some expose dangerous tools (the reference `server-everything` has one that returns all environment
+  variables).
 - The sandbox container can reach the network, including other machines on yours.
 - In ordinary chat, `run_command` and `run_git_command` run with the backend's account. In unattended plans, shell commands
   run as the limited worker account; Git inspection uses the read-only plan tool, and the execution policy blocks known

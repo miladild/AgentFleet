@@ -191,7 +191,8 @@ start, or as soon as anything is saved from the Config panel.
 - **Failures.** A server that will not start is skipped, with the reason (including what it printed) shown in the panel and
   in the log. It never stops the backend from starting.
 - **Windows.** `npx`, `npm`, `pnpm` and `yarn` are run through `cmd.exe` for you.
-- **No approval step.** MCP tools run as soon as the model calls them, like the built-in ones. Look at what a server exposes
+- **Approval.** MCP tools run as soon as the model calls them, like the built-in ones, unless
+  [chat approvals](configuration.md#chatapprovals) are on. Look at what a server exposes
   before enabling it. For example, the reference server `server-everything` has a `get-env` tool that returns every
   environment variable, secrets included; untick it, or do not use that server.
 - A server that says a tool is read-only (a `readOnlyHint`) stays available in plan mode before a plan is approved.

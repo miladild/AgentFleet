@@ -79,5 +79,9 @@
   },
   "history": {
     "deleteAfterDays": 0
+  },
+  "chatApprovals": {
+    "enabled": false,
+    "timeoutSeconds": 240
   }
 }

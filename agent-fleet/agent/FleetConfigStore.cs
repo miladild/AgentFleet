@@ -293,7 +293,11 @@ internal sealed class FleetConfigStore
                 : config.McpServers.ToDictionary(
                     server => server.Key,
                     server => server.Value with { Type = server.Value.Type.Trim().ToLowerInvariant() },
-                    StringComparer.Ordinal)
+                    StringComparer.Ordinal),
+            // Clamped here, where every load and every save passes, so the file and the API show the wait that is in use.
+            ChatApprovals = config.ChatApprovals is null
+                ? null
+                : config.ChatApprovals with { TimeoutSeconds = FleetChatApprovalConfig.ClampTimeout(config.ChatApprovals.TimeoutSeconds) }
         };
     }
 
