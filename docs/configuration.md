@@ -142,8 +142,10 @@ waits: an approved plan runs unattended, as before.
 | `timeoutSeconds` | How long a call waits for an answer before it is refused. Missing means 240. A value outside 30 to 280 is brought into that range: the web proxy drops a stream that stays silent for 300 seconds, and the chat is silent while a call waits. |
 
 A call that is rejected, or not answered in time, does not run. The model is told so and carries on, and can say what did not
-run. Waiting calls are listed at `GET /api/approvals` and answered with `POST /api/approvals/{id}/approve` or `/reject`; see
-the [HTTP interface](#http-interface).
+run. The web UI shows each waiting call as a card with **Approve** and **Reject** on the chat page and on the live view, so a
+request that arrives while you look at the other page is still seen. A chat in VS Code is asked too and has no card of its
+own: keep the web UI open, or answer through the API. Waiting calls are listed at `GET /api/approvals` and answered with
+`POST /api/approvals/{id}/approve` or `/reject`; see the [HTTP interface](#http-interface).
 
 ### `notifyUrl`
 

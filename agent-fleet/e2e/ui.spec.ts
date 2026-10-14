@@ -797,3 +797,66 @@ test("the hub measurement asks first, offers its result, and prints a save confl
   await expect(panel).toContainText("The settings changed since you opened them. Reload and try again.");
   await expect(panel.getByRole("button", { name: "Reload", exact: true })).toBeVisible();
 });
+
+const approvalId = "d".repeat(32);
+const waitingApproval = {
+  id: approvalId,
+  contextId: "e2e-context",
+  tool: "run_command",
+  arguments: JSON.stringify({ command: "npm test" }),
+  requestedAtUtc: "2026-10-14T10:00:00.000Z",
+  expiresAtUtc: "2026-10-14T10:02:00.000Z",
+  secondsLeft: 120,
+};
+
+test("a chat tool call that waits for approval is shown and can be approved", async ({ page }) => {
+  let pending = [waitingApproval];
+  await page.route("**/api/approvals", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(pending) }));
+  await page.route(`**/api/approvals/${approvalId}/approve`, (route) => {
+    pending = [];
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ decided: true }) });
+  });
+
+  await page.goto("/");
+
+  const prompts = page.getByRole("region", { name: "Approval requests" });
+  await expect(prompts.getByText("npm test", { exact: true })).toBeVisible();
+  await expect(prompts.getByRole("timer")).toContainText("Time left");
+  const approved = page.waitForRequest((request) => request.method() === "POST" && request.url().endsWith(`/api/approvals/${approvalId}/approve`));
+  await prompts.getByRole("button", { name: "Approve", exact: true }).click();
+  expect((await approved).method()).toBe("POST");
+  await expect(prompts).toHaveCount(0);
+});
+
+test("a waiting chat tool call is also shown on the live page", async ({ page }) => {
+  await page.route("**/api/approvals", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([waitingApproval]) }));
+
+  await page.goto("/live");
+
+  await expect(page.getByRole("region", { name: "Approval requests" }).getByText("npm test", { exact: true })).toBeVisible();
+});
+
+test("an approval that was answered elsewhere leaves the card hidden without an error", async ({ page }) => {
+  // Still listed on purpose: the page must not bring back a card the user has answered because a 404 came back.
+  await page.route("**/api/approvals", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([waitingApproval]) }));
+  await page.route(`**/api/approvals/${approvalId}/reject`, (route) => route.fulfill({ status: 404, contentType: "text/plain", body: "Not found" }));
+
+  await page.goto("/");
+
+  const prompts = page.getByRole("region", { name: "Approval requests" });
+  await prompts.getByRole("button", { name: "Reject", exact: true }).click();
+  await expect(prompts).toHaveCount(0);
+  await expect(page.getByText("Could not send your answer")).toHaveCount(0);
+});
+
+test("a failed answer puts the card back with a message", async ({ page }) => {
+  await page.route("**/api/approvals", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([waitingApproval]) }));
+  await page.route(`**/api/approvals/${approvalId}/approve`, (route) => route.fulfill({ status: 500, contentType: "text/plain", body: "Internal Server Error" }));
+
+  await page.goto("/");
+
+  const prompts = page.getByRole("region", { name: "Approval requests" });
+  await prompts.getByRole("button", { name: "Approve", exact: true }).click();
+  await expect(prompts.getByText("Could not send your answer. Try again.")).toBeVisible();
+  await expect(prompts.getByText("npm test", { exact: true })).toBeVisible();
+});

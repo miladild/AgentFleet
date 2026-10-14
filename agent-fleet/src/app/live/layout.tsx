@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { JetBrains_Mono } from "next/font/google";
+import { ApprovalPrompts } from "@/components/ApprovalPrompts";
 import "../globals.css";
 import "@/components/live/live.css";
 
@@ -17,6 +18,7 @@ export default function LiveLayout({ children }: { children: React.ReactNode }) 
     <html lang="en" className={`dark ${mono.variable}`}>
       <body className="antialiased" suppressHydrationWarning>
         {children}
+        <ApprovalPrompts />
       </body>
     </html>
   );

@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 
 import { CopilotKit } from "@copilotkit/react-core/v2";
+import { ApprovalPrompts } from "@/components/ApprovalPrompts";
 import "../globals.css";
 import "@copilotkit/react-core/v2/styles.css";
 
@@ -20,6 +21,7 @@ export default function RootLayout({
         <CopilotKit runtimeUrl="/api/copilotkit" useSingleEndpoint={false}>
           {children}
         </CopilotKit>
+        <ApprovalPrompts />
       </body>
     </html>
   );
