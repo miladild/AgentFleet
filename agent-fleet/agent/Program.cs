@@ -814,6 +814,7 @@ app.MapGet("/api/fleet-config", () =>
         history = new { deleteAfterDays = config.History?.DeleteAfterDays ?? 0 },
         customTools = config.CustomToolMap,
         chatApprovals = config.ChatApprovalSettings,
+        weeklyProbe = config.WeeklyProbeSettings,
         customStatus = toolRegistry.CustomStatuses
     });
 });
@@ -943,6 +944,7 @@ app.MapPut("/api/fleet-config", async (FleetConfigUpdateRequest request, Cancell
                 : current.McpServers,
             History = request.History ?? current.History,
             ChatApprovals = request.ChatApprovals ?? current.ChatApprovals,
+            WeeklyProbe = request.WeeklyProbe ?? current.WeeklyProbe,
             // Like MCP servers, an empty object is meaningful: it removes every command tool.
             CustomTools = request.CustomTools is not null
                 ? request.CustomTools.ToDictionary(kv => kv.Key.Trim(), kv => kv.Value, StringComparer.Ordinal)
@@ -993,6 +995,7 @@ app.MapPut("/api/fleet-config", async (FleetConfigUpdateRequest request, Cancell
             history = new { deleteAfterDays = saved.History?.DeleteAfterDays ?? 0 },
             customTools = saved.CustomToolMap,
             chatApprovals = saved.ChatApprovalSettings,
+            weeklyProbe = saved.WeeklyProbeSettings,
             customStatus = toolRegistry.CustomStatuses,
             restartRequired,
             message = machinesChanged
@@ -1615,8 +1618,12 @@ modelPulls.Finished += _ => healthMonitor.Forget();
 var modelRegressionNotifier = webhookNotifier is null
     ? null
     : new ModelRegressionNotifier(webhookNotifier, fitProbeService.LabDirectory, loggerFactory.CreateLogger("AgentFleet.ModelResults"));
+// The weekly fit measurement of the workers (see WeeklyFitProbeService). Off unless the config's weeklyProbe block turns it on.
+var weeklyFitProbe = new WeeklyFitProbeService(fitProbeService, fleetConfigStore, fleetOptions, planStore, httpClientFactory,
+    TimeProvider.System, webhookNotifier, loggerFactory.CreateLogger("AgentFleet.WeeklyFitProbe"));
+app.Lifetime.ApplicationStarted.Register(() => _ = weeklyFitProbe.StartAsync(app.Lifetime.ApplicationStopping));
 var setupService = new FleetSetupService(fleetConfigStore, fleetOptions, healthMonitor, sandbox, httpClientFactory,
-    planStore, fitProbeService, modelRegressionNotifier);
+    planStore, fitProbeService, modelRegressionNotifier, weeklyFitProbe);
 
 app.MapPost("/api/lab/fit", (FitProbeRequest request) =>
 {
@@ -1636,6 +1643,9 @@ app.MapGet("/api/lab/fit/latest", async (string node, CancellationToken cancella
     FitProbeLatestResult? latest = await fitProbeService.LatestAsync(node, cancellationToken);
     return latest is null ? Results.NotFound() : Results.Json(latest);
 });
+
+// The weekly fit measurement: its settings, its next window, its last complete run, and each machine it covers.
+app.MapGet("/api/lab/weekly", () => Results.Json(weeklyFitProbe.Status()));
 
 app.MapGet("/api/lab/scorecards", (int? days) =>
 {
@@ -1922,6 +1932,7 @@ internal sealed record FleetConfigUpdateRequest(
     FleetHistoryConfig? History = null,
     IReadOnlyDictionary<string, FleetCustomToolConfig>? CustomTools = null,
     FleetChatApprovalConfig? ChatApprovals = null,
+    FleetWeeklyProbeConfig? WeeklyProbe = null,
     string? IfVersion = null);
 
 internal sealed record FleetConfigContextUpdateRequest(int? ContextLength, string? IfVersion = null);

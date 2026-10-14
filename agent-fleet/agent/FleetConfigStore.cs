@@ -297,7 +297,8 @@ internal sealed class FleetConfigStore
             // Clamped here, where every load and every save passes, so the file and the API show the wait that is in use.
             ChatApprovals = config.ChatApprovals is null
                 ? null
-                : config.ChatApprovals with { TimeoutSeconds = FleetChatApprovalConfig.ClampTimeout(config.ChatApprovals.TimeoutSeconds) }
+                : config.ChatApprovals with { TimeoutSeconds = FleetChatApprovalConfig.ClampTimeout(config.ChatApprovals.TimeoutSeconds) },
+            WeeklyProbe = config.WeeklyProbe?.Normalized()
         };
     }
 

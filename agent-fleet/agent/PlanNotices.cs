@@ -30,12 +30,13 @@ internal interface IPlanNotifier
 }
 
 /// <summary>
-/// An optional webhook (<c>notifyUrl</c> in the fleet config, off by default) for plan notices and model-results regressions.
+/// An optional webhook (<c>notifyUrl</c> in the fleet config, off by default) for plan notices, model-results regressions and
+/// weekly fit regressions.
 /// The fleet is LAN-only, so the address must be on the private network: loopback, a private or link-local address, a
 /// Tailscale (100.64.0.0/10) address, or a name that resolves to one. The message carries the plan's and the step's
 /// titles, counts and a cause word, never a file's contents or a check's output. Redirects are not followed.
 /// </summary>
-internal sealed class WebhookPlanNotifier(HttpClient client, string url, ILogger logger) : IPlanNotifier, IModelRegressionNoticeSender
+internal sealed class WebhookPlanNotifier(HttpClient client, string url, ILogger logger) : IPlanNotifier, IModelRegressionNoticeSender, IWeeklyFitNoticeSender
 {
     public static readonly TimeSpan Timeout = TimeSpan.FromSeconds(5);
 
@@ -147,11 +148,23 @@ internal sealed class WebhookPlanNotifier(HttpClient client, string url, ILogger
         weekStartUtc = notice.WeekStartUtc
     });
 
+    public static string Body(WeeklyFitNotice notice) => JsonSerializer.Serialize(new
+    {
+        @event = "weekly-fit-regressed",
+        node = notice.Node,
+        model = notice.Model,
+        text = $"Weekly fit check: {notice.Node} running {notice.Model} measures worse than at its previous measurement: " +
+               $"{notice.Summary}. Speed only, not coding skill.",
+        since = notice.SinceUtc
+    });
+
     public void Notify(PlanNotice notice) => _ = Task.Run(() => SendAsync(notice));
 
     internal Task SendAsync(PlanNotice notice) => SendBodyAsync(Body(notice));
 
     public Task SendAsync(ModelRegressionNotice notice) => SendBodyAsync(Body(notice));
+
+    public Task SendAsync(WeeklyFitNotice notice) => SendBodyAsync(Body(notice));
 
     private async Task SendBodyAsync(string body)
     {

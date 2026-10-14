@@ -33,6 +33,7 @@ fallback, found 2."
   "sandbox": { ... },
   "history": { "deleteAfterDays": 90 },
   "chatApprovals": { "enabled": false, "timeoutSeconds": 240 },
+  "weeklyProbe": { "enabled": false, "dayOfWeek": "sunday", "startHour": 2, "hours": 4 },
   "notifyUrl": "http://192.0.2.10:8080/fleet"
 }
 ```
@@ -158,6 +159,40 @@ followed, and there is no way to put a user name or password in the address. The
 and title, the step's number and title, the counts of done, parked and total steps and a cause word, never a file's
 contents or a check's output. It is edited in the file; a save from the Config panel keeps it.
 
+### `weeklyProbe`
+
+Off when missing. When it is on, the worker machines' context fit is measured once a week, inside a window you set, and the
+fleet says so when a machine's fit has got worse since its last measurement. The measurement is the same one as the fit check
+in the lab, started on a timer.
+
+| Field | Meaning |
+|---|---|
+| `enabled` | `true` to measure the workers once a week. Missing or `false` means nothing is measured on a timer. |
+| `dayOfWeek` | The day the window opens, as an English name such as `"sunday"`, in any letter case. Anything else means `"sunday"`. |
+| `startHour` | The hour the window opens, `0` to `23`, in the machine's local time. Anything else means `2`. |
+| `hours` | How long the window stays open, `1` to `12`. It may run past midnight. Anything else means `4`. |
+
+A machine is measured when its newest measurement is more than six days old or there is none. The fleet measures one machine
+at a time, and only while the window is open. A machine is skipped while a plan is running or approved, while it has a model
+loaded in memory, or when the measurement is refused for another reason. A skipped machine is tried again at the next check,
+every ten minutes, in the same window. No new measurement starts once the window has closed. A measurement that is already
+running is not cut short by the window.
+
+The hub is never measured this way. The hub is the machine the backend runs on, and the node the plans fall back to. Vision
+machines and OpenAI-compatible servers are not measured either.
+
+When a machine's fit is worse than at its previous measurement of the same model, the Setup tab shows a warning named "Weekly
+fit measurement" with the reason, and, if `notifyUrl` is set, one message goes to that address. The message names the machine
+and the model, gives the old and new numbers, and says it is about speed only, not coding skill. A regression is sent once:
+one that is still there the following week is not sent again. The reasons are: the recommended context size went down by at
+least one size, the model no longer fully fits on the graphics card, or the speed at one size fell by more than a quarter.
+A first measurement, or a machine whose model has changed, is never a regression. The last run and any open regression are
+kept in `weekly-fit-state.json`, next to the measurement history.
+
+`GET /api/lab/weekly` shows these settings, the next window, the last complete run, and for each worker its last measurement
+and any open regression (see the [HTTP interface](#http-interface)). The block is read and saved through
+`GET` and `PUT /api/fleet-config` like the other blocks.
+
 ## Environment variables
 
 The backend reads these from its own environment, not from `.env.local`. When you run it with `npm run dev` or as a task,
@@ -276,6 +311,7 @@ The backend answers these on port 8000. They are what the web UI and the VS Code
 | `GET /api/setup` | The Setup tab's checklist: this computer's hardware, suggested models and every check with its fix |
 | `POST /api/lab/fit` | Start a context-fit measurement with `{ "node": "name", "force": false, "confirmHub": false }`; returns `202` with the job id, or `409` with a refusal reason |
 | `GET /api/lab/fit`, `GET /api/lab/fit/latest?node=name`, `POST /api/lab/fit/{id}/cancel` | List recent measurement jobs, get a node's latest result, or cancel a job |
+| `GET /api/lab/weekly` | The weekly fit measurement (see [`weeklyProbe`](#weeklyprobe)): its settings, its next window, its last complete run, and each worker's last measurement and any open regression. Read only |
 | `GET /api/lab/scorecards?days=7` | Count recent plan-step outcomes by machine and model; `days` defaults to 7 and must be 1 to 90 |
 | `PATCH /api/fleet-config/nodes/{name}/context` | Change only one node's `contextLength` with `{ "contextLength": 24576, "ifVersion": "..." }`; a stale version returns `409`. A successful save creates the normal timestamped config backup. |
 | `GET /api/setup/hub` | This computer's name and private addresses (for the worker setup commands) |

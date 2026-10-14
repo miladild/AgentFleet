@@ -273,6 +273,31 @@ internal sealed class FitProbe(HttpClient client)
     private async Task<HttpResponseMessage> ReadPsAsync(Uri root, CancellationToken cancellationToken) =>
         await client.GetAsync(new Uri(root, "api/ps"), cancellationToken);
 
+    /// <summary>
+    /// Whether Ollama holds any model in memory: true or false, or null when the list cannot be read. A caller that must
+    /// not disturb a busy machine should treat null as "busy", since it cannot tell.
+    /// </summary>
+    public async Task<bool?> AnyModelLoadedAsync(Uri root, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using HttpResponseMessage response = await ReadPsAsync(root, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+            return document.RootElement.TryGetProperty("models", out JsonElement models) && models.ValueKind == JsonValueKind.Array
+                ? models.GetArrayLength() > 0
+                : null;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            return null;
+        }
+    }
+
     private static FitPoint Failed(int context, string detail) => new(context, FitStatus.Error, null, null, null, Shorten(detail));
 
     private static string Shorten(string text)

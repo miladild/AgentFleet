@@ -139,7 +139,8 @@ internal sealed record FleetConfig(
     IReadOnlyDictionary<string, FleetCustomToolConfig>? CustomTools = null,
     string? NotifyUrl = null,
     FleetLabConfig? Lab = null,
-    FleetChatApprovalConfig? ChatApprovals = null)
+    FleetChatApprovalConfig? ChatApprovals = null,
+    FleetWeeklyProbeConfig? WeeklyProbe = null)
 {
     public const int MaxHistoryDays = 3650;
 
@@ -150,6 +151,10 @@ internal sealed record FleetConfig(
     /// <summary>What applies when the file has no chatApprovals block: approval off, and the default wait.</summary>
     [System.Text.Json.Serialization.JsonIgnore]
     public FleetChatApprovalConfig ChatApprovalSettings => ChatApprovals ?? new FleetChatApprovalConfig();
+
+    /// <summary>What applies when the file has no weeklyProbe block: the weekly measurement is off.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public FleetWeeklyProbeConfig WeeklyProbeSettings => WeeklyProbe ?? new FleetWeeklyProbeConfig();
 
     /// <summary>Tools made from commands in the Config panel (see CustomTools.cs).</summary>
     [System.Text.Json.Serialization.JsonIgnore]
@@ -177,4 +182,32 @@ internal sealed record FleetChatApprovalConfig(bool Enabled = false, int Timeout
     public const int MaxTimeoutSeconds = 280;
 
     public static int ClampTimeout(int seconds) => Math.Clamp(seconds, MinTimeoutSeconds, MaxTimeoutSeconds);
+}
+
+/// <summary>
+/// Measures the worker machines' context fit once a week, inside a window the owner sets (see WeeklyFitProbeService).
+/// Off by default. The hub is never measured this way: only an explicit measurement, started by the owner, touches it.
+/// </summary>
+/// <param name="Enabled">Measure the workers once a week, and only inside the window.</param>
+/// <param name="DayOfWeek">The day the window opens, as an English name such as "sunday", in any letter case.</param>
+/// <param name="StartHour">The hour the window opens, 0 to 23, in the machine's local time.</param>
+/// <param name="Hours">How long the window stays open, 1 to 12 hours. It may run past midnight.</param>
+internal sealed record FleetWeeklyProbeConfig(bool Enabled = false, string DayOfWeek = "sunday", int StartHour = 2, int Hours = 4)
+{
+    public const string DefaultDayOfWeek = "sunday";
+    public const int DefaultStartHour = 2;
+    public const int DefaultHours = 4;
+
+    /// <summary>The same block with every field in its canonical form. A field that is not valid falls back to its default.</summary>
+    public FleetWeeklyProbeConfig Normalized() => this with
+    {
+        DayOfWeek = ParseDay(DayOfWeek) is { } day ? day.ToString().ToLowerInvariant() : DefaultDayOfWeek,
+        StartHour = StartHour is >= 0 and <= 23 ? StartHour : DefaultStartHour,
+        Hours = Hours is >= 1 and <= 12 ? Hours : DefaultHours
+    };
+
+    /// <summary>The day an English day name stands for, in any letter case, or null for anything else.</summary>
+    public static System.DayOfWeek? ParseDay(string? value) => Enum.GetValues<System.DayOfWeek>()
+        .Cast<System.DayOfWeek?>()
+        .FirstOrDefault(day => string.Equals(day.ToString(), value?.Trim(), StringComparison.OrdinalIgnoreCase));
 }

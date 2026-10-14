@@ -521,11 +521,16 @@ internal sealed class FitProbeService
         catch (JsonException) { return null; }
     }
 
-    private FitThresholds Thresholds()
+    internal FitThresholds Thresholds()
     {
         FleetLabConfig settings = _config.Current.Lab ?? new FleetLabConfig();
         return new FitThresholds(settings.MinSpeedFraction, settings.FullFitShare, settings.ConstrainedSpeedFraction);
     }
+
+    /// <summary>Every recorded measurement of one machine and model, from every run, in the order they were written.</summary>
+    internal FitProbeHistoryEntry[] HistoryFor(string node, string model) => ReadHistory()
+        .Where(entry => string.Equals(entry.Node, node, StringComparison.Ordinal) && string.Equals(entry.Model, model, StringComparison.Ordinal))
+        .ToArray();
 
     private void PruneJobs()
     {
@@ -565,7 +570,7 @@ internal sealed class FitProbeService
         _ => FitStatus.Error
     };
 
-    private static FitPoint ToPoint(FitProbeHistoryEntry entry) => new(
+    internal static FitPoint ToPoint(FitProbeHistoryEntry entry) => new(
         entry.Context,
         ParseStatus(entry.Status),
         entry.GpuShare,

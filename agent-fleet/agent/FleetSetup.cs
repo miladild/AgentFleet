@@ -428,7 +428,8 @@ internal sealed class FleetSetupService(
     IHttpClientFactory httpClientFactory,
     FleetPlanStore? planStore = null,
     FitProbeService? fitProbes = null,
-    ModelRegressionNotifier? modelRegressionNotifier = null)
+    ModelRegressionNotifier? modelRegressionNotifier = null,
+    WeeklyFitProbeService? weeklyFitProbe = null)
 {
     public const string Ok = "ok";
     public const string Warn = "warn";
@@ -502,6 +503,10 @@ internal sealed class FleetSetupService(
             await modelRegressionNotifier.NotifyOnceAsync(regressions, nowUtc);
         }
         checks.Add(ModelResults.Check(regressions, staleMeasurements, nowUtc));
+        if (weeklyFitProbe?.Check() is { } weeklyFit)
+        {
+            checks.Add(weeklyFit);
+        }
 
         NodeHealthSnapshot? fallback = (await nodes).FirstOrDefault(snapshot =>
             fleetOptions.TryGetNode(snapshot.Name, out FleetNodeDefinition? node) && node.Fallback);
