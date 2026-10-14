@@ -74,20 +74,21 @@ internal sealed class ChatApprovals
             Shorten(argumentsJson),
             now,
             now + lifetime);
-        var entry = new Entry(item);
+        var entry = new Entry(item, _time.GetTimestamp() + (long)(lifetime.TotalSeconds * _time.TimestampFrequency));
 
         // The timer is set before the call is listed, so every call the list shows can time out.
         using ITimer timer = _time.CreateTimer(_ => Complete(item.Id, ApprovalDecision.TimedOut), null, lifetime, Timeout.InfiniteTimeSpan);
-        lock (_gate)
-        {
-            _pending.Add(item.Id, entry);
-        }
-
-        _logger.LogInformation(
-            "Chat tool {Tool} in chat {ContextId} waits for approval (request {Id}, up to {Seconds} s).",
-            tool, contextId, item.Id, (int)lifetime.TotalSeconds);
+        // Every path from here on takes the call off the list, including a log write that fails.
         try
         {
+            lock (_gate)
+            {
+                _pending.Add(item.Id, entry);
+            }
+
+            _logger.LogInformation(
+                "Chat tool {Tool} in chat {ContextId} waits for approval (request {Id}, up to {Seconds} s).",
+                tool, contextId, item.Id, (int)lifetime.TotalSeconds);
             ApprovalDecision decision = await entry.Outcome.Task.WaitAsync(cancellationToken);
             _logger.LogInformation(
                 "Chat tool {Tool} in chat {ContextId}: approval request {Id} ended as {Decision}.",
@@ -103,13 +104,21 @@ internal sealed class ChatApprovals
         }
     }
 
-    /// <summary>The calls waiting now, oldest first.</summary>
+    /// <summary>
+    /// The calls waiting now, oldest first. The time left comes from the monotonic clock, so ExpiresAtUtc is that time
+    /// counted from the wall clock now: a change of the wall clock does not stretch or shorten the countdown.
+    /// </summary>
     public IReadOnlyList<PendingApproval> Pending()
     {
+        DateTimeOffset now = _time.GetUtcNow();
+        long timestamp = _time.GetTimestamp();
         lock (_gate)
         {
             return _pending.Values
-                .Select(entry => entry.Item)
+                .Select(entry => entry.Item with
+                {
+                    ExpiresAtUtc = now + _time.GetElapsedTime(timestamp, entry.Deadline)
+                })
                 .OrderBy(item => item.RequestedAtUtc)
                 .ThenBy(item => item.Id, StringComparer.Ordinal)
                 .ToList();
@@ -146,9 +155,12 @@ internal sealed class ChatApprovals
     private static string Shorten(string text) =>
         text.Length <= MaxArgumentCharacters ? text : text[..(MaxArgumentCharacters - 3)] + "...";
 
-    private sealed class Entry(PendingApproval item)
+    private sealed class Entry(PendingApproval item, long deadline)
     {
         public PendingApproval Item { get; } = item;
+
+        // On the monotonic clock (TimeProvider.GetTimestamp), when the call is refused.
+        public long Deadline { get; } = deadline;
 
         public TaskCompletionSource<ApprovalDecision> Outcome { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);

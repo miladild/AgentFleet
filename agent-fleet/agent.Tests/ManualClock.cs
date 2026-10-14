@@ -2,13 +2,15 @@ namespace AgentFleet.Tests;
 
 /// <summary>
 /// A clock that tests move by hand. A timer fires when the clock is advanced past its due time, so a test that depends
-/// on a timeout runs at once instead of waiting for the time to pass.
+/// on a timeout runs at once instead of waiting for the time to pass. Timers and GetTimestamp run on a monotonic count
+/// that only Advance moves; SetUtcNow moves the wall clock alone, as a machine's clock correction does.
 /// </summary>
 internal sealed class ManualClock : TimeProvider
 {
     private readonly object _gate = new();
     private readonly List<ManualTimer> _timers = [];
     private DateTimeOffset _now = new(2026, 10, 14, 9, 0, 0, TimeSpan.Zero);
+    private long _elapsedTicks;
 
     public override DateTimeOffset GetUtcNow()
     {
@@ -17,6 +19,16 @@ internal sealed class ManualClock : TimeProvider
             return _now;
         }
     }
+
+    public override long GetTimestamp()
+    {
+        lock (_gate)
+        {
+            return _elapsedTicks;
+        }
+    }
+
+    public override long TimestampFrequency => TimeSpan.TicksPerSecond;
 
     public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
     {
@@ -32,7 +44,8 @@ internal sealed class ManualClock : TimeProvider
         lock (_gate)
         {
             _now += by;
-            due = _timers.Where(timer => timer.DueAt is { } dueAt && dueAt <= _now).ToList();
+            _elapsedTicks += by.Ticks;
+            due = _timers.Where(timer => timer.DueAt is { } dueAt && dueAt <= _elapsedTicks).ToList();
         }
 
         foreach (ManualTimer timer in due)
@@ -41,16 +54,25 @@ internal sealed class ManualClock : TimeProvider
         }
     }
 
+    /// <summary>Sets the wall clock only. Timers that are running keep their due times.</summary>
+    public void SetUtcNow(DateTimeOffset now)
+    {
+        lock (_gate)
+        {
+            _now = now;
+        }
+    }
+
     private sealed class ManualTimer(ManualClock clock, TimerCallback callback, object? state) : ITimer
     {
         // Read and written only under the clock's lock.
-        public DateTimeOffset? DueAt { get; private set; }
+        public long? DueAt { get; private set; }
 
         public bool Change(TimeSpan dueTime, TimeSpan period)
         {
             lock (clock._gate)
             {
-                DueAt = dueTime == Timeout.InfiniteTimeSpan ? null : clock._now + dueTime;
+                DueAt = dueTime == Timeout.InfiniteTimeSpan ? null : clock._elapsedTicks + dueTime.Ticks;
                 if (DueAt is not null && !clock._timers.Contains(this))
                 {
                     clock._timers.Add(this);

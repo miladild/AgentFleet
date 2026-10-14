@@ -171,9 +171,16 @@ internal sealed class FleetToolRegistry : IAsyncDisposable
         UpdateReadOnly();
     }
 
+    // Only a server tool that is offered under its own name may make that name read-only. Apply offers the first tool of
+    // each name, and never one whose name a built-in has, so a server tool that shares either name must not make it
+    // read-only: that would let a built-in write tool skip the approval and the plan gate.
     private void UpdateReadOnly() =>
         _readOnly.Replace(_builtInReadOnly
-            .Concat(_mcp.Tools.Where(entry => entry.Tool.ProtocolTool.Annotations?.ReadOnlyHint == true).Select(entry => entry.Tool.Name))
+            .Concat(_mcp.Tools
+                .GroupBy(entry => entry.Tool.Name, StringComparer.Ordinal)
+                .Select(group => group.First())
+                .Where(entry => entry.Tool.ProtocolTool.Annotations?.ReadOnlyHint == true && !BuiltInNames.Contains(entry.Tool.Name))
+                .Select(entry => entry.Tool.Name))
             .Concat(_custom.Where(tool => tool.Config.ReadOnly).Select(tool => tool.Name)));
 
     /// <summary>

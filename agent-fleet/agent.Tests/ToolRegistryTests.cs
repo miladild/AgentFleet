@@ -1,3 +1,5 @@
+using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
@@ -168,6 +170,62 @@ public sealed class ToolRegistryTests : IDisposable
         await client.GetResponseAsync([new ChatMessage(ChatRole.User, "remember: tabs, not spaces")], options);
         Assert.Equal(["read_file", "record_decision"], inner.Seen!.Tools!.Select(t => t.Name));
     }
+
+    // A tool a connected server offers, named as the registry names it. Only its name and read-only hint are read here,
+    // so the client it belongs to is never used: an instance that was never connected stands in for it.
+    private static McpToolEntry ServerTool(string server, string tool, bool readOnly)
+    {
+        var protocolTool = new ModelContextProtocol.Protocol.Tool
+        {
+            Name = McpToolProvider.ToolName(server, tool),
+            InputSchema = JsonDocument.Parse("{\"type\":\"object\"}").RootElement,
+            Annotations = new ModelContextProtocol.Protocol.ToolAnnotations { ReadOnlyHint = readOnly }
+        };
+        var client = (ModelContextProtocol.Client.McpClient)RuntimeHelpers.GetUninitializedObject(ConcreteMcpClient);
+        return new McpToolEntry(server, new ModelContextProtocol.Client.McpClientTool(client, protocolTool, null));
+    }
+
+    // McpClient is abstract; the SDK's first concrete client type is only ever created uninitialised here.
+    private static readonly Type ConcreteMcpClient = typeof(ModelContextProtocol.Client.McpClient).Assembly.GetTypes()
+        .First(type => type.IsClass && !type.IsAbstract && typeof(ModelContextProtocol.Client.McpClient).IsAssignableFrom(type));
+
+    // Makes the registry see these server tools, as a reload does, and works its read-only names out the same way.
+    private static void ConnectServerTools(FleetToolRegistry registry, params McpToolEntry[] tools)
+    {
+        var provider = (McpToolProvider)Activator.CreateInstance(
+            typeof(McpToolProvider), BindingFlags.NonPublic | BindingFlags.Instance, null, [tools.ToList(), Array.Empty<McpServerStatus>()], null)!;
+        typeof(FleetToolRegistry).GetField("_mcp", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(registry, provider);
+        typeof(FleetToolRegistry).GetMethod("UpdateReadOnly", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(registry, null);
+    }
+
+    [Fact]
+    public void A_read_only_server_tool_does_not_make_a_built_in_write_tool_of_the_same_name_read_only()
+    {
+        // A server named "http" offering a read-only "request" tool is offered as http_request, which is also the name of the
+        // built-in HTTP tool, and that one can write. The built-in tool is the one offered and run, so the name must stay
+        // out of the read-only set: a read-only name is never asked about and is allowed while planning.
+        var readOnly = new SwappableNameSet(PlanGate.BuiltInReadOnlyTools);
+        FleetToolRegistry registry = new(_config, ["read_file", "http_request"], readOnly, NullLoggerFactory.Instance);
+
+        ConnectServerTools(registry, ServerTool("http", "request", readOnly: true));
+
+        Assert.False(readOnly.Contains("http_request"));
+        Assert.True(readOnly.Contains("read_file"));
+    }
+
+    [Fact]
+    public void Of_server_tools_sharing_a_name_only_the_one_that_is_offered_decides_whether_the_name_is_read_only()
+    {
+        // Two tools of one server can sanitise to the same name. Apply offers the first of them, so a read-only second one
+        // must not make the name read-only.
+        var readOnly = new SwappableNameSet(PlanGate.BuiltInReadOnlyTools);
+        FleetToolRegistry registry = Registry(readOnly);
+
+        ConnectServerTools(registry, ServerTool("docs", "x.y", readOnly: false), ServerTool("docs", "x_y", readOnly: true));
+
+        Assert.False(readOnly.Contains("docs_x_y"));
+    }
+
     // A "server" that prints a reason to stderr and exits before speaking MCP.
     private static (string Command, string[] Args) FailingCommand() =>
         OperatingSystem.IsWindows()

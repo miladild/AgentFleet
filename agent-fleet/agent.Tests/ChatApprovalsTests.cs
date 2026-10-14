@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AgentFleet.Tests;
@@ -173,5 +174,45 @@ public sealed class ChatApprovalsTests
         Assert.Equal(90, secondCall.SecondsLeft(clock.GetUtcNow()));
         Assert.True(approvals.Decide(secondCall.Id, approve: true));
         await second.WaitAsync(SafetyLimit);
+    }
+
+    [Fact]
+    public async Task A_failing_log_write_does_not_leave_the_call_listed()
+    {
+        var approvals = new ChatApprovals(new ManualClock(), () => 240, new FailingLogger());
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => approvals.RequestAsync("chat-1", "write_file", "{}", CancellationToken.None));
+
+        Assert.Empty(approvals.Pending());
+    }
+
+    [Fact]
+    public async Task A_wall_clock_set_back_does_not_stretch_the_countdown_or_move_the_refusal()
+    {
+        var clock = new ManualClock();
+        var approvals = NewService(clock, timeoutSeconds: 240);
+
+        Task<ApprovalDecision> wait = approvals.RequestAsync("chat-1", "write_file", "{}", CancellationToken.None);
+        await WaitForPendingAsync(approvals);
+        clock.Advance(TimeSpan.FromSeconds(100));
+        // The machine's clock is corrected an hour back. The wait was started on the monotonic clock, so 140 s remain.
+        clock.SetUtcNow(clock.GetUtcNow() - TimeSpan.FromHours(1));
+
+        PendingApproval listed = approvals.Pending().Single();
+        Assert.Equal(140, listed.SecondsLeft(clock.GetUtcNow()));
+
+        clock.Advance(TimeSpan.FromSeconds(140));
+        Assert.Equal(ApprovalDecision.TimedOut, await wait.WaitAsync(SafetyLimit));
+    }
+
+    // A log sink that fails on every write, as a broken logging pipeline can.
+    private sealed class FailingLogger : ILogger
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            throw new InvalidOperationException("The log sink failed.");
     }
 }
