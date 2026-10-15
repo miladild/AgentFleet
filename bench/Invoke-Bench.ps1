@@ -97,7 +97,9 @@ function Invoke-Hidden([string]$Project, [string]$HiddenDir, [string]$EvidenceDi
                 if (-not $p.WaitForExit(120000)) {
                     $timedOut = $true
                     $ok = $false
-                    & taskkill.exe /F /T /PID $p.Id | Out-Null
+                    # taskkill reports a process that already ended on stderr; under Windows PowerShell 5.1 that would stop the run.
+                    $savedPreference = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+                    try { & taskkill.exe /F /T /PID $p.Id 2>&1 | Out-Null } finally { $ErrorActionPreference = $savedPreference }
                     $p.WaitForExit()
                 }
                 if ($p.ExitCode -ne 0) { $ok = $false }
@@ -145,12 +147,16 @@ function Invoke-Run([string]$Id, [int]$Number) {
     New-Item -ItemType Directory -Path $project -Force | Out-Null
     Copy-Item (Join-Path $tasksRoot "$Id\project\*") $project -Recurse -Force
     Push-Location $project
+    # git prints notices such as the line-ending warning on stderr. Windows PowerShell 5.1 turns native stderr into a
+    # terminating error under -ErrorAction Stop even when it is redirected, so these calls run with errors set to continue.
+    $savedPreference = $ErrorActionPreference
     try {
-        git init -q 2>$null
-        git -c user.name=bench -c user.email=bench@example.invalid add -A 2>$null
-        git -c user.name=bench -c user.email=bench@example.invalid commit -q -m 'start' 2>$null
+        $ErrorActionPreference = 'Continue'
+        git -c core.autocrlf=false init -q 2>$null
+        git -c core.autocrlf=false -c core.safecrlf=false -c user.name=bench -c user.email=bench@example.invalid add -A 2>$null
+        git -c core.autocrlf=false -c core.safecrlf=false -c user.name=bench -c user.email=bench@example.invalid commit -q -m 'start' 2>$null
     }
-    finally { Pop-Location }
+    finally { $ErrorActionPreference = $savedPreference; Pop-Location }
 
     $result = [ordered]@{ task = $Id; run = $Number; planId = $null; status = 'not-started'; hiddenPass = $false; hiddenSummary = ''
         falseAccept = $false; completed = $false; timedOut = $false; hiddenTimedOut = $false; asleepMinutes = 0; minutes = 0; stepsDone = 0; stepsParked = 0; rounds = 0; maxRung = 1
