@@ -74,12 +74,40 @@ fallback, found 2."
 | `caveman` | `off`, `lite`, `full` or `ultra`: asks this machine's model to answer more briefly while preserving useful detail and safety conditions. Missing means `off`. |
 | `ponytail` | `off`, `lite`, `full` or `ultra`: asks this machine's model to make small, correct coding changes and avoid speculative work. Missing means `off`. |
 | `thinking` | `off` (default) or `model`. A model that thinks before it answers is told not to (`off`); `model` leaves it to the model. A small model can spend its whole answer (4096 tokens) on thinking and end the turn with no tool call and no text: measured on a 9B worker, one turn in three. Choose `model` only for a machine whose model does better thinking. |
+| `workspace` | Optional. Where approved plan steps run their file tools and checks on this machine, over SSH. See [Worker workspace](#worker-workspace). Not allowed on the hub or a vision node. |
 
 At least one text node (not vision) is required.
 
 These are prompt styles configured per machine, not skills installed on worker computers. The selected style follows a
 request through fallback; set the same levels on machines that may hand work to each other when you want consistent
 responses.
+
+#### Worker workspace
+
+Set it in **Config > Machines**, or by hand:
+
+```json
+"workspace": {
+  "host": "192.0.2.21",
+  "port": 22,
+  "user": "fleetwork",
+  "keyPath": "C:\\Users\\me\\.ssh\\fleetwork",
+  "hostKey": "SHA256:...",
+  "root": "D:/fleet-work",
+  "platform": "windows"
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `host`, `port` | The worker's SSH address, without a user name or path. `port` defaults to 22. |
+| `user` | A dedicated SSH account without admin rights, used only for plan work. |
+| `keyPath` | The private key on the hub that logs in as that account. |
+| `hostKey` | The worker's SSH host key fingerprint (`SHA256:...`), read on the worker itself. A machine answering with another key is refused. |
+| `root` | The absolute folder on the worker that holds the plan workspaces: `/...` on Linux, `C:/...` on Windows (backslashes become forward slashes). |
+| `platform` | `linux` or `windows`. |
+
+A workspace with any of these missing or invalid is rejected when the configuration is saved or loaded.
 
 ### `tools`
 

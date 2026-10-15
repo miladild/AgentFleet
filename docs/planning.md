@@ -24,7 +24,7 @@ steps, and checks each step with a real command instead of trusting itself.
    Worker toolchains
    are checked only when that worker runs the step; Fleet does not install runtimes from project files. A revised plan
    replaces the earlier proposal in the same chat, so there is only ever one waiting for approval, and the turn ends
-   once a plan is saved. Before approving, configure a worker workspace for every pinned machine or at least one worker
+   once a plan is saved. Before approving, configure a [worker workspace](configuration.md#worker-workspace) for every pinned machine or at least one worker
    at each step's tier in **Config > Machines**. Without a ready configured worker, the plan blocks visibly and does not
    route code work to the hub.
 5. **You decide.** Review each step's restart setting and the **Recovery** choice, then press **Approve and run**, press **Reject**, or reply in the chat with what to change and it proposes a
