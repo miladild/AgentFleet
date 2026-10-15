@@ -49,6 +49,8 @@ carries a browser `Origin` from another site. If you reach the hub by another na
 (comma separated). This protects against browsers. It is not a login, and it does not stop another program on your
 network.
 
+The web UI on port 3000 applies the same rule to its pages and API routes. It has to: its API routes forward requests to the backend without the browser's `Origin` header, so the backend cannot tell a page's request from the web UI's own. If you reach the web UI by another name, list that name in `FLEET_ALLOWED_HOSTS` for the web UI as well, in `agent-fleet/.env.local` or in the environment it starts with. Until you do, it answers 403 to that name.
+
 ## The account it runs as
 
 Whatever account runs the backend is the account the model's tools use. Under your own user that is your files and your
