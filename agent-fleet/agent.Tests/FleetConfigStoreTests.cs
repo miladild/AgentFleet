@@ -247,6 +247,19 @@ public sealed class FleetConfigStoreTests : IDisposable
     }
 
     [Fact]
+    public void The_version_can_be_read_while_another_process_has_the_file_open_for_writing()
+    {
+        // Another process can hold the file open for a moment after a save, for example a virus scanner. Reading the
+        // version must not fail while that process has the file open for writing.
+        FleetConfigStore store = Open();
+        string before = store.Version;
+
+        using var otherProcess = new FileStream(ConfigPath, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
+
+        Assert.Equal(before, store.Version);
+    }
+
+    [Fact]
     public void A_stale_version_is_rejected_without_changing_the_file()
     {
         FleetConfigStore store = Open();

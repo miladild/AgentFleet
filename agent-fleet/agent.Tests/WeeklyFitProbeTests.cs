@@ -41,8 +41,11 @@ public sealed class WeeklyFitProbeTests : IDisposable
 
     public void Dispose()
     {
+        // On Windows a file another process holds open can refuse deletion with an access error instead of a sharing error.
+        // The folder is a temporary one, so a cleanup that cannot finish is ignored.
         try { Directory.Delete(_directory, recursive: true); }
         catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
     }
 
     private string StatePath => Path.Combine(_directory, "lab", "weekly-fit-state.json");
@@ -290,10 +293,15 @@ public sealed class WeeklyFitProbeTests : IDisposable
         UseNodes(HubNode, WorkerA, WorkerB);
         _api.Unresponsive.Add("192.0.2.10");
         FitProbeService fit = Fit();
+        var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fit.Finished += _ => finished.TrySetResult();
 
         await Weekly(fit, Clock(SundayAt(2, 30))).TickAsync(CancellationToken.None);
 
         Assert.Equal("worker-b", Assert.Single(fit.List()).Node);
+        // The measurement runs on in the background after the tick, and it removes its marker file just before it raises
+        // Finished. Waiting for that event keeps the folder cleanup in Dispose from racing with it.
+        await finished.Task.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
     [Fact]

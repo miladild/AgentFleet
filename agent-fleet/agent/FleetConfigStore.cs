@@ -198,7 +198,13 @@ internal sealed class FleetConfigStore
         return prepared;
     }
 
-    private string ReadVersion() => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(_path))).ToLowerInvariant()[..16];
+    // Another process can hold the file open for a moment after a save, for example a virus scanner. Allowing its read,
+    // write and delete access keeps that from failing the read; only a process that refuses reads still blocks it.
+    private string ReadVersion()
+    {
+        using FileStream file = new(_path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        return Convert.ToHexString(SHA256.HashData(file)).ToLowerInvariant()[..16];
+    }
 
     private void WriteAtomically(FleetConfig config)
     {
