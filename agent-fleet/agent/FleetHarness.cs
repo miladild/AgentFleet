@@ -21,9 +21,17 @@ internal static class FleetHarness
         FleetContextJournal journal,
         FleetPlanModeService planModeService,
         FleetFunctionInvoker invoker,
-        ILoggerFactory loggerFactory)
+        ILoggerFactory loggerFactory,
+        bool recoveryNoteEnabled = false)
     {
-        return new ChatClientBuilder(fleetClient)
+        var builder = new ChatClientBuilder(fleetClient);
+        if (recoveryNoteEnabled)
+        {
+            // Added only when the setting is on, so with it off the chain and the model input are exactly as before.
+            builder.Use(inner => new ChatRecoveryNoteClient(inner, journal, enabled: true));
+        }
+
+        return builder
             // A plan step on a worker is told about the worker's machine, not the hub's (see WorkerPlatformChatClient).
             .Use(inner => new WorkerPlatformChatClient(inner))
             // Next: the current tool list goes onto the request before anything looks for a tool by name.

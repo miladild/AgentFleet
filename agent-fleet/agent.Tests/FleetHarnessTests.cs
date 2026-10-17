@@ -14,11 +14,13 @@ public sealed class FleetHarnessTests : ContextTestBase
     {
         public ChatOptions? LastOptions { get; private set; }
         public int Requests { get; private set; }
+        public IReadOnlyList<ChatMessage>? LastMessages { get; private set; }
 
         public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
         {
             Requests++;
             LastOptions = options;
+            LastMessages = messages.ToArray();
             ChatMessage reply = new ChatMessage(ChatRole.Assistant, "done");
             return Task.FromResult(new ChatResponse(reply));
         }
@@ -92,6 +94,51 @@ public sealed class FleetHarnessTests : ContextTestBase
         // The actual order from the built client is: WorkerPlatformChatClient -> DynamicToolsChatClient -> FunctionInvokingChatClient -> fleetClient
         // (The ChatClientBuilder applies .Use() in reverse order: last added is innermost)
         Assert.Equal(["WorkerPlatformChatClient", "DynamicToolsChatClient", "FunctionInvokingChatClient", "RecordingChatClient"], types);
+    }
+
+    [Fact]
+    public void The_recovery_note_layer_is_the_outermost_layer_only_when_the_setting_is_on()
+    {
+        var fake = new RecordingChatClient();
+        IChatClient client = FleetHarness.BuildAgentClient(fake, CreateRegistry(), Journal, PlanMode(false), NewInvoker(), NullLoggerFactory.Instance, recoveryNoteEnabled: true);
+
+        Assert.Equal(["ChatRecoveryNoteClient", "WorkerPlatformChatClient", "DynamicToolsChatClient", "FunctionInvokingChatClient", "RecordingChatClient"], ChainTypes(client));
+    }
+
+    [Fact]
+    public async Task A_plan_runner_request_never_gets_the_recovery_note_through_the_real_chain()
+    {
+        var fake = new RecordingChatClient();
+        IChatClient client = FleetHarness.BuildAgentClient(fake, CreateRegistry(), Journal, PlanMode(false), NewInvoker(), NullLoggerFactory.Instance, recoveryNoteEnabled: true);
+        using (Scope(NewContextId()))
+        {
+            Journal.RecordToolExecution("lost-call", "read_file", "{\"path\":\"a.txt\"}", "file text", false);
+            ChatMessage[] transcript = [new ChatMessage(ChatRole.User, "continue")];
+
+            await client.GetResponseAsync(transcript);
+            Assert.Contains(fake.LastMessages!, message => message.Text?.Contains("already ran earlier", StringComparison.Ordinal) == true);
+
+            var runner = new ChatOptions { AdditionalProperties = new AdditionalPropertiesDictionary { [FleetRoutingChatClient.RunnerTierKey] = "heavy" } };
+            await client.GetResponseAsync(transcript, runner);
+            Assert.DoesNotContain(fake.LastMessages!, message => message.Text?.Contains("already ran earlier", StringComparison.Ordinal) == true);
+        }
+    }
+
+    private static List<string> ChainTypes(IChatClient client)
+    {
+        var types = new List<string> { client.GetType().Name };
+        object? current = client;
+        while (current is DelegatingChatClient delegating)
+        {
+            PropertyInfo? innerProp = typeof(DelegatingChatClient).GetProperty("InnerClient", BindingFlags.Instance | BindingFlags.NonPublic);
+            current = innerProp?.GetValue(delegating);
+            if (current is not null)
+            {
+                types.Add(current.GetType().Name);
+            }
+        }
+
+        return types;
     }
 
     [Fact]

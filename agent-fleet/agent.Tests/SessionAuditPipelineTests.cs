@@ -81,7 +81,7 @@ public sealed class SessionAuditPipelineTests : ContextTestBase
         public void Dispose() { }
     }
 
-    private async Task<(IHost Host, ScriptedModel Model, int[] Invocations)> BuildHost(bool crashOnThirdRequest, bool registerSessionStore)
+    private async Task<(IHost Host, ScriptedModel Model, int[] Invocations)> BuildHost(bool crashOnThirdRequest, bool registerSessionStore, bool recoveryNoteEnabled = false)
     {
         string configPath = Path.Combine(Root, "fleet.config.json");
         await File.WriteAllTextAsync(configPath, """
@@ -116,7 +116,7 @@ public sealed class SessionAuditPipelineTests : ContextTestBase
         var invoker = new FleetFunctionInvoker(Journal, new FleetPlanModeService(configStore, RequestContext), plans,
             new SwappableNameSet(PlanGate.BuiltInReadOnlyTools), planTools, NullLogger.Instance, 25);
         IChatClient client = FleetHarness.BuildAgentClient(router, registry, Journal,
-            new FleetPlanModeService(configStore, RequestContext), invoker, NullLoggerFactory.Instance);
+            new FleetPlanModeService(configStore, RequestContext), invoker, NullLoggerFactory.Instance, recoveryNoteEnabled);
 
         int[] invocations = new int[3];
         AITool[] tools = Enumerable.Range(0, 3).Select(index => AIFunctionFactory.Create((string value) =>
@@ -265,6 +265,49 @@ public sealed class SessionAuditPipelineTests : ContextTestBase
             }
             Assert.Contains("Run all three actions.", ModelInput(retryInput), StringComparison.Ordinal);
             Assert.Contains("Try again.", ModelInput(retryInput), StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task A_retry_with_missing_tool_calls_gets_one_recovery_note()
+    {
+        string threadId = NewContextId();
+        (IHost host, ScriptedModel model, _) = await BuildHost(true, false, recoveryNoteEnabled: true);
+        using (host)
+        {
+            await Post(host, RunJson(threadId, "run-1", new { id = "user-1", role = "user", content = "Run all three actions." }));
+            int beforeRetry = model.Inputs.Count;
+            await Post(host, RunJson(threadId, "run-2", new { id = "user-2", role = "user", content = "Try again." }));
+
+            IReadOnlyList<ChatMessage> retryInput = model.Inputs[beforeRetry];
+            string notes = string.Join("\n", retryInput.Where(message => message.Role == ChatRole.System).Select(message => message.Text));
+            Assert.Contains("action_1", notes, StringComparison.Ordinal);
+            Assert.Contains("action 1 ran with 1", notes, StringComparison.Ordinal);
+            Assert.Contains("action_2", notes, StringComparison.Ordinal);
+            Assert.Contains("action 2 ran with 2", notes, StringComparison.Ordinal);
+            Assert.Contains("Do not repeat these calls unless the user asks.", notes, StringComparison.Ordinal);
+            Assert.DoesNotContain(retryInput, message => message.Role == ChatRole.System && message.Text?.Contains("already ran earlier", StringComparison.Ordinal) == true &&
+                message.Text.Count(character => character == '\n') > 3);
+        }
+    }
+
+    [Fact]
+    public async Task A_clean_transcript_does_not_get_a_recovery_note()
+    {
+        string threadId = NewContextId();
+        (IHost host, ScriptedModel model, _) = await BuildHost(false, false, recoveryNoteEnabled: true);
+        using (host)
+        {
+            await Post(host, RunJson(threadId, "run-1", new { id = "user-1", role = "user", content = "Run all three actions." }));
+            await Post(host, RunJson(threadId, "run-2",
+                new { id = "assistant-1", role = "assistant", content = "", toolCalls = Enumerable.Range(1, 3).Select(index => new
+                { id = $"call-{index}", type = "function", function = new { name = $"action_{index}", arguments = $"{{\"value\":\"{index}\"}}" } }).ToArray() },
+                new { id = "tool-1", role = "tool", toolCallId = "call-1", name = "action_1", content = "action 1 ran with 1" },
+                new { id = "tool-2", role = "tool", toolCallId = "call-2", name = "action_2", content = "action 2 ran with 2" },
+                new { id = "tool-3", role = "tool", toolCallId = "call-3", name = "action_3", content = "action 3 ran with 3" },
+                new { id = "user-2", role = "user", content = "Next turn." }));
+
+            Assert.DoesNotContain(model.Inputs[^1], message => message.Text?.Contains("already ran earlier", StringComparison.Ordinal) == true);
         }
     }
 }

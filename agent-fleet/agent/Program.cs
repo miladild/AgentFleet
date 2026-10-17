@@ -605,7 +605,8 @@ int planRoundsPerRung = int.TryParse(builder.Configuration["FLEET_PLAN_ROUNDS_PE
 
 var invoker = new FleetFunctionInvoker(contextJournal, planModeService, planStore, readOnlyTools, planTools, toolLoopLogger, planStepToolRounds,
     chatApprovals, () => fleetConfigStore.Current.ChatApprovalSettings.Enabled);
-IChatClient agentClient = FleetHarness.BuildAgentClient(fleetClient, toolRegistry, contextJournal, planModeService, invoker, loggerFactory);
+IChatClient agentClient = FleetHarness.BuildAgentClient(fleetClient, toolRegistry, contextJournal, planModeService, invoker, loggerFactory,
+    string.Equals(builder.Configuration["FLEET_CHAT_RECOVERY_NOTE"], "on", StringComparison.OrdinalIgnoreCase));
 
 var fleetAgent = new ChatClientAgent(
     agentClient,
