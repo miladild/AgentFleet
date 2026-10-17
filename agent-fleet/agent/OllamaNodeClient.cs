@@ -50,7 +50,8 @@ internal static class OllamaNodeClient
         ILogger logger,
         string thinking = NodeThinking.Off,
         HttpMessageHandler? handler = null,
-        IContextWindowFitter? fitter = null)
+        IContextWindowFitter? fitter = null,
+        string? nodeName = null)
     {
         IChatClient raw;
         if (string.Equals(api, "openai", StringComparison.OrdinalIgnoreCase))
@@ -69,12 +70,83 @@ internal static class OllamaNodeClient
                 Timeout = networkTimeout
             };
             raw = new ContextSizeChatClient(new OllamaApiClient(http, model), http, model, contextLength, logger,
-                thinkingOff: NodeThinking.Normalize(thinking) == NodeThinking.Off, fitter: fitter);
+                thinkingOff: NodeThinking.Normalize(thinking) == NodeThinking.Off, fitter: fitter, nodeName: nodeName);
         }
+
+        // Only with telemetry on: the Ollama client already tags its own spans, and off must leave the graph unchanged.
+        if (FleetTelemetry.Enabled && raw is not ContextSizeChatClient)
+            raw = new NodeTelemetryChatClient(raw, nodeName, model);
 
         // Works around a known, open Ollama bug (ollama/ollama#18530, #18563) where its qwen3-coder tool-call parser can
         // silently fail to structure a tool call, leaking it as plain <function=...> text instead. No-op otherwise.
         return new ToolCallRescueChatClient(raw, logger);
+    }
+}
+
+internal sealed class NodeTelemetryChatClient(IChatClient inner, string? nodeName, string model) : DelegatingChatClient(inner)
+{
+    public override async Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        IReadOnlyList<ChatMessage> list = messages as IReadOnlyList<ChatMessage> ?? messages.ToList();
+        SetTags(list, options);
+        try { return await base.GetResponseAsync(list, options, cancellationToken); }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            SetFailure(exception);
+            throw;
+        }
+    }
+
+    public override async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages,
+        ChatOptions? options = null, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        IReadOnlyList<ChatMessage> list = messages as IReadOnlyList<ChatMessage> ?? messages.ToList();
+        SetTags(list, options);
+        IAsyncEnumerator<ChatResponseUpdate> updates;
+        try { updates = base.GetStreamingResponseAsync(list, options, cancellationToken).GetAsyncEnumerator(); }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            SetFailure(exception);
+            throw;
+        }
+
+        await using (updates)
+        {
+            while (true)
+            {
+                bool hasUpdate;
+                try { hasUpdate = await updates.MoveNextAsync(); }
+                catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+                {
+                    SetFailure(exception);
+                    throw;
+                }
+                if (!hasUpdate) yield break;
+                yield return updates.Current;
+            }
+        }
+    }
+
+    private void SetTags(IReadOnlyList<ChatMessage> messages, ChatOptions? options)
+    {
+        Activity? activity = Activity.Current;
+        if (activity is null) return;
+        activity.SetTag("fleet.node", nodeName);
+        activity.SetTag("fleet.model", model);
+        activity.SetTag("fleet.followed_trim", false);
+        activity.SetTag("fleet.prompt_tokens_estimate", ContextSizeChatClient.EstimateTokens(messages, options));
+        if (options?.AdditionalProperties?.TryGetValue(FleetRoutingChatClient.RunnerTierKey, out object? tier) == true)
+            activity.SetTag("fleet.tier", tier?.ToString());
+        if (options?.AdditionalProperties?.TryGetValue(FleetRoutingChatClient.RunnerRoleKey, out object? role) == true)
+            activity.SetTag("fleet.role", role?.ToString());
+    }
+
+    private static void SetFailure(Exception exception)
+    {
+        HttpRequestException? http = (exception as HttpRequestException) ?? (exception.InnerException as HttpRequestException);
+        Activity.Current?.SetTag("fleet.http_status", http?.StatusCode is { } status ? $"{(int)status}" : "none");
+        Activity.Current?.SetStatus(ActivityStatusCode.Error);
     }
 }
 
@@ -85,7 +157,7 @@ internal static class OllamaNodeClient
 /// to the processor at 32K and takes minutes per call). A size, once used, is kept for twenty minutes so a conversation
 /// that grows does not make Ollama reload the model at every step down and up.
 /// </summary>
-internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, string model, int maximum, ILogger logger, bool thinkingOff = false, IContextWindowFitter? fitter = null) : DelegatingChatClient(inner)
+internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, string model, int maximum, ILogger logger, bool thinkingOff = false, IContextWindowFitter? fitter = null, string? nodeName = null) : DelegatingChatClient(inner)
 {
     /// <summary>The smallest window a request asks for; the health probe asks for it when nothing is loaded.</summary>
     internal const int SmallestSize = 8192;
@@ -294,6 +366,7 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
     private async Task<ChatResponse> AskAsync(Sized sized, CancellationToken cancellationToken)
     {
         Attempt attempt = StartAttempt(sized);
+        SetTelemetryTags(attempt);
         ChatResponse response;
         try
         {
@@ -301,6 +374,8 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
         }
         catch (Exception exception) when (!IsCallerCancellation(exception, cancellationToken))
         {
+            Activity.Current?.SetTag("fleet.http_status", StatusOf(exception));
+            Activity.Current?.SetStatus(ActivityStatusCode.Error);
             ReportFailure(attempt, exception);
             throw;
         }
@@ -311,12 +386,15 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
 
     private IAsyncEnumerator<ChatResponseUpdate> StartStream(Attempt attempt, CancellationToken cancellationToken)
     {
+        SetTelemetryTags(attempt);
         try
         {
             return base.GetStreamingResponseAsync(attempt.Prepared.Messages, attempt.Prepared.Options, cancellationToken).GetAsyncEnumerator();
         }
         catch (Exception exception) when (!IsCallerCancellation(exception, cancellationToken))
         {
+            Activity.Current?.SetTag("fleet.http_status", StatusOf(exception));
+            Activity.Current?.SetStatus(ActivityStatusCode.Error);
             ReportFailure(attempt, exception);
             throw;
         }
@@ -330,6 +408,8 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
         }
         catch (Exception exception) when (!IsCallerCancellation(exception, cancellationToken))
         {
+            Activity.Current?.SetTag("fleet.http_status", StatusOf(exception));
+            Activity.Current?.SetStatus(ActivityStatusCode.Error);
             ReportFailure(attempt, exception);
             throw;
         }
@@ -397,6 +477,21 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
     // A caller that stops its own request is not a failure of the model's server; a timeout of the HTTP client is.
     private static bool IsCallerCancellation(Exception exception, CancellationToken cancellationToken) =>
         exception is OperationCanceledException && cancellationToken.IsCancellationRequested;
+
+    private void SetTelemetryTags(Attempt attempt)
+    {
+        Activity? activity = Activity.Current;
+        if (activity is null) return;
+        activity.SetTag("fleet.node", nodeName);
+        activity.SetTag("fleet.model", model);
+        activity.SetTag("fleet.num_ctx", attempt.Prepared.Size);
+        activity.SetTag("fleet.followed_trim", attempt.Prepared.FollowedShortening);
+        activity.SetTag("fleet.prompt_tokens_estimate", attempt.Prepared.Estimate);
+        if (attempt.Prepared.Options.AdditionalProperties?.TryGetValue(FleetRoutingChatClient.RunnerTierKey, out object? tier) == true)
+            activity.SetTag("fleet.tier", tier?.ToString());
+        if (attempt.Prepared.Options.AdditionalProperties?.TryGetValue(FleetRoutingChatClient.RunnerRoleKey, out object? role) == true)
+            activity.SetTag("fleet.role", role?.ToString());
+    }
 
     // The HTTP status when the failure carries one, directly or inside another exception.
     private static string StatusOf(Exception exception)

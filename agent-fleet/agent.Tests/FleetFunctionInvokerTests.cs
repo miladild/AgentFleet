@@ -1,5 +1,8 @@
+using System.Diagnostics;
+using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AgentFleet.Tests;
@@ -8,6 +11,7 @@ namespace AgentFleet.Tests;
 /// Characterisation tests for FleetFunctionInvoker: wiring of policy checks, gate blocks, loop guard markers,
 /// termination conditions, and journal recording.
 /// </summary>
+[Collection(ContextTestBase.SqliteRecordCollection)]
 public sealed class FleetFunctionInvokerTests : ContextTestBase
 {
     private readonly string _plansDir = Path.Combine(Path.GetTempPath(), "fleet-invoker-plans-" + Guid.NewGuid().ToString("N"));
@@ -83,6 +87,241 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
         ChatResponse response = await client.GetResponseAsync("go", options, cancellationToken);
         return response.Messages.SelectMany(m => m.Contents).OfType<FunctionResultContent>()
             .Select(c => c.Result?.ToString() ?? "").ToArray();
+    }
+
+    [Fact]
+    public async Task Tool_span_records_only_name_outcome_and_result_size()
+    {
+        var stopped = new List<Activity>();
+        using ActivityListener listener = new()
+        {
+            ShouldListenTo = source => source.Name == FleetTelemetry.SourceName,
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData,
+            ActivityStopped = activity => stopped.Add(activity)
+        };
+        ActivitySource.AddActivityListener(listener);
+        const string argumentMarker = "private-tool-argument";
+        const string resultMarker = "private-tool-result";
+        var tool = AIFunctionFactory.Create((string path) => resultMarker, "list_directory", "Lists.");
+        var model = new ScriptedModel(round => round == 0
+            ? new FunctionCallContent("tool-call", "list_directory", new Dictionary<string, object?> { ["path"] = argumentMarker })
+            : null);
+
+        await RunAsync(NewInvoker(), model, tool, runner: false);
+
+        Activity span = Assert.Single(stopped, item => item.GetTagItem("fleet.tool") is not null);
+        Assert.Equal("list_directory", span.GetTagItem("fleet.tool"));
+        Assert.Equal("ok", span.GetTagItem("fleet.tool_outcome"));
+        Assert.Equal(resultMarker.Length, span.GetTagItem("fleet.result_chars"));
+        Assert.DoesNotContain(argumentMarker, string.Join(" ", span.TagObjects.Select(tag => tag.Value)));
+        Assert.DoesNotContain(resultMarker, string.Join(" ", span.TagObjects.Select(tag => tag.Value)));
+    }
+
+    private const string PromptMarker = "private-prompt-marker";
+    private const string ArgumentMarker = "private-tool-argument-marker";
+    private const string ResultMarker = "private-tool-result-marker";
+
+    // The chain the backend builds: model telemetry under function invocation and our invoker, then agent telemetry on top.
+    private async Task RunProductionLikeTurnAsync()
+    {
+        var invoker = NewInvoker();
+        var tool = AIFunctionFactory.Create((string path) => ResultMarker, "list_directory", "Lists.");
+        var model = new ScriptedModel(round => round == 0
+            ? new FunctionCallContent("c0", "list_directory", new Dictionary<string, object?> { ["path"] = ArgumentMarker })
+            : null);
+        IChatClient modelClient = new ChatClientBuilder(model)
+            .UseOpenTelemetry(NullLoggerFactory.Instance, "AgentFleet.Model", client => client.EnableSensitiveData = false)
+            .Build();
+        IChatClient client = new ChatClientBuilder(modelClient).UseFunctionInvocation(null, o =>
+        {
+            o.IncludeDetailedErrors = true;
+            o.MaximumIterationsPerRequest = 200;
+            o.MaximumConsecutiveErrorsPerRequest = 6;
+            o.FunctionInvoker = invoker.InvokeAsync;
+        }).Build();
+        var agent = new ChatClientAgent(client, instructions: "Answer briefly.", name: "fleet", tools: [tool]);
+        AIAgent instrumented = agent.AsBuilder()
+            .UseOpenTelemetry("AgentFleet.Agent", a => a.EnableSensitiveData = false)
+            .Build(new ServiceCollection().BuildServiceProvider());
+
+        using IDisposable scope = Scope(NewContextId());
+        await instrumented.RunAsync(PromptMarker).WaitAsync(SafetyLimit);
+    }
+
+    // Every string an activity carries: its name, tag keys and values, event names and their tags, baggage.
+    private static IEnumerable<string> TextOf(Activity activity)
+    {
+        yield return activity.DisplayName;
+        foreach (KeyValuePair<string, object?> tag in activity.TagObjects)
+        {
+            yield return tag.Key;
+            foreach (string value in StringsOf(tag.Value)) yield return value;
+        }
+        foreach (ActivityEvent evt in activity.Events)
+        {
+            yield return evt.Name;
+            foreach (KeyValuePair<string, object?> tag in evt.Tags)
+            {
+                yield return tag.Key;
+                foreach (string value in StringsOf(tag.Value)) yield return value;
+            }
+        }
+        foreach (KeyValuePair<string, string?> item in activity.Baggage)
+        {
+            yield return item.Key;
+            if (item.Value is not null) yield return item.Value;
+        }
+    }
+
+    private static IEnumerable<string> StringsOf(object? value) => value switch
+    {
+        null => [],
+        string text => [text],
+        System.Collections.IEnumerable items => items.Cast<object?>().SelectMany(StringsOf),
+        _ => [value.ToString() ?? string.Empty]
+    };
+
+    [Fact]
+    public async Task Telemetry_on_the_tool_call_path_never_records_prompt_argument_or_result_text()
+    {
+        string folder = Path.Combine(Path.GetTempPath(), "fleet-invoker-telemetry-" + Guid.NewGuid().ToString("N"));
+        var captured = new List<Activity>();
+        try
+        {
+            using IDisposable? provider = FleetTelemetry.Configure("file", folder);
+            using ActivityListener listener = new()
+            {
+                ShouldListenTo = _ => true,
+                Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData,
+                ActivityStopped = activity => { lock (captured) captured.Add(activity); }
+            };
+            ActivitySource.AddActivityListener(listener);
+
+            await RunProductionLikeTurnAsync();
+
+            Activity[] stopped;
+            lock (captured) stopped = captured.ToArray();
+            // The probe only means something if the framework's own spans are among those it inspected.
+            Assert.Contains(stopped, activity => activity.GetTagItem("fleet.tool") is not null);
+            Assert.Contains(stopped, activity => activity.DisplayName.StartsWith("execute_tool", StringComparison.Ordinal));
+            Assert.Contains(stopped, activity => activity.DisplayName.StartsWith("invoke_agent", StringComparison.Ordinal));
+            string all = string.Join("\n", stopped.SelectMany(TextOf));
+            Assert.DoesNotContain(PromptMarker, all);
+            Assert.DoesNotContain(ArgumentMarker, all);
+            Assert.DoesNotContain(ResultMarker, all);
+        }
+        finally
+        {
+            if (Directory.Exists(folder)) Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Telemetry_file_for_the_tool_call_path_never_records_prompt_argument_or_result_text()
+    {
+        string folder = Path.Combine(Path.GetTempPath(), "fleet-invoker-file-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            using (FleetTelemetry.Configure("file", folder))
+            {
+                await RunProductionLikeTurnAsync();
+            }
+
+            string text = string.Concat(Directory.GetFiles(folder, "telemetry-*.jsonl").Select(File.ReadAllText));
+            Assert.Contains("list_directory", text);
+            Assert.DoesNotContain(PromptMarker, text);
+            Assert.DoesNotContain(ArgumentMarker, text);
+            Assert.DoesNotContain(ResultMarker, text);
+            // The allow-list keeps identifiers and drops the static tool schema the framework puts on every model span.
+            Assert.DoesNotContain("gen_ai.tool.definitions", text);
+            Assert.DoesNotContain("gen_ai.tool.description", text);
+            Assert.DoesNotContain("gen_ai.agent.description", text);
+            Assert.Contains("gen_ai.operation.name", text);
+            Assert.Contains("gen_ai.tool.name", text);
+            Assert.Contains("fleet.tool", text);
+        }
+        finally
+        {
+            if (Directory.Exists(folder)) Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    // The outcome tag says what the code path did, so words in a tool's own output (a file that says "refused") do not
+    // change it.
+    private async Task<string?> ToolOutcomeAsync(FleetFunctionInvoker invoker, ScriptedModel model, AITool tool, string toolName, bool runner)
+    {
+        var stopped = new List<Activity>();
+        using ActivityListener listener = new()
+        {
+            ShouldListenTo = source => source.Name == FleetTelemetry.SourceName,
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData,
+            ActivityStopped = activity => { lock (stopped) stopped.Add(activity); }
+        };
+        ActivitySource.AddActivityListener(listener);
+
+        await RunAsync(invoker, model, tool, runner: runner).WaitAsync(SafetyLimit);
+
+        Activity span = Assert.Single(stopped, item => toolName.Equals(item.GetTagItem("fleet.tool")));
+        return span.GetTagItem("fleet.tool_outcome") as string;
+    }
+
+    [Fact]
+    public async Task A_tool_result_that_mentions_refused_is_still_tagged_ok()
+    {
+        var tool = AIFunctionFactory.Create((string path) => "connection refused by the remote host", "read_probe_file", "Reads.");
+        var model = new ScriptedModel(round => round == 0 ? new FunctionCallContent("c0", "read_probe_file", new Dictionary<string, object?> { ["path"] = "f" }) : null);
+
+        Assert.Equal("ok", await ToolOutcomeAsync(NewInvoker(), model, tool, "read_probe_file", runner: false));
+    }
+
+    [Fact]
+    public async Task A_plan_gate_refusal_is_tagged_refused()
+    {
+        var tool = AIFunctionFactory.Create((string path, string content) => "wrote", "write_file", "Writes a file.");
+
+        Assert.Equal("refused", await ToolOutcomeAsync(NewInvoker(planMode: true), OneWriteCall("write_file"), tool, "write_file", runner: false));
+    }
+
+    [Fact]
+    public async Task A_runner_policy_refusal_is_tagged_refused()
+    {
+        var tool = AIFunctionFactory.Create((string command) => "ok", "run_command", "Runs a command.");
+        var model = new ScriptedModel(round => new FunctionCallContent("c" + round, "run_command", new Dictionary<string, object?> { ["command"] = "npm publish" }));
+
+        Assert.Equal("refused", await ToolOutcomeAsync(NewInvoker(), model, tool, "run_command", runner: true));
+    }
+
+    [Fact]
+    public async Task A_rejected_chat_approval_is_tagged_approval_denied()
+    {
+        var stopped = new List<Activity>();
+        using ActivityListener listener = new()
+        {
+            ShouldListenTo = source => source.Name == FleetTelemetry.SourceName,
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData,
+            ActivityStopped = activity => { lock (stopped) stopped.Add(activity); }
+        };
+        ActivitySource.AddActivityListener(listener);
+        var approvals = NewApprovals();
+        var invoker = NewInvoker(approvals: approvals, approvalsOn: true);
+        var tool = AIFunctionFactory.Create((string path, string content) => "wrote", "write_file", "Writes a file.");
+
+        Task<string[]> turn = RunAsync(invoker, OneWriteCall("write_file"), tool, runner: false);
+        PendingApproval waiting = (await ChatApprovalsTests.WaitForPendingAsync(approvals)).Single();
+        Assert.True(approvals.Decide(waiting.Id, approve: false));
+        await turn.WaitAsync(SafetyLimit);
+
+        Activity span = Assert.Single(stopped, item => "write_file".Equals(item.GetTagItem("fleet.tool")));
+        Assert.Equal("approval-denied", span.GetTagItem("fleet.tool_outcome"));
+    }
+
+    [Fact]
+    public async Task A_tool_that_throws_is_tagged_error()
+    {
+        var tool = AIFunctionFactory.Create((string path) => { throw new InvalidOperationException("disk unavailable"); }, "read_probe_failing", "Reads.");
+        var model = new ScriptedModel(round => round == 0 ? new FunctionCallContent("c0", "read_probe_failing", new Dictionary<string, object?> { ["path"] = "f" }) : null);
+
+        Assert.Equal("error", await ToolOutcomeAsync(NewInvoker(), model, tool, "read_probe_failing", runner: false));
     }
 
     // Behaviour 6: Runner terminates after the configured number of tool rounds.

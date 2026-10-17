@@ -73,6 +73,11 @@ int defaultContextLength = OllamaNodeClient.ConfiguredDefault(builder.Configurat
 
 var app = builder.Build();
 
+// No ActivityListener or exporter is registered unless telemetry is explicitly enabled. Configured before any client is built,
+// because the clients are wrapped only when telemetry is on.
+using var telemetryProvider = FleetTelemetry.Configure(builder.Configuration["FLEET_TELEMETRY"],
+    Path.Combine(AppContext.BaseDirectory, "logs"), app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("AgentFleet.Telemetry"));
+
 // The context-window fitting policy: how to shorten conversations that exceed the model's window.
 ILoggerFactory fitLoggers = app.Services.GetRequiredService<ILoggerFactory>();
 var fitLog = fitLoggers.CreateLogger("AgentFleet.ContextFit");
@@ -136,7 +141,7 @@ FleetRoutingChatClient BuildRouter(FleetConfig config)
 
     IChatClient BuildNodeClient(FleetNodeDefinition node, IChatClient? fallback) =>
         new ResilientChatClient(
-            OllamaNodeClient.Create(
+            FleetTelemetry.Instrument(OllamaNodeClient.Create(
                 node.OpenAiEndpoint,
                 node.Model,
                 node.Api,
@@ -144,7 +149,8 @@ FleetRoutingChatClient BuildRouter(FleetConfig config)
                 fleetOptions.NetworkTimeout,
                 loggerFactory.CreateLogger($"AgentFleet.Node.{node.Name}"),
                 node.Thinking,
-                fitter: contextFitter),
+                fitter: contextFitter,
+                nodeName: node.Name), loggerFactory),
             node,
             healthMonitor,
             loggerFactory.CreateLogger($"AgentFleet.Node.{node.Name}"),
@@ -156,8 +162,8 @@ FleetRoutingChatClient BuildRouter(FleetConfig config)
 
     // The triage classifier runs on the fallback node's machine, with its own small model.
     IChatClient triageClient = new ResilientChatClient(
-        OllamaNodeClient.Create(fallbackNode.OpenAiEndpoint, config.TriageModel, fallbackNode.Api, OllamaNodeClient.TriageContextLength,
-            fleetOptions.NetworkTimeout, loggerFactory.CreateLogger("AgentFleet.Triage")),
+        FleetTelemetry.Instrument(OllamaNodeClient.Create(fallbackNode.OpenAiEndpoint, config.TriageModel, fallbackNode.Api, OllamaNodeClient.TriageContextLength,
+            fleetOptions.NetworkTimeout, loggerFactory.CreateLogger("AgentFleet.Triage"), nodeName: fallbackNode.Name), loggerFactory),
         fallbackNode,
         healthMonitor,
         loggerFactory.CreateLogger("AgentFleet.Triage"));
@@ -676,6 +682,7 @@ var fleetAgent = new ChatClientAgent(
     name: "fleet",
     description: "Local coding assistant routed across the available fleet",
     tools: agentTools);
+AIAgent instrumentedFleetAgent = FleetTelemetry.Instrument(fleetAgent, app.Services);
 
 // Optional: a message to a LAN address when a plan needs the user (a step parked, the run ended with steps waiting, done,
 // the run deadline). Off unless "notifyUrl" is set in the fleet config.
@@ -703,7 +710,7 @@ if (!string.IsNullOrWhiteSpace(fleetConfigStore.Current.NotifyUrl))
 var planRunner = new PlanRunner(
     planStore,
     planTools,
-    new FleetStepAgent(fleetAgent),
+    new FleetStepAgent(instrumentedFleetAgent),
     loggerFactory.CreateLogger("AgentFleet.PlanRunner"),
     fleetOptions: fleetOptions,
     workerWorkspaces: workerWorkspaces,
@@ -1901,7 +1908,7 @@ app.MapPost("/api/setup/sandbox/prepare", (FleetSandboxConfig request) =>
     return Results.Json(SandboxSetup.PrepareStatus);
 });
 
-app.MapAGUIServer("/", fleetAgent);
+app.MapAGUIServer("/", instrumentedFleetAgent);
 
 await app.RunAsync();
 

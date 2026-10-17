@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
@@ -23,6 +24,34 @@ internal sealed class FleetFunctionInvoker(
     public async ValueTask<object?> InvokeAsync(FunctionInvocationContext context, CancellationToken cancellationToken)
     {
         string toolName = context.Function.Name;
+        Activity? activity = Activity.Current;
+        Activity? ownedActivity = null;
+        if (activity?.DisplayName.StartsWith("execute_tool", StringComparison.Ordinal) != true)
+            activity = ownedActivity = FleetTelemetry.Source.StartActivity($"tool {toolName}", ActivityKind.Internal);
+        activity?.SetTag("fleet.tool", toolName);
+        try
+        {
+            // The outcome comes from the path that produced the result: a tool's own text can say "refused" and still have run.
+            (object? result, string outcome) = await InvokeCoreAsync(context, cancellationToken);
+            activity?.SetTag("fleet.result_chars", result?.ToString()?.Length ?? 0);
+            activity?.SetTag("fleet.tool_outcome", outcome);
+            return result;
+        }
+        catch (Exception)
+        {
+            activity?.SetTag("fleet.tool_outcome", "error");
+            activity?.SetStatus(ActivityStatusCode.Error);
+            throw;
+        }
+        finally
+        {
+            ownedActivity?.Dispose();
+        }
+    }
+
+    private async ValueTask<(object? Result, string Outcome)> InvokeCoreAsync(FunctionInvocationContext context, CancellationToken cancellationToken)
+    {
+        string toolName = context.Function.Name;
         // The plan runner is the executor: its requests carry the runner key and are exempt.
         bool fromRunner = context.Options?.AdditionalProperties?.ContainsKey(FleetRoutingChatClient.RunnerTierKey) == true;
         if (fromRunner)
@@ -36,7 +65,7 @@ internal sealed class FleetFunctionInvoker(
             {
                 context.Terminate = true;
                 RecordToolCall(context, toolName, refusal, isError: true);
-                return refusal;
+                return (refusal, "refused");
             }
         }
         if (toolName != PlanGate.BlockedToolName && !fromRunner)
@@ -49,7 +78,7 @@ internal sealed class FleetFunctionInvoker(
             {
                 string refusal = PlanGate.BlockedMessage(toolName);
                 RecordToolCall(context, toolName, refusal, isError: true);
-                return refusal;
+                return (refusal, "refused");
             }
         }
 
@@ -84,7 +113,7 @@ internal sealed class FleetFunctionInvoker(
                     ? $"The user did not approve running {toolName}."
                     : $"{toolName} was not approved in time.";
                 RecordToolCall(context, toolName, refusal, isError: true);
-                return refusal;
+                return (refusal, "approval-denied");
             }
         }
 
@@ -118,7 +147,8 @@ internal sealed class FleetFunctionInvoker(
                 context.Terminate = true;
             }
 
-            return result;
+            string text = result?.ToString() ?? string.Empty;
+            return (result, text.StartsWith("Error:", StringComparison.OrdinalIgnoreCase) ? "error" : "ok");
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {

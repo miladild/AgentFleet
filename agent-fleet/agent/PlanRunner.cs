@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -939,10 +940,14 @@ internal sealed partial class PlanRunner
                 handover = null;
                 bool continuing = repairMessage is not null;
                 DateTimeOffset roundStarted = _utcNow();
+                using Activity? roundActivity = FleetTelemetry.StartPlanRound(plan.Id, step.Id, attempt, round, rung,
+                    workspaceOverride ?? conversationWorkspace ?? step.Machine, modelOverride);
                 ModelAttemptResult model = await RunModelAttemptAsync(
                     plan, step, attempt, lastFailure, tier, parallelGroup: false, cancellationToken: cancellationToken,
                     workspaceOverride: workspaceOverride ?? (continuing ? conversationWorkspace : null), modelMachineOverride: modelOverride,
                     round: new RoundContext(conversation, rung, round, repairMessage, brief), limit: LimitFor(plan, worked));
+                roundActivity?.SetTag("fleet.model_node", model.ModelNode);
+                roundActivity?.SetTag("fleet.workspace_node", model.Machine);
                 if (model.Machine is not null)
                 {
                     conversationWorkspace = model.Machine;
@@ -1099,6 +1104,8 @@ internal sealed partial class PlanRunner
 
                     // A check that cannot run or finish, or a machine without the project's own dependencies, is repaired here and
                     // the check runs again in the same workspace, so it costs no round.
+                    using Activity? checkActivity = FleetTelemetry.StartPlanCheck(plan.Id, step.Id, attempt, round, rung,
+                        model.Machine, model.ModelNode);
                     CheckRun run = model.Workspace is null
                         ? await RunCheckWithRepairsAsync(plan, step, attempt, tier, rung, round, model, cancellationToken)
                         : await RunWithReconnectsAsync(
