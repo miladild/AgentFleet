@@ -99,27 +99,52 @@ try {
 
     # Script surface: parameters, mandatory inputs and defaults, and the bench parameters the candidate relies on.
     $wrapperParams = Get-ParameterNames $wrapperAst
-    $documented = 'Node', 'Model', 'Config', 'Tasks', 'Repeat', 'Port', 'OutDir', 'AllowHub', 'Force', 'WhatIf'
+    $documented = 'Node', 'Model', 'Config', 'Tasks', 'Repeat', 'TimeoutMinutes', 'NoProgressMinutes', 'Port', 'OutDir', 'AllowHub', 'Force', 'WhatIf'
     Assert-Check (@($documented | Where-Object { $wrapperParams -notcontains $_ }).Count -eq 0) 'the candidate script has every documented parameter'
     $mandatory = @($wrapperAst.ParamBlock.Parameters | Where-Object { $_.Attributes.Extent.Text -match 'Mandatory' } | ForEach-Object { $_.Name.VariablePath.UserPath })
     Assert-Check (($mandatory -join ',') -eq 'Node,Model') '-Node and -Model are mandatory'
     Assert-Check ((Get-Parameter $wrapperAst 'Port').DefaultValue.Extent.Text -eq '8010') 'the default -Port is 8010'
     Assert-Check ((Get-Parameter $wrapperAst 'Repeat').DefaultValue.Extent.Text -eq '1') 'the default -Repeat is 1'
+    Assert-Check ((Get-Parameter $wrapperAst 'TimeoutMinutes').DefaultValue.Extent.Text -eq '30') 'the default task timeout is 30 minutes'
+    Assert-Check ((Get-Parameter $wrapperAst 'NoProgressMinutes').DefaultValue.Extent.Text -eq '15') 'the default no-progress stop is 15 minutes'
 
     $startParams = Get-ParameterNames $startAst
     Assert-Check ((@('Port', 'Config', 'WorkRoot', 'NoHubModel', 'HealthTimeoutSeconds', 'Stop') | Where-Object { $startParams -notcontains $_ }).Count -eq 0) `
         'Start-BenchBackend.ps1 keeps the parameters the candidate script passes'
     Assert-Check ((Get-Parameter $startAst 'HealthTimeoutSeconds').DefaultValue.Extent.Text -eq '90') 'Start-BenchBackend.ps1 still waits 90 s by default'
     $benchParams = Get-ParameterNames $benchAst
-    Assert-Check ((@('BaseUrl', 'OutDir', 'Repeat', 'Review', 'AutoRetries', 'WorkerOnly', 'Tasks') | Where-Object { $benchParams -notcontains $_ }).Count -eq 0) `
+    Assert-Check ((@('BaseUrl', 'OutDir', 'Repeat', 'Review', 'AutoRetries', 'WorkerOnly', 'Tasks', 'TimeoutMinutes', 'NoProgressMinutes') | Where-Object { $benchParams -notcontains $_ }).Count -eq 0) `
         'Invoke-Bench.ps1 has every parameter the candidate script passes'
     Assert-Check (((Get-Parameter $benchAst 'Review').Attributes.Extent.Text -join ' ') -match "'off'") 'Invoke-Bench.ps1 accepts -Review off'
+    Assert-Check (($wrapperAst.Extent.Text -match 'New-CandidateBenchArguments' -and $wrapperAst.Extent.Text -match '& \$benchScript @benchArgs') -and
+        (($wrapperAst.FindAll({ param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'New-CandidateBenchArguments' }, $true)).Count -ge 1)) `
+        'the candidate run splats the timeout options returned by its bench argument builder'
     $startText = [IO.File]::ReadAllText($startScript)
     $skipSwitchUses = @($startAst.FindAll({ param($node) $node -is [Management.Automation.Language.CommandParameterAst] -and $node.ParameterName -eq 'SkipHttpErrorCheck' }, $true))
     Assert-Check ($skipSwitchUses.Count -eq 0) 'Start-BenchBackend.ps1 no longer uses a switch that Windows PowerShell 5.1 lacks'
     $wrapperText = [IO.File]::ReadAllText($wrapper)
     Assert-Check ($wrapperText -match "Review = 'off'" -and $wrapperText -match 'AutoRetries = 0' -and $wrapperText -match 'HealthTimeoutSeconds = 180') `
         'the candidate run uses no second opinion, no automatic retries and a three-minute health wait'
+
+    # Feed the exact candidate argument builder into the benchmark's run record, using a fake configuration response.
+    $argumentBuilder = $wrapperAst.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'New-CandidateBenchArguments' }, $true)
+    $runNodes = $benchAst.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-RunNodes' }, $true)
+    $runRecord = $benchAst.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Write-RunRecord' }, $true)
+    Assert-Check ($argumentBuilder -and $runNodes -and $runRecord) 'candidate argument and benchmark record helpers exist'
+    Invoke-Expression $argumentBuilder.Extent.Text
+    Invoke-Expression $runNodes.Extent.Text
+    Invoke-Expression $runRecord.Extent.Text
+    $candidateArgs = New-CandidateBenchArguments 'http://192.0.2.10:18010' (Join-Path $scratch 'run-record') 2 23 7 $true @('slugify') $true
+    $BaseUrl = $candidateArgs.BaseUrl; $OutDir = $candidateArgs.OutDir; $Repeat = $candidateArgs.Repeat
+    $TimeoutMinutes = $candidateArgs.TimeoutMinutes; $NoProgressMinutes = $candidateArgs.NoProgressMinutes
+    $WorkerOnly = $candidateArgs.WorkerOnly; $Review = $candidateArgs.Review; $AutoRetries = $candidateArgs.AutoRetries; $Tier = 'as-written'
+    $script:wrapperFakeConfig = [pscustomobject]@{ nodes = @([pscustomobject]@{ name = 'worker1'; model = 'candidate-model:2b' }) }
+    function Invoke-RestMethod { param([string]$Uri, [int]$TimeoutSec) if ($TimeoutSec -ne 30 -or $Uri -notlike '*/api/fleet-config') { throw "Unexpected request: $Uri" }; $script:wrapperFakeConfig }
+    New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+    Write-RunRecord ([datetime]::SpecifyKind([datetime]'2026-10-14T09:00:00', [DateTimeKind]::Utc)) @('slugify')
+    $candidateRun = Get-Content -LiteralPath (Join-Path $OutDir 'run.json') -Raw | ConvertFrom-Json
+    Assert-Check ($candidateArgs.TimeoutMinutes -eq 23 -and $candidateArgs.NoProgressMinutes -eq 7) 'candidate timeout values are passed to Invoke-Bench arguments'
+    Assert-Check ($candidateRun.options.timeoutMinutes -eq 23 -and $candidateRun.options.noProgressMinutes -eq 7) 'candidate timeout values appear in run.json'
 
     # Folder names: a model tag or a path must never add folders or characters Windows refuses.
     Assert-Check ((Get-CandidateFolderPart 'model-a:7b') -eq 'model-a-7b') 'folder name: a tag separator becomes a dash'
@@ -315,6 +340,7 @@ try {
     Assert-Check ($dry.ExitCode -eq 0) 'dry run exits with 0'
     Assert-Check ($dry.Text -match "model 'worker-model-a:7b' -> 'candidate-model:2b'") 'dry run prints the one configuration change'
     Assert-Check ($dry.Text -match 'Dry run complete') 'dry run says it started nothing'
+    Assert-Check ($dry.Text -match 'Each task has a 30 min timeout; the no-progress stop is 15 min' -and $dry.Text -match 'TimeoutMinutes 30 and NoProgressMinutes 15') 'the candidate run header prints both default task caps'
     Assert-Check ($dry.Text -match 'same Ollama address as eyes') 'dry run warns that the worker shares its Ollama address with another node'
     Assert-Check ($dry.Text -notmatch '== Starting' -and $dry.Text -notmatch '== Running') 'dry run has no start or run step'
     Assert-Check (-not (Test-Path -LiteralPath $outDir)) 'dry run creates no output folder'

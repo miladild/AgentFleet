@@ -78,7 +78,7 @@ A candidate is a model you want to consider for one worker. `scripts\Test-Candid
     .\scripts\Test-CandidateModel.ps1 -Node worker1 -Model qwen2.5-coder:7b -WhatIf
     .\scripts\Test-CandidateModel.ps1 -Node worker1 -Model qwen2.5-coder:7b
 
-The first command only prints the steps. The second runs them. The script copies your configuration to a temporary folder with that one machine's model changed. It starts a throwaway backend, a second temporary copy of the backend, on port 8010 (a port is the number a program listens on; `-Port` picks another), with an empty plans folder. It waits up to three minutes for that backend to answer. Then it runs the tasks on that worker alone. The hub's model is kept out, so a step that tries the hub fails at once instead of loading it. There is no reviewer model checking each step and no automatic retry. A repair step may still go to another worker, and the summary lists every machine that did work. By default every benchmark task runs once. `-Tasks` picks some, and `-Repeat` sets how many times each task runs. Results go to `bench\results\candidate-<node>-<model>-<time>`, or to `-OutDir`.
+The first command only prints the steps. The second runs them. The script copies your configuration to a temporary folder with that one machine's model changed. It starts a throwaway backend, a second temporary copy of the backend, on port 8010 (a port is the number a program listens on; `-Port` picks another), with an empty plans folder. It waits up to three minutes for that backend to answer. Then it runs the tasks on that worker alone. The hub's model is kept out, so a step that tries the hub fails at once instead of loading it. There is no reviewer model checking each step and no automatic retry. A repair step may still go to another worker, and the summary lists every machine that did work. By default every benchmark task runs once. `-Tasks` picks some, and `-Repeat` sets how many times each task runs. Each task stops after 30 minutes by default (`-TimeoutMinutes`), or after 15 minutes without a finished round or check (`-NoProgressMinutes`). Set `-NoProgressMinutes 0` to disable the no-progress stop. The run header and `run.json` record both settings. Results go to `bench\results\candidate-<node>-<model>-<time>`, or to `-OutDir`.
 
 It refuses, and starts nothing, when:
 
@@ -92,7 +92,7 @@ It refuses, and starts nothing, when:
 
 It never writes your configuration, and it checks at the end that the file is unchanged. The model must already be on that machine; the script does not download it. The throwaway backend is stopped and its copy deleted even when the run fails. When a run fails, its backend logs are copied into the results folder.
 
-The run time depends on the model and the machine. The bench README gives 20 to 60 minutes for every task run three times across the fleet. When the run finishes, import `results.jsonl` in the Models tab, or send it to `POST /api/lab/results/import`. To see what each machine has installed, run `scripts\Get-FleetModels.ps1` on the hub.
+The run time depends on the model and the machine. The bench README gives 20 to 60 minutes for every task run three times across the fleet. The benchmark summary includes stalled rows and the median minutes per completed round. When the run finishes, import `results.jsonl` in the Models tab, or send it to `POST /api/lab/results/import`. To see what each machine has installed, run `scripts\Get-FleetModels.ps1` on the hub.
 
 ## Settings and endpoints
 

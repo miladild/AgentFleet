@@ -31,6 +31,12 @@
 .PARAMETER Repeat
     How many times each task runs. Default 1.
 
+.PARAMETER TimeoutMinutes
+    Maximum time for each benchmark task. Default 30 minutes.
+
+.PARAMETER NoProgressMinutes
+    Stop a task when no round or check finishes for this many minutes. Default 15; 0 disables the no-progress stop.
+
 .PARAMETER Port
     The port of the throwaway backend. Default 8010. It must not be a live backend's port, the web UI's or Ollama's, and
     nothing may already listen on it, because the benchmark backend stops whatever listens on its port.
@@ -58,6 +64,8 @@ param(
     [string]$Config,
     [string[]]$Tasks,
     [ValidateRange(1, 100)][int]$Repeat = 1,
+    [ValidateRange(1, 10000)][int]$TimeoutMinutes = 30,
+    [ValidateRange(0, 10000)][int]$NoProgressMinutes = 15,
     [ValidateRange(1, 65535)][int]$Port = 8010,
     [string]$OutDir,
     [switch]$AllowHub,
@@ -283,6 +291,14 @@ function Get-SharedOllamaNodes($Nodes, [string]$NodeName) {
     return @($Nodes | Where-Object { $_.name -cne $NodeName -and "$($_.url)" -and (Get-OllamaBase "$($_.url)") -ieq $base } | ForEach-Object { $_.name })
 }
 
+function New-CandidateBenchArguments([string]$Url, [string]$ResultsDir, [int]$RunRepeat, [int]$RunTimeoutMinutes, [int]$RunNoProgressMinutes, [bool]$WorkerOnly, [string[]]$TaskList, [bool]$IncludeTasks) {
+    $arguments = @{ BaseUrl = $Url; OutDir = $ResultsDir; Repeat = $RunRepeat; Review = 'off'; AutoRetries = 0
+        TimeoutMinutes = $RunTimeoutMinutes; NoProgressMinutes = $RunNoProgressMinutes }
+    if ($WorkerOnly) { $arguments.WorkerOnly = $true }
+    if ($IncludeTasks) { $arguments.Tasks = $TaskList }
+    return $arguments
+}
+
 if ($Config -and -not (Test-Path -LiteralPath $Config)) { Stop-Refused "The configuration file was not found: $Config" }
 $source = Find-FleetConfig $Config $null
 if (-not $source) { Stop-Refused 'No fleet.config.json found. Pass -Config <path>.' }
@@ -321,6 +337,7 @@ Write-Ok "Port $Port is free and is not a live backend's, the web UI's or Ollama
 Write-Info ("Configuration change (node and model only): {0}: model '{1}' -> '{2}'" -f $Node, $oldModel, $Model)
 Write-Info "The model must already be pulled on $Node. This command does not pull it."
 Write-Info "Results go to $OutDir"
+Write-Info ("Each task has a {0} min timeout; the no-progress stop is {1}." -f $TimeoutMinutes, $(if ($NoProgressMinutes -gt 0) { "$NoProgressMinutes min" } else { 'off' }))
 
 $hubNote = if ($workerOnly) { ', with the hub''s model kept out' } else { '' }
 $workerNote = if ($workerOnly) { ', WorkerOnly' } else { '' }
@@ -330,7 +347,7 @@ if ($WhatIf) {
     Write-Info 'Would copy the configuration to a temporary folder with that one change; the original is not written.'
     Write-Info "Would start the throwaway backend on port $Port with that copy$hubNote."
     Write-Info "Would wait up to 180 s for http://localhost:$Port/health."
-    Write-Info "Would run $taskNote against http://localhost:$Port, with Repeat $Repeat, Review off, AutoRetries 0$workerNote."
+    Write-Info "Would run $taskNote against http://localhost:$Port, with Repeat $Repeat, Review off, AutoRetries 0, TimeoutMinutes $TimeoutMinutes and NoProgressMinutes $NoProgressMinutes$workerNote."
     Write-Info 'Would stop the throwaway backend and delete the temporary copy.'
     Write-Ok 'Dry run complete. Nothing was started, contacted or written.'
     exit 0
@@ -362,9 +379,7 @@ try {
     Write-Step "Starting the throwaway backend on port $Port"
     & $startScript @startArgs
 
-    $benchArgs = @{ BaseUrl = "http://localhost:$Port"; OutDir = $OutDir; Repeat = $Repeat; Review = 'off'; AutoRetries = 0 }
-    if ($workerOnly) { $benchArgs['WorkerOnly'] = $true }
-    if ($PSBoundParameters.ContainsKey('Tasks')) { $benchArgs['Tasks'] = $Tasks }
+    $benchArgs = New-CandidateBenchArguments "http://localhost:$Port" $OutDir $Repeat $TimeoutMinutes $NoProgressMinutes $workerOnly $Tasks $PSBoundParameters.ContainsKey('Tasks')
     Write-Step 'Running the benchmark tasks'
     & $benchScript @benchArgs
 }

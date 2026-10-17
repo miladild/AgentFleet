@@ -16,10 +16,15 @@ those tests, not by the plan saying "done".
 The benchmark uses the machines in your fleet configuration, so they are busy while it runs. `Invoke-Bench.ps1` writes
 `results.jsonl`, `results.json` and `summary.md` under `bench\results\<time>`, and `run.json` describing the batch
 (see [Importing results](#importing-results)). Useful options: `-Tasks early-close,slugify`,
-`-WorkerOnly` (never use the hub), `-Review off` (no second opinion), `-AutoRetries 0`, `-TimeoutMinutes`, and
+`-WorkerOnly` (never use the hub), `-Review off` (no second opinion), `-AutoRetries 0`, and
 `-Tier light` (send every step at that tier). The eight algorithm tasks are written as `standard`. Two small repairs to
 existing code, `light-display-label` and `light-request-options`, are written as `light` and each changes one helper plus its
-tests. Measure these separately when calibrating the light tier:
+tests.
+
+`-TimeoutMinutes` sets the per-task deadline (default 120). `-NoProgressMinutes` defaults to 0, which leaves the stop off;
+set it to a positive number to stop a row when no round or check has finished for that many minutes.
+
+Measure the light-tier repairs separately when calibrating that tier:
 
 ```powershell
 .\bench\Invoke-Bench.ps1 -Tasks light-display-label,light-request-options -WorkerOnly -AutoRetries 0 -Repeat 3
@@ -58,6 +63,12 @@ machines that did the work. `-Tasks` and `-Repeat` work as they do for `Invoke-B
 stopped and the temporary copy deleted, also when the run fails or is interrupted. When a run fails, the backend's log files
 are copied into the results folder with addresses and this machine's folder paths taken out (best effort: a name written
 without a folder path is not removed).
+
+Each task has a 30-minute timeout by default (`-TimeoutMinutes`). A task is also stopped after 15 minutes without a finished
+round or check (`-NoProgressMinutes`); set this option to `0` to disable that stop. A new round-classified, check-passed,
+or check-failed event restarts the no-progress window. The window is wall-clock time, so a sleep of the computer longer than
+the window can stop a healthy task as stalled; such a row shows the asleep minutes and should be run again.
+The candidate run header and `run.json` record both settings.
 
 The worker is one of the machines of your live fleet, so:
 
@@ -120,6 +131,9 @@ The counts say how many runs each machine and model did and how each one ended. 
 only when its plan finished and the hidden tests passed. A plan that said done while the hidden tests failed is a false
 accept and is counted on its own, never as a success. Parked, timed-out and errored runs are counted as well. A machine
 and model with fewer than five runs is marked too few to judge.
+
+The summary lists stalled rows separately and reports the median minutes per completed round. A stalled row is also marked
+timed out and records how long it had gone without progress.
 
 The counts do not rank models, do not measure speed (run times are not shown) and do not promise anything about other
 tasks or settings. Every import still stored is added up, so runs with different tiers or settings add together when they

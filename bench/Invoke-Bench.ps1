@@ -23,6 +23,7 @@ param(
     [string]$BaseUrl = 'http://localhost:8010',
     [string]$OutDir,
     [int]$TimeoutMinutes = 120,
+    [ValidateRange(0, 10000)][int]$NoProgressMinutes = 0,
     [ValidateRange(0.01, 10000)][double]$MaxHours = 4,
     [ValidateSet('auto', 'off')][string]$Review = 'auto',
     [switch]$WorkerOnly,
@@ -134,11 +135,59 @@ function Write-RunRecord([datetime]$Started, [string[]]$TaskIds) {
         options = [ordered]@{
             tier = $Tier; repeat = $Repeat; workerOnly = [bool]$WorkerOnly; review = $Review
             autoRetries = $(if ($AutoRetries -ge 0) { $AutoRetries } else { $null })
-            timeoutMinutes = $TimeoutMinutes; tasks = @($TaskIds)
+            timeoutMinutes = $TimeoutMinutes; noProgressMinutes = $NoProgressMinutes; tasks = @($TaskIds)
         }
         nodes = @(Get-RunNodes)
     }
     $record | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $OutDir 'run.json') -Encoding utf8
+}
+
+function Wait-ForPlan([string]$PlanId, [datetime]$Started, [datetime]$Deadline, [int]$NoProgressMinutes, [System.Collections.IDictionary]$Result) {
+    $plan = $null
+    $lastProgressAt = $Started
+    $lastProgressSignature = $null
+    while ((Get-Date) -lt $Deadline) {
+        Start-Sleep -Seconds 15
+        $plan = Invoke-RestMethod -Uri "$BaseUrl/api/plans/$PlanId" -TimeoutSec 30
+        if ($plan.status -in 'done', 'blocked', 'rejected') { break }
+
+        # The backend keeps only the latest events of a long plan, so a count can stay flat while rounds finish.
+        # Progress is judged by the newest progress event instead; the date is compared as text, not parsed.
+        $progressEvents = @($plan.events | Where-Object { $_.kind -in 'round-classified', 'check-passed', 'check-failed' })
+        $progressSignature = $null
+        if ($progressEvents.Count) {
+            $newest = $progressEvents[-1]
+            $progressSignature = "$($newest.atUtc)|$($newest.kind)|$($newest.stepId)|$($newest.attempt)"
+        }
+        if ($progressSignature -and $progressSignature -ne $lastProgressSignature) { $lastProgressAt = Get-Date }
+        $lastProgressSignature = $progressSignature
+        if ($NoProgressMinutes -gt 0 -and (Get-Date) -ge $lastProgressAt.AddMinutes($NoProgressMinutes)) {
+            $Result.timedOut = $true
+            $Result.stalled = $true
+            $Result.stalledAfterMinutes = [Math]::Round(((Get-Date) - $lastProgressAt).TotalMinutes, 1)
+            break
+        }
+    }
+
+    if ($plan.status -notin 'done', 'blocked', 'rejected') {
+        $Result.timedOut = $true
+        try { $null = Invoke-RestMethod -Uri "$BaseUrl/api/plans/$PlanId/stop" -Method Post -TimeoutSec 30 } catch { }
+        $plan = Invoke-RestMethod -Uri "$BaseUrl/api/plans/$PlanId" -TimeoutSec 30
+    }
+    return $plan
+}
+
+function Get-MinutesPerRound([double]$Minutes, [int]$Rounds) {
+    if ($Rounds -gt 0) { return [Math]::Round($Minutes / $Rounds, 1) }
+    return $null
+}
+
+function Get-MedianMinutesPerRound([object[]]$Results) {
+    $values = @($Results | Where-Object { $null -ne $_.minutesPerRound } | ForEach-Object { [double]$_.minutesPerRound } | Sort-Object)
+    if (-not $values.Count) { return $null }
+    $middle = [int][Math]::Floor($values.Count / 2)
+    if ($values.Count % 2) { return $values[$middle] }
+    return [Math]::Round(($values[$middle - 1] + $values[$middle]) / 2, 1)
 }
 
 function Invoke-Run([string]$Id, [int]$Number) {
@@ -159,7 +208,7 @@ function Invoke-Run([string]$Id, [int]$Number) {
     finally { $ErrorActionPreference = $savedPreference; Pop-Location }
 
     $result = [ordered]@{ task = $Id; run = $Number; planId = $null; status = 'not-started'; hiddenPass = $false; hiddenSummary = ''
-        falseAccept = $false; completed = $false; timedOut = $false; hiddenTimedOut = $false; asleepMinutes = 0; minutes = 0; stepsDone = 0; stepsParked = 0; rounds = 0; maxRung = 1
+        falseAccept = $false; completed = $false; timedOut = $false; stalled = $false; stalledAfterMinutes = $null; hiddenTimedOut = $false; asleepMinutes = 0; minutes = 0; minutesPerRound = $null; stepsDone = 0; stepsParked = 0; rounds = 0; maxRung = 1
         autoRetries = 0; reviewFailed = 0; reviewPassed = 0; parkCauses = ''; models = ''; blockedReason = ''; error = '' }
     $started = Get-Date
     try {
@@ -176,18 +225,7 @@ function Invoke-Run([string]$Id, [int]$Number) {
         if ($AutoRetries -ge 0) { $approval.autoRetries = $AutoRetries }
         $null = Invoke-RestMethod -Uri "$BaseUrl/api/plans/$($created.id)/approve" -Method Post -ContentType 'application/json' -Body ($approval | ConvertTo-Json) -TimeoutSec 30
 
-        $deadline = $started.AddMinutes($TimeoutMinutes)
-        $plan = $null
-        while ((Get-Date) -lt $deadline) {
-            Start-Sleep -Seconds 15
-            $plan = Invoke-RestMethod -Uri "$BaseUrl/api/plans/$($created.id)" -TimeoutSec 30
-            if ($plan.status -in 'done', 'blocked', 'rejected') { break }
-        }
-        if ($plan.status -notin 'done', 'blocked', 'rejected') {
-            $result.timedOut = $true
-            try { $null = Invoke-RestMethod -Uri "$BaseUrl/api/plans/$($created.id)/stop" -Method Post -TimeoutSec 30 } catch { }
-            $plan = Invoke-RestMethod -Uri "$BaseUrl/api/plans/$($created.id)" -TimeoutSec 30
-        }
+        $plan = Wait-ForPlan $created.id $started $started.AddMinutes($TimeoutMinutes) $NoProgressMinutes $result
 
         $events = @($plan.events)
         $result.status = $plan.status
@@ -209,6 +247,7 @@ function Invoke-Run([string]$Id, [int]$Number) {
     }
     catch { $result.error = Hide-LocalDetail $_.Exception.Message }
     $result.minutes = [Math]::Round(((Get-Date) - $started).TotalMinutes, 1)
+    $result.minutesPerRound = Get-MinutesPerRound $result.minutes $result.rounds
 
     $hidden = Invoke-Hidden $project (Join-Path $tasksRoot "$Id\hidden") (Join-Path $OutDir "$Id-$Number\hidden")
     $result.hiddenPass = $hidden.Ok
@@ -225,6 +264,7 @@ $stopReason = ''
 $results = @()
 $taskIds = @(Get-TaskIds)
 Write-RunRecord $batchStarted $taskIds
+Write-Host ("Run caps: task timeout {0} min; no-progress stop {1}." -f $TimeoutMinutes, $(if ($NoProgressMinutes -gt 0) { "$NoProgressMinutes min" } else { 'off' }))
 foreach ($id in $taskIds) {
     for ($run = 1; $run -le $Repeat; $run++) {
         $now = Get-Date
@@ -244,6 +284,8 @@ $results | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $OutDir
 
 $n = $results.Count
 $completed = @($results | Where-Object completed).Count
+$stalledCount = @($results | Where-Object stalled).Count
+$medianMinutesPerRound = Get-MedianMinutesPerRound $results
 $falseAccepts = @($results | Where-Object falseAccept)
 $stuck = @($results | Where-Object { $_.timedOut -or $_.hiddenTimedOut -or ($_.status -eq 'blocked' -and -not $_.blockedReason) -or $_.error })
 $environment = @($results | Where-Object { $_.parkCauses -match 'environment' })
@@ -252,13 +294,20 @@ $rate = if ($n) { [Math]::Round(100.0 * $completed / $n, 0) } else { 0 }
 $lines = @()
 $lines += "# Benchmark results ($n runs, $(Get-Date -Format 'yyyy-MM-dd HH:mm'))"
 $lines += ''
-$lines += "Backend $BaseUrl; steps $(if ($Tier -eq 'as-written') { 'at the tiers specified by each task' } else { "all at the $Tier tier" }); second opinion $Review; $(if ($WorkerOnly) { 'worker only' } else { 'hub rescue allowed' }); automatic retries $(if ($AutoRetries -ge 0) { $AutoRetries } else { 'default' })."
+$lines += "Backend $BaseUrl; steps $(if ($Tier -eq 'as-written') { 'at the tiers specified by each task' } else { "all at the $Tier tier" }); second opinion $Review; $(if ($WorkerOnly) { 'worker only' } else { 'hub rescue allowed' }); automatic retries $(if ($AutoRetries -ge 0) { $AutoRetries } else { 'default' }); task timeout $TimeoutMinutes min; no-progress stop $(if ($NoProgressMinutes -gt 0) { "$NoProgressMinutes min" } else { 'off' })."
 $lines += ''
-$lines += '| task | run | plan | hidden tests | minutes | asleep minutes | rounds | rung | retries | reviews failed | parked causes | models |'
-$lines += '|---|---|---|---|---:|---:|---:|---:|---:|---:|---|---|'
+$lines += '| task | run | plan | hidden tests | minutes | minutes per round | asleep minutes | rounds | stalled | rung | retries | reviews failed | parked causes | models |'
+$lines += '|---|---|---|---|---:|---:|---:|---:|---|---:|---:|---:|---|---|'
 foreach ($r in $results) {
-    $lines += "| $($r.task) | $($r.run) | $($r.status)$(if ($r.timedOut) { ' (timed out)' }) | $(if ($r.hiddenPass) { 'PASS' } else { 'FAIL' }) ($($r.hiddenSummary)) | $($r.minutes) | $($r.asleepMinutes) | $($r.rounds) | $($r.maxRung) | $($r.autoRetries) | $($r.reviewFailed) | $($r.parkCauses) | $($r.models) |"
+    $planLabel = if ($r.stalled) { "$($r.status) (stalled after $($r.stalledAfterMinutes) min)" } elseif ($r.timedOut) { "$($r.status) (timed out)" } else { $r.status }
+    $lines += "| $($r.task) | $($r.run) | $planLabel | $(if ($r.hiddenPass) { 'PASS' } else { 'FAIL' }) ($($r.hiddenSummary)) | $($r.minutes) | $(if ($null -ne $r.minutesPerRound) { $r.minutesPerRound } else { 'n/a' }) | $($r.asleepMinutes) | $($r.rounds) | $($r.stalled) | $($r.maxRung) | $($r.autoRetries) | $($r.reviewFailed) | $($r.parkCauses) | $($r.models) |"
 }
+$medianLabel = if ($null -ne $medianMinutesPerRound) { $medianMinutesPerRound } else { 'n/a' }
+$lines += ''
+$lines += '| measure | value |'
+$lines += '|---|---:|'
+$lines += "| Stalled | $stalledCount of $n |"
+$lines += "| Median minutes per round | $medianLabel |"
 $batchEnded = Get-Date
 $batchAsleepMinutes = Get-AsleepMinutes $batchStarted $batchEnded
 $batchAwakeMinutes = Get-BatchAwakeMinutes $batchStarted $batchEnded
