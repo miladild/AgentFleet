@@ -18,6 +18,11 @@ namespace AgentFleet.Tests;
 
 public sealed class ApprovalToolSpikeTests : ContextTestBase
 {
+    private static string[] EventTypes(string events) =>
+        System.Text.RegularExpressions.Regex.Matches(events, "(?m)^data: \\{\"type\":\"([^\"]+)\"")
+            .Select(match => match.Groups[1].Value)
+            .ToArray();
+
     private sealed class ScriptedModel(params string[] toolNames) : IChatClient
     {
         private int _requests;
@@ -135,7 +140,7 @@ public sealed class ApprovalToolSpikeTests : ContextTestBase
         return (host, scripted);
     }
 
-    [Fact(Skip = "Spike: an approval answered in a new request did not run the tool; re-enable after a supported approval and session-resume path exists.")]
+    [Fact(Skip = "Current hosting emits RUN_FINISHED success then RUN_ERROR instead of an approval interrupt; the documented same-thread resume does not run the tool.")]
     public async Task Approval_required_function_reaches_the_model_through_the_fleet_and_agui_http_chains()
     {
         int invocations = 0;
@@ -167,6 +172,10 @@ public sealed class ApprovalToolSpikeTests : ContextTestBase
             Assert.Contains("\"requiresConfirmation\":true", events);
             Assert.Contains("\"requiresConfirmation\":false", events);
             Assert.Contains("\"type\":\"RUN_ERROR\"", events);
+            Assert.Contains("\"outcome\":{\"type\":\"success\"}", events);
+            Assert.DoesNotContain("\"outcome\":{\"type\":\"interrupt\"}", events);
+            Assert.Equal(["RUN_STARTED", "TOOL_CALL_START", "TOOL_CALL_ARGS", "TOOL_CALL_END", "TOOL_CALL_START",
+                "TOOL_CALL_ARGS", "TOOL_CALL_END", "RUN_FINISHED", "RUN_ERROR"], EventTypes(events));
             int frontendEvent = events.IndexOf("\"toolCallName\":\"frontend_action\"", StringComparison.Ordinal);
             int mutateEvent = events.IndexOf("\"toolCallName\":\"mutate\"", StringComparison.Ordinal);
             Assert.True(frontendEvent >= 0 && mutateEvent > frontendEvent, events);
@@ -184,28 +193,47 @@ public sealed class ApprovalToolSpikeTests : ContextTestBase
             Assert.Equal(0L, sessionCount.ExecuteScalar());
 
             string continuation = $$"""
-            { "threadId": "{{threadId}}", "runId": "run-2",
-              "messages": [
-                { "id": "user-1", "role": "user", "content": "Use the mutating action." },
-                { "id": "assistant-1", "role": "assistant", "content": "", "toolCalls": [
-                  { "id": "call-2", "type": "function", "function": { "name": "mutate", "arguments": "{\"value\":\"synthetic\"}" } } ] }
-              ],
-              "resume": [{ "interruptId": "ficc_call-2", "status": "resolved", "payload": true }] }
+            { "threadId": "{{threadId}}", "runId": "run-2", "messages": [],
+              "resume": [{ "interruptId": "ficc_call-2", "status": "resolved", "payload": { "accepted": true } }] }
             """;
             using HttpResponseMessage resumed = await host.GetTestClient().PostAsync("/", new StringContent(continuation, Encoding.UTF8, "application/json"));
             string resumedEvents = await resumed.Content.ReadAsStringAsync();
             Assert.Equal(HttpStatusCode.OK, resumed.StatusCode);
             Assert.Contains("data:", resumedEvents);
+            Assert.Contains("\"type\":\"RUN_STARTED\"", resumedEvents);
             Assert.Equal(0, Volatile.Read(ref invocations));
 
             string rejection = $$"""
-            { "threadId": "{{threadId}}", "runId": "run-3",
-              "messages": [{ "id": "user-1", "role": "user", "content": "Use the mutating action." }],
-              "resume": [{ "interruptId": "ficc_call-2", "status": "cancelled" }] }
+            { "threadId": "{{threadId}}", "runId": "run-3", "messages": [],
+              "resume": [{ "interruptId": "ficc_call-2", "status": "resolved", "payload": { "accepted": false } }] }
             """;
             using HttpResponseMessage rejected = await host.GetTestClient().PostAsync("/", new StringContent(rejection, Encoding.UTF8, "application/json"));
+            string rejectedEvents = await rejected.Content.ReadAsStringAsync();
             Assert.Equal(HttpStatusCode.OK, rejected.StatusCode);
+            Assert.Contains("\"type\":\"RUN_STARTED\"", rejectedEvents);
             Assert.Equal(0, Volatile.Read(ref invocations));
+
+            using HttpResponseMessage replayed = await host.GetTestClient().PostAsync("/", new StringContent(continuation, Encoding.UTF8, "application/json"));
+            string replayedEvents = await replayed.Content.ReadAsStringAsync();
+            Assert.Equal(HttpStatusCode.OK, replayed.StatusCode);
+            Assert.Contains("\"type\":\"RUN_STARTED\"", replayedEvents);
+            Assert.Equal(0, Volatile.Read(ref invocations));
+
+            string mismatched = $$"""
+            { "threadId": "{{threadId}}", "runId": "run-4", "messages": [],
+              "resume": [{ "interruptId": "ficc_other", "status": "resolved", "payload": { "accepted": true } }] }
+            """;
+            using HttpResponseMessage mismatchedResponse = await host.GetTestClient().PostAsync("/", new StringContent(mismatched, Encoding.UTF8, "application/json"));
+            string mismatchedEvents = await mismatchedResponse.Content.ReadAsStringAsync();
+            Assert.Equal(HttpStatusCode.OK, mismatchedResponse.StatusCode);
+            Assert.Contains("\"type\":\"RUN_STARTED\"", mismatchedEvents);
+            Assert.Equal(0, Volatile.Read(ref invocations));
+            string[] answerEvents = ["RUN_STARTED", "TEXT_MESSAGE_START", "TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_END",
+                "TEXT_MESSAGE_START", "TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_END", "RUN_FINISHED", "RUN_ERROR"];
+            Assert.Equal(answerEvents, EventTypes(resumedEvents));
+            Assert.Equal(answerEvents, EventTypes(rejectedEvents));
+            Assert.Equal(answerEvents, EventTypes(replayedEvents));
+            Assert.Equal(answerEvents, EventTypes(mismatchedEvents));
         }
 
         AIFunction plain = AIFunctionFactory.Create((string value) =>
