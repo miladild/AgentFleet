@@ -16,6 +16,7 @@ dry-run option (`-DryRun` in PowerShell, `--dry-run` in shell scripts). Get Powe
 | `Add-FleetNode.ps1` | on the hub | Checks a worker, downloads the model onto it over the network, adds it to the fleet |
 | `Test-Fleet.ps1` | on the hub, any time | The health check: tools, config, every machine, the running backend and UI, the VS Code extension |
 | `Get-FleetModels.ps1` | on the hub | Every model installed on every machine |
+| `Get-FrameworkUpdates.ps1` | on the hub, monthly | Read-only: lists the agent-framework, Microsoft.Extensions.AI, MCP, AG-UI, OllamaSharp and OpenAI packages in the agent project that have newer versions, with release links; `-FromFile` reads saved `dotnet list package --outdated` text |
 | `Test-CandidateModel.ps1` | on the hub, when comparing a model on one worker | Runs the benchmark tasks with a candidate model on one worker, on a throwaway backend that refuses while a live plan runs; tasks default to a 30-minute timeout and a 15-minute no-progress stop. `-WhatIf` previews it. See [bench/README.md](../bench/README.md#trying-a-candidate-model) |
 | `Install-VSCodeExtension.ps1` | on any machine with VS Code | Builds and installs `@fleet` into VS Code and Insiders |
 | `Install-Autostart.ps1` | on the hub | Default Task mode: run from a normal PowerShell; builds, publishes and registers limited logon tasks. Service registration needs elevation and `-SkipBuild`, so project code is never built elevated. Both modes restrict the install folder to the Fleet user, SYSTEM and local Administrators |
