@@ -1,4 +1,6 @@
 using System.Net;
+using System.Net.Sockets;
+using System.Text;
 using System.Text.RegularExpressions;
 using HtmlAgilityPack;
 using Microsoft.Extensions.Logging;
@@ -21,6 +23,8 @@ internal static class WebTools
     private const int DefaultMaxResults = 5;
     private const int HardMaxResults = 10;
     private const int MaxFetchCharacters = 12_000;
+    private const int MaxFetchBytes = 2 * 1024 * 1024;
+    private const int MaxRedirects = 5;
     private const string UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AgentFleet/1.0";
 
     public static async Task<string> SearchWebAsync(
@@ -90,61 +94,156 @@ internal static class WebTools
 
     public static async Task<string> FetchUrlAsync(
         string url,
-        IHttpClientFactory httpClientFactory,
+        FleetConfig config,
         ILogger logger,
         CancellationToken cancellationToken)
+        => await FetchUrlAsync(
+            url,
+            config,
+            logger,
+            cancellationToken,
+            WebFetchPolicy.ResolveAsync,
+            WebFetchPolicy.CreateHandler);
+
+    internal static async Task<string> FetchUrlAsync(
+        string url,
+        FleetConfig config,
+        ILogger logger,
+        CancellationToken cancellationToken,
+        Func<string, CancellationToken, Task<IPAddress[]>> resolve,
+        Func<Uri, IReadOnlyList<IPAddress>, HttpMessageHandler> handlerFactory)
     {
         if (!Uri.TryCreate(url, UriKind.Absolute, out Uri? parsed) || parsed.Scheme is not ("http" or "https"))
         {
             return "Error: url must be an absolute http(s) URL.";
         }
 
-        using var request = new HttpRequestMessage(HttpMethod.Get, parsed);
-        request.Headers.UserAgent.ParseAdd(UserAgent);
-
-        HttpResponseMessage response;
-        try
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(20));
+        CancellationToken fetchToken = timeout.Token;
+        IReadOnlySet<string> fleetNodeAddresses = await WebFetchPolicy.FleetNodeAddressesAsync(config, resolve, fetchToken);
+        Uri current = parsed;
+        for (int redirects = 0; ; redirects++)
         {
-            HttpClient client = httpClientFactory.CreateClient(HttpClientName);
-            response = await client.SendAsync(request, cancellationToken);
-        }
-        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
-        {
-            logger.LogWarning(exception, "web_fetch failed for url '{Url}'.", url);
-            return $"Error: could not reach {url}: {exception.Message}";
-        }
-
-        using (response)
-        {
-            if (!response.IsSuccessStatusCode)
+            if (WebFetchPolicy.Problem(current, config) is { } blockedHost)
             {
-                return $"Error: {url} returned HTTP {(int)response.StatusCode}.";
+                return Refused(blockedHost);
             }
 
-            string contentType = response.Content.Headers.ContentType?.MediaType ?? "";
-            string body = await response.Content.ReadAsStringAsync(cancellationToken);
-
-            if (!contentType.Contains("html", StringComparison.OrdinalIgnoreCase))
+            IPAddress[] addresses;
+            try
             {
-                return Truncate(body, url);
+                addresses = await resolve(current.IdnHost, fetchToken);
+            }
+            catch (Exception exception) when (exception is HttpRequestException or SocketException or ArgumentException or OperationCanceledException)
+            {
+                logger.LogWarning(exception, "web_fetch failed for url '{Url}'.", current);
+                return $"Error: could not reach {current}: {exception.Message}";
             }
 
-            var doc = new HtmlDocument();
-            doc.LoadHtml(body);
-
-            foreach (HtmlNode node in (doc.DocumentNode.SelectNodes("//script|//style|//nav|//footer|//noscript|//header")
-                ?? Enumerable.Empty<HtmlNode>()).ToList())
+            if (addresses.Length == 0 || addresses.Any(address => WebFetchPolicy.IsBlockedAddress(address, current, config, fleetNodeAddresses)))
             {
-                node.Remove();
+                return Refused(current.Host.Trim('[', ']'));
             }
 
-            string text = WebUtility.HtmlDecode(doc.DocumentNode.InnerText);
-            text = Regex.Replace(text, @"[ \t]+", " ");
-            text = Regex.Replace(text, @"[ \t]*\n[ \t]*", "\n");
-            text = Regex.Replace(text, @"\n{3,}", "\n\n").Trim();
+            using var handler = handlerFactory(current, addresses);
+            using var client = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
+            using var request = new HttpRequestMessage(HttpMethod.Get, current);
+            request.Headers.UserAgent.ParseAdd(UserAgent);
 
-            return Truncate(text, url);
+            try
+            {
+                using HttpResponseMessage response = await client.SendAsync(
+                    request,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    fetchToken);
+
+                if (IsRedirect(response.StatusCode) && response.Headers.Location is { } location && redirects < MaxRedirects)
+                {
+                    if (!Uri.TryCreate(current, location, out Uri? next) || next.Scheme is not ("http" or "https"))
+                    {
+                        return "Error: redirect must be an absolute http(s) URL.";
+                    }
+
+                    current = next;
+                    continue;
+                }
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    return $"Error: {current} returned HTTP {(int)response.StatusCode}.";
+                }
+
+                string contentType = response.Content.Headers.ContentType?.MediaType ?? "";
+                string body = await ReadBoundedBodyAsync(response.Content, fetchToken);
+
+                if (!contentType.Contains("html", StringComparison.OrdinalIgnoreCase))
+                {
+                    return Truncate(body, current.ToString());
+                }
+
+                var doc = new HtmlDocument();
+                doc.LoadHtml(body);
+
+                foreach (HtmlNode node in (doc.DocumentNode.SelectNodes("//script|//style|//nav|//footer|//noscript|//header")
+                    ?? Enumerable.Empty<HtmlNode>()).ToList())
+                {
+                    node.Remove();
+                }
+
+                string text = WebUtility.HtmlDecode(doc.DocumentNode.InnerText);
+                text = Regex.Replace(text, @"[ \t]+", " ");
+                text = Regex.Replace(text, @"[ \t]*\n[ \t]*", "\n");
+                text = Regex.Replace(text, @"\n{3,}", "\n\n").Trim();
+
+                return Truncate(text, current.ToString());
+            }
+            catch (Exception exception) when (exception is HttpRequestException or OperationCanceledException)
+            {
+                logger.LogWarning(exception, "web_fetch failed for url '{Url}'.", current);
+                return $"Error: could not reach {current}: {exception.Message}";
+            }
         }
+    }
+
+    private static string Refused(string host) =>
+        $"web_fetch only reads public internet addresses; {host} is on this computer or the local network.";
+
+    private static bool IsRedirect(HttpStatusCode statusCode) => statusCode is
+        HttpStatusCode.MovedPermanently or HttpStatusCode.Redirect or HttpStatusCode.SeeOther or
+        HttpStatusCode.TemporaryRedirect or HttpStatusCode.PermanentRedirect or HttpStatusCode.MultipleChoices;
+
+    private static async Task<string> ReadBoundedBodyAsync(HttpContent content, CancellationToken cancellationToken)
+    {
+        await using Stream input = await content.ReadAsStreamAsync(cancellationToken);
+        using var output = new MemoryStream();
+        byte[] buffer = new byte[8192];
+        while (output.Length < MaxFetchBytes)
+        {
+            int count = await input.ReadAsync(buffer.AsMemory(0, (int)Math.Min(buffer.Length, MaxFetchBytes - output.Length)), cancellationToken);
+            if (count == 0)
+            {
+                break;
+            }
+
+            await output.WriteAsync(buffer.AsMemory(0, count), cancellationToken);
+        }
+
+        Encoding encoding = Encoding.UTF8;
+        string? charset = content.Headers.ContentType?.CharSet?.Trim('"');
+        if (!string.IsNullOrWhiteSpace(charset))
+        {
+            try
+            {
+                encoding = Encoding.GetEncoding(charset);
+            }
+            catch (ArgumentException)
+            {
+                // A bad charset label should not make an otherwise readable page unusable.
+            }
+        }
+
+        return encoding.GetString(output.GetBuffer(), 0, (int)output.Length);
     }
 
     private static string Truncate(string text, string url)

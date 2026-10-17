@@ -67,7 +67,10 @@ internal sealed record FleetWorkerWorkspaceConfig(
     string Platform,
     int Port = 22);
 
-internal sealed record FleetToolConfig(bool Enabled);
+internal sealed record FleetToolConfig(
+    bool Enabled,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<string>? AllowedInternalHosts = null);
 
 /// <summary>
 /// One MCP server whose tools join the fleet's built-in ones. Field names match VS
@@ -160,6 +163,12 @@ internal sealed record FleetConfig(
     [System.Text.Json.Serialization.JsonIgnore]
     public IReadOnlyDictionary<string, FleetCustomToolConfig> CustomToolMap =>
         CustomTools ?? new Dictionary<string, FleetCustomToolConfig>(StringComparer.Ordinal);
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public IReadOnlyList<string> WebFetchAllowedInternalHosts =>
+        Tools.TryGetValue("webFetch", out FleetToolConfig? webFetch) && webFetch is not null
+            ? webFetch.AllowedInternalHosts ?? []
+            : [];
 
     public bool IsToolEnabled(string name) =>
         !Tools.TryGetValue(name, out FleetToolConfig? tool) || tool.Enabled;

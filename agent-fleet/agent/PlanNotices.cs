@@ -51,8 +51,8 @@ internal sealed class WebhookPlanNotifier(HttpClient client, string url, ILogger
         ConnectCallback = async (context, cancellationToken) =>
         {
             IPAddress[] addresses = await Dns.GetHostAddressesAsync(context.DnsEndPoint.Host, cancellationToken);
-            IPAddress? target = addresses.FirstOrDefault(IsPrivate);
-            if (target is null || addresses.Any(address => !IsPrivate(address)))
+            IPAddress? target = addresses.FirstOrDefault(IpAddressPolicy.IsPrivate);
+            if (target is null || addresses.Any(address => !IpAddressPolicy.IsPrivate(address)))
             {
                 throw new HttpRequestException("The notice address is not on the private network (the fleet is LAN-only).");
             }
@@ -89,37 +89,12 @@ internal sealed class WebhookPlanNotifier(HttpClient client, string url, ILogger
             return "notifyUrl must not carry a user name or password.";
         }
 
-        if (IPAddress.TryParse(uri.Host.Trim('[', ']'), out IPAddress? literal) && !IsPrivate(literal))
+        if (IPAddress.TryParse(uri.Host.Trim('[', ']'), out IPAddress? literal) && !IpAddressPolicy.IsPrivate(literal))
         {
             return "notifyUrl must be on the private network (the fleet is LAN-only).";
         }
 
         return null;
-    }
-
-    public static bool IsPrivate(IPAddress address)
-    {
-        if (IPAddress.IsLoopback(address))
-        {
-            return true;
-        }
-
-        if (address.IsIPv4MappedToIPv6)
-        {
-            address = address.MapToIPv4();
-        }
-
-        if (address.AddressFamily == AddressFamily.InterNetworkV6)
-        {
-            return address.IsIPv6LinkLocal || address.IsIPv6UniqueLocal || address.IsIPv6SiteLocal;
-        }
-
-        byte[] bytes = address.GetAddressBytes();
-        return bytes[0] == 10 ||
-               (bytes[0] == 172 && bytes[1] is >= 16 and <= 31) ||
-               (bytes[0] == 192 && bytes[1] == 168) ||
-               (bytes[0] == 169 && bytes[1] == 254) ||
-               (bytes[0] == 100 && bytes[1] is >= 64 and <= 127);
     }
 
     public static string Body(PlanNotice notice) => JsonSerializer.Serialize(new
@@ -180,7 +155,7 @@ internal sealed class WebhookPlanNotifier(HttpClient client, string url, ILogger
             IPAddress[] addresses = IPAddress.TryParse(uri.Host.Trim('[', ']'), out IPAddress? literal)
                 ? [literal]
                 : await Dns.GetHostAddressesAsync(uri.Host);
-            if (addresses.Length == 0 || addresses.Any(address => !IsPrivate(address)))
+            if (addresses.Length == 0 || addresses.Any(address => !IpAddressPolicy.IsPrivate(address)))
             {
                 logger.LogWarning("The notice was not sent: {Host} does not resolve to a private address (the fleet is LAN-only).", uri.Host);
                 return;

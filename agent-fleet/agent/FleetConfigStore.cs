@@ -294,6 +294,12 @@ internal sealed class FleetConfigStore
         return config with
         {
             Nodes = nodes,
+            Tools = config.Tools.ToDictionary(
+                pair => pair.Key,
+                pair => pair.Key == "webFetch"
+                    ? pair.Value with { Enabled = true, AllowedInternalHosts = WebFetchPolicy.NormalizeAllowedInternalHosts(pair.Value.AllowedInternalHosts) }
+                    : pair.Value,
+                StringComparer.Ordinal),
             McpServers = config.McpServers is null
                 ? new Dictionary<string, FleetMcpServerConfig>(StringComparer.Ordinal)
                 : config.McpServers.ToDictionary(

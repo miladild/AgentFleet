@@ -126,6 +126,14 @@ Practical limits:
 - `web_search` and `web_fetch` send queries to DuckDuckGo and fetch pages you or the model choose in ordinary chat; they
   are unavailable to unattended plan steps. Switch them off in the Config panel for a fully offline fleet.
 
+`web_fetch` resolves each address before connecting and only connects to the checked address. It refuses loopback, private,
+link-local, VPN mesh, unspecified, multicast and broadcast addresses (also when an IPv6 form carries one), local-only host
+names, and configured fleet node addresses, including any address that a configured node host name resolves to. It also
+checks each redirect and caps the response body it reads at 2 MB. This keeps a page from using a fetch to read a local
+service and then steering the model to disclose the result. A trusted internal documentation host can be added
+to `tools.webFetch.allowedInternalHosts` in `fleet.config.json`; fleet node addresses remain blocked. Keep that list empty
+unless an internal documentation server is needed.
+
 ## Secrets
 
 - Never put a token or password in `fleet.config.json`, in the code, or in a plan. Give MCP servers secrets through

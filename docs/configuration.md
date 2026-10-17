@@ -114,6 +114,18 @@ A workspace with any of these missing or invalid is rejected when the configurat
 `"tools": { "run_command": { "enabled": false } }`. A tool that is not listed is on. See
 [tools-and-mcp.md](tools-and-mcp.md) for the names.
 
+The optional `webFetch` entry configures the addresses `web_fetch` may read:
+
+```json
+"tools": {
+  "webFetch": { "enabled": true, "allowedInternalHosts": [] }
+}
+```
+
+`allowedInternalHosts` is empty by default. Add an exact host name or IP address only when `web_fetch` needs to read a
+trusted internal documentation server. Fleet node addresses remain blocked. The list is edited in the file and is kept
+when tool switches are saved in the Config panel.
+
 ### `mcpServers`
 
 Same shape as VS Code's `mcp.json`:

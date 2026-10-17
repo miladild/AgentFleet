@@ -369,7 +369,7 @@ AITool webSearchTool = AIFunctionFactory.Create(
 
 AITool webFetchTool = AIFunctionFactory.Create(
     (string url, CancellationToken cancellationToken) =>
-        WebTools.FetchUrlAsync(url, httpClientFactory, webLogger, cancellationToken),
+        WebTools.FetchUrlAsync(url, fleetConfigStore.Current, webLogger, cancellationToken),
     name: "web_fetch",
     description: toolDescriptions["web_fetch"]);
 
@@ -911,6 +911,14 @@ app.MapPut("/api/fleet-config", async (FleetConfigUpdateRequest request, Cancell
     try
     {
         FleetConfig current = fleetConfigStore.Current;
+        Dictionary<string, FleetToolConfig>? updatedTools = request.Tools is { Count: > 0 }
+            ? request.Tools.ToDictionary(kv => kv.Key, kv => new FleetToolConfig(kv.Value), StringComparer.Ordinal)
+            : null;
+        if (updatedTools is not null && current.Tools.TryGetValue("webFetch", out FleetToolConfig? webFetchConfig))
+        {
+            updatedTools["webFetch"] = webFetchConfig;
+        }
+
         FleetConfig updated = current with
         {
             TriageModel = request.TriageModel?.Trim() is { Length: > 0 } triageModel ? triageModel : current.TriageModel,
@@ -935,9 +943,7 @@ app.MapPut("/api/fleet-config", async (FleetConfigUpdateRequest request, Cancell
                         node.Thinking ?? previous?.Thinking);
                 }).ToList()
                 : current.Nodes,
-            Tools = request.Tools is { Count: > 0 }
-                ? request.Tools.ToDictionary(kv => kv.Key, kv => new FleetToolConfig(kv.Value), StringComparer.Ordinal)
-                : current.Tools,
+            Tools = updatedTools ?? current.Tools,
             // Unlike nodes and tools, an empty object here is meaningful: it removes every server.
             McpServers = request.McpServers is not null
                 ? request.McpServers.ToDictionary(kv => kv.Key.Trim(), kv => kv.Value, StringComparer.Ordinal)
