@@ -118,6 +118,8 @@ steps, and checks each step with a real command instead of trusting itself.
     3. a fresh conversation, on the hub when the plan allows it and otherwise on a worker, that starts from a brief of what
        the earlier rounds tried and is told to find the root cause first.
 
+    `FLEET_PLAN_FAIL_FIRST` is off by default. In `warn` or `enforce`, a passing step check is also run in a disposable copy of the worker's project, where each changed non-test file is put back to its content at the step's first attempt and the test files are left as they are. This checks whether the command failed before the implementation. `warn` records the result; `enforce` sends tests that pass on the old code back for repair. Missing snapshots and environment failures are recorded as unavailable and do not block acceptance.
+
     When a worker's call times out and hub rescue is allowed, the step is handed to the hub at once; a worker-only plan
     keeps its worker.
 

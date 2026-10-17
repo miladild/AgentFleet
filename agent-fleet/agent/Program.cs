@@ -708,6 +708,8 @@ if (!string.IsNullOrWhiteSpace(fleetConfigStore.Current.NotifyUrl))
 // Executes approved plans in the background, one verified step or explicitly grouped parallel set at a time. Approving a plan (the
 // button, the API, or typing the approval word) raises the store's event, which starts it; plans
 // that were mid-run when the backend last stopped resume on startup.
+// The fail-first check (FLEET_PLAN_FAIL_FIRST) is read once here: off unless set to warn or enforce.
+FailFirstMode failFirstMode = FailFirst.ParseMode(builder.Configuration["FLEET_PLAN_FAIL_FIRST"], loggerFactory.CreateLogger("AgentFleet.FailFirst"));
 var planRunner = new PlanRunner(
     planStore,
     planTools,
@@ -725,7 +727,8 @@ var planRunner = new PlanRunner(
     attemptTimeout: TimeSpan.FromMinutes(planAttemptMinutes),
     notifier: planNotifier,
     stepGuidance: stepGuidanceEnabled,
-    fitProbes: fitProbeService);
+    fitProbes: fitProbeService,
+    failFirst: failFirstMode);
 planStore.Approved += planRunner.Enqueue;
 app.Lifetime.ApplicationStarted.Register(() => planRunner.Start(app.Lifetime.ApplicationStopping));
 

@@ -233,6 +233,7 @@ internal static class RunEventKind
     public const string StepTimeLimit = "step-time-limit";
     public const string CheckHealed = "check-healed";
     public const string CheckAudit = "check-audit";
+    public const string FailFirst = "fail-first";
     public const string StepReview = "step-review";
     public const string EnvironmentRepaired = "environment-repaired";
     public const string BlockerReported = "blocker-reported";

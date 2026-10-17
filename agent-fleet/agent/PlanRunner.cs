@@ -214,6 +214,7 @@ internal sealed partial class PlanRunner
     private readonly ConcurrentDictionary<string, Dictionary<int, string>> _lastFailures = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string[]> _filesToCreate = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, HashSet<string>> _filesAtStart = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, PlanTools.WorkSnapshot> _failFirstSnapshots = new(StringComparer.Ordinal);
     private readonly Channel<string> _queue = Channel.CreateUnbounded<string>();
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _active = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, bool> _stopRequested = new(StringComparer.Ordinal);
@@ -226,6 +227,7 @@ internal sealed partial class PlanRunner
     private readonly IPlanNotifier? _notifier;
     private readonly bool _stepGuidance;
     private readonly FitProbeService? _fitProbes;
+    private readonly FailFirstMode _failFirstMode;
 
     public PlanRunner(
         FleetPlanStore store,
@@ -247,11 +249,13 @@ internal sealed partial class PlanRunner
         TimeSpan? stepClock = null,
         IPlanNotifier? notifier = null,
         bool stepGuidance = false,
-        FitProbeService? fitProbes = null)
+        FitProbeService? fitProbes = null,
+        FailFirstMode failFirst = FailFirstMode.Off)
     {
         _notifier = notifier;
         _stepGuidance = stepGuidance;
         _fitProbes = fitProbes;
+        _failFirstMode = failFirst;
         _roundsPerRung = Math.Max(1, roundsPerRung);
         _stepClock = stepClock is { } clock && clock > TimeSpan.Zero ? clock : DefaultStepClock;
         _transientDelay = transientDelay ?? DefaultTransientDelay;
@@ -576,12 +580,21 @@ internal sealed partial class PlanRunner
         finally
         {
             _lastFailures.TryRemove(planId, out _);
+            RemoveFailFirstSnapshots(planId);
             _active.TryRemove(planId, out _);
             _contexts.TryRemove(planId, out _);
         }
     }
 
     private string? ContextFor(string planId) => _contexts.TryGetValue(planId, out string? id) ? id : null;
+
+    // Keys are "plan:step", so a finished or stopped plan's snapshots are the ones with its prefix.
+    private void RemoveFailFirstSnapshots(string planId)
+    {
+        string prefix = planId + ":";
+        foreach (string key in _failFirstSnapshots.Keys.Where(key => key.StartsWith(prefix, StringComparison.Ordinal)))
+            _failFirstSnapshots.TryRemove(key, out _);
+    }
 
     // What last went wrong with each unfinished step, from the run log, which survives a restart. Measured: a step
     // retried after its plan blocked started from nothing, with only a short excerpt of its failure in the durable
@@ -948,6 +961,8 @@ internal sealed partial class PlanRunner
                     round: new RoundContext(conversation, rung, round, repairMessage, brief), limit: LimitFor(plan, worked));
                 roundActivity?.SetTag("fleet.model_node", model.ModelNode);
                 roundActivity?.SetTag("fleet.workspace_node", model.Machine);
+                if (model.WorkBefore is { } firstSnapshot)
+                    _failFirstSnapshots.TryAdd($"{plan.Id}:{step.Id}", firstSnapshot);
                 if (model.Machine is not null)
                 {
                     conversationWorkspace = model.Machine;
@@ -1090,6 +1105,7 @@ internal sealed partial class PlanRunner
                 StepCompletion result;
                 string? checkNote = null;
                 string? parkReason = null;
+                FailFirstResult? failFirst = null;
                 bool isFinalValidation = step.Id == plan.Steps.Max(candidate => candidate.Id);
                 try
                 {
@@ -1129,6 +1145,54 @@ internal sealed partial class PlanRunner
                         _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.WorkspaceSynced, tier, model.Machine,
                             "Synced the worker project after verification; the checked changes are now in the hub checkout.",
                             modelNode: model.ModelNode, workspaceNode: model.Machine);
+
+                        if (result.Done && !(isFinalValidation && plan.Steps.Count > 1) && _failFirstMode != FailFirstMode.Off &&
+                            _failFirstSnapshots.TryGetValue($"{plan.Id}:{step.Id}", out PlanTools.WorkSnapshot? stepStart))
+                        {
+                            WorkChange current = await ChangedFilesSinceAsync(plan, stepStart, cancellationToken);
+                            string[] tests = current.Files.Where(IsTestPath).ToArray();
+                            string[] code = current.Files.Where(path => !IsTestPath(path)).ToArray();
+                            if (tests.Length == 0)
+                                failFirst = new FailFirstResult("no-test-changes", [] , null);
+                            else if (code.Length == 0)
+                                failFirst = new FailFirstResult("tests-only", tests, null);
+                            else if (UnverifiedPassReason(plan, step, model, current.Files, isFinalValidation, result.Output ?? result.Message) is null)
+                            {
+                                IReadOnlyDictionary<string, byte[]?>? overlay = FailFirst.CreateOverlay(stepStart, current.Files, plan.WorkingDirectory!,
+                                    (head, relative) => FailFirst.ReadHead(plan.WorkingDirectory!, head, relative));
+                                if (overlay is null)
+                                    failFirst = new FailFirstResult("unavailable", tests, null);
+                                else
+                                {
+                                    try
+                                    {
+                                        FailFirstCheckResult scratch = await _workerWorkspaces!.RunScratchCheckAsync(plan, step, model.Machine!, model.Workspace,
+                                            overlay, step.Verify ?? string.Empty, cancellationToken);
+                                        string output = scratch.Output;
+                                        string failOutcome = scratch.TimedOut ? "timed-out" : EnvironmentBlockReason(output) is not null ? "unavailable" : scratch.ExitCode == 0 ? "passed-before" : "failed-before";
+                                        failFirst = new FailFirstResult(failOutcome, tests, scratch.ExitCode, scratch.DurationSeconds);
+                                    }
+                                    catch (WorkerCommandTimeoutException)
+                                    {
+                                        failFirst = new FailFirstResult("timed-out", tests, null);
+                                    }
+                                    catch (Exception exception) when (exception is not OperationCanceledException)
+                                    {
+                                        failFirst = new FailFirstResult("unavailable", tests, null);
+                                    }
+                                }
+                            }
+                            if (failFirst is not null)
+                                _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.FailFirst, tier, model.Machine,
+                                    FailFirst.Evidence(failFirst), modelNode: model.ModelNode, workspaceNode: model.Machine,
+                                    durationSeconds: (int)Math.Ceiling(failFirst.DurationSeconds));
+                        }
+                        else if (result.Done && !(isFinalValidation && plan.Steps.Count > 1) && _failFirstMode != FailFirstMode.Off)
+                        {
+                            failFirst = new FailFirstResult("unavailable", [], null);
+                            _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.FailFirst, tier, model.Machine,
+                                FailFirst.Evidence(failFirst), modelNode: model.ModelNode, workspaceNode: model.Machine);
+                        }
                     }
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException && model.Workspace is not null)
@@ -1172,6 +1236,12 @@ internal sealed partial class PlanRunner
                 {
                     string unverified = UnverifiedPassMessage(step, lastUnverified);
                     result = new StepCompletion(false, unverified, unverified, result.Restored);
+                }
+
+                if (result.Done && lastUnverified is null && _failFirstMode == FailFirstMode.Enforce && failFirst?.Outcome == "passed-before")
+                {
+                    const string feedback = "Your tests also pass on the code as it was before this step, so they do not test your change. Add tests for what this step must make true; they must fail without your change.";
+                    result = new StepCompletion(false, feedback, feedback, result.Restored);
                 }
 
                 // A check that passes is not yet a step that is done: a model that did not write the code reads it against the step.

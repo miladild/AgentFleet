@@ -10,6 +10,10 @@ namespace AgentFleet.Tests;
 /// <summary>One message sent to a fake conversation: which one, which message of it, and where it went.</summary>
 internal sealed record FakeStepCall(int Session, int Message, string Tier, string Text, string? Machine);
 
+/// <summary>One scratch check the runner asked the worker manager for: the plan and step, the machine, the session, the overlay and the command.</summary>
+internal sealed record FakeScratchCall(string PlanId, int StepId, string Machine, IWorkerWorkspaceSession Workspace,
+    IReadOnlyDictionary<string, byte[]?> Overlay, string Command);
+
 /// <summary>
 /// A stand-in for the model. By default a call reports that the model used a tool and edited a file, as a model that
 /// works does; a test that needs a model that only reads, or edits on some machines only, sets <see cref="ToolsOf"/>.
@@ -232,6 +236,23 @@ public sealed partial class PlanRunnerTests : PlanTestBase
         public Exception? SyncFailure { get; set; }
         public int SyncFailures { get; set; }
 
+        /// <summary>The manager's methods in the order they were called, by name.</summary>
+        public List<string> Methods { get; } = [];
+
+        /// <summary>Every scratch check asked for, oldest first. The default answer is a failing check (the old code failed).</summary>
+        public List<FakeScratchCall> ScratchCalls { get; } = [];
+
+        public Func<FakeScratchCall, Task<FailFirstCheckResult>>? ScratchBehaviour { get; set; }
+
+        public Task<FailFirstCheckResult> RunScratchCheckAsync(PlanRecord plan, PlanStep step, string machine, IWorkerWorkspaceSession workspace,
+            IReadOnlyDictionary<string, byte[]?> overlay, string command, CancellationToken cancellationToken)
+        {
+            var call = new FakeScratchCall(plan.Id, step.Id, machine, workspace, new Dictionary<string, byte[]?>(overlay), command);
+            Methods.Add(nameof(RunScratchCheckAsync));
+            ScratchCalls.Add(call);
+            return ScratchBehaviour?.Invoke(call) ?? Task.FromResult(new FailFirstCheckResult(1, "Exit code: 1", 0.1));
+        }
+
         private FakeWorkerWorkspaceSession CreateSession(string machine)
         {
             var session = new FakeWorkerWorkspaceSession(machine)
@@ -247,6 +268,7 @@ public sealed partial class PlanRunnerTests : PlanTestBase
         public Task<IWorkerWorkspaceSession> StageAsync(PlanRecord plan, PlanStep step, string machine, CancellationToken cancellationToken)
         {
             StagedMachines.Add(machine);
+            Methods.Add(nameof(StageAsync));
             return Task.FromResult<IWorkerWorkspaceSession>(CreateSession(machine));
         }
 
@@ -254,6 +276,7 @@ public sealed partial class PlanRunnerTests : PlanTestBase
             WorkerWorkspaceBaseline baseline, CancellationToken cancellationToken)
         {
             ResumeCalls++;
+            Methods.Add(nameof(ResumeInterruptedAsync));
             return Task.FromResult(new WorkerWorkspaceResume(recovery.Safe
                 ? CreateSession(baseline.Machine)
                 : null, recovery));

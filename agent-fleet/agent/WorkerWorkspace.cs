@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
@@ -40,7 +41,12 @@ internal interface IWorkerWorkspaceManager
 {
     Task<IWorkerWorkspaceSession> StageAsync(PlanRecord plan, PlanStep step, string machine, CancellationToken cancellationToken);
     Task<WorkerWorkspaceResume> ResumeInterruptedAsync(PlanRecord plan, PlanStep step, WorkerWorkspaceBaseline baseline, CancellationToken cancellationToken);
+    Task<FailFirstCheckResult> RunScratchCheckAsync(PlanRecord plan, PlanStep step, string machine, IWorkerWorkspaceSession workspace,
+        IReadOnlyDictionary<string, byte[]?> overlay, string command, CancellationToken cancellationToken) =>
+        Task.FromException<FailFirstCheckResult>(new NotSupportedException("Scratch checks are not supported by this workspace manager."));
 }
+
+internal sealed record FailFirstCheckResult(int ExitCode, string Output, double DurationSeconds, bool TimedOut = false);
 
 internal sealed record WorkerWorkspaceResume(IWorkerWorkspaceSession? Session, WorkerWorkspaceRecoveryAnalysis Analysis);
 
@@ -133,6 +139,12 @@ internal sealed class WorkerWorkspaceManager(FleetOptions fleet, ILogger logger,
             throw;
         }
     }
+
+    public Task<FailFirstCheckResult> RunScratchCheckAsync(PlanRecord plan, PlanStep step, string machine,
+        IWorkerWorkspaceSession workspace, IReadOnlyDictionary<string, byte[]?> overlay, string command, CancellationToken cancellationToken) =>
+        workspace is WorkerWorkspaceSession session
+            ? session.RunScratchCheckAsync(plan, step, overlay, command, cancellationToken)
+            : throw new InvalidOperationException("The worker session cannot run a scratch check.");
 }
 
 /// <summary>Worker scope is ambient only while a plan step's model and verifier are running.</summary>
@@ -713,6 +725,83 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
         string result = $"Exit code: {remote.ExitStatus}\n--- stdout ---\n{stdout}";
         if (!string.IsNullOrWhiteSpace(remote.Error)) result += $"\n--- stderr ---\n{remote.Error}";
         return result;
+    }
+
+    internal async Task<FailFirstCheckResult> RunScratchCheckAsync(PlanRecord plan, PlanStep step,
+        IReadOnlyDictionary<string, byte[]?> overlay, string command, CancellationToken cancellationToken)
+    {
+        if (PlanRunnerToolPolicy.CommandRefusal(command) is { } refusal)
+            throw new WorkerPathRefusedException(refusal);
+        string scratch = ScratchPath(RemoteRoot);
+        try
+        {
+            await RunRemoteRawAsync(BuildScratchCopyCommand(_config.Platform, RemoteRoot, scratch), cancellationToken);
+            foreach ((string relative, byte[]? bytes) in overlay)
+            {
+                string path = JoinRemote(scratch, LocalRelativePath(relative));
+                if (bytes is null)
+                {
+                    if (_sftp!.Exists(path)) _sftp.DeleteFile(path);
+                    continue;
+                }
+                CreateDirectoryTree(Parent(path));
+                using var output = _sftp!.Open(path, FileMode.Create, FileAccess.Write);
+                await output.WriteAsync(bytes, cancellationToken);
+            }
+
+            string remote = _config.Platform == "windows" ? BuildWindowsCommand(scratch, command) : $"cd {QuotePosix(scratch)} && {command}";
+            var timer = Stopwatch.StartNew();
+            using SshCommand check = _ssh!.CreateCommand(remote);
+            check.CommandTimeout = _commandTimeout;
+            try { await check.ExecuteAsync(cancellationToken); }
+            catch (SshOperationTimeoutException exception)
+            {
+                throw new WorkerCommandTimeoutException(exception.Message, exception);
+            }
+            timer.Stop();
+            string outputText = $"Exit code: {check.ExitStatus}\n--- stdout ---\n{check.Result}";
+            if (!string.IsNullOrWhiteSpace(check.Error)) outputText += $"\n--- stderr ---\n{check.Error}";
+            return new FailFirstCheckResult(check.ExitStatus ?? -1, outputText.Length <= 20_000 ? outputText : outputText[^20_000..], timer.Elapsed.TotalSeconds);
+        }
+        finally
+        {
+            try { await RunRemoteRawAsync(BuildScratchDeleteCommand(_config.Platform, scratch), CancellationToken.None); }
+            catch { }
+        }
+    }
+
+    // The scratch folder is a sibling of the plan folder, never inside it or equal to it, so a delete can only name the scratch folder.
+    internal static string ScratchPath(string remoteRoot)
+    {
+        string root = remoteRoot.TrimEnd('/', '\\');
+        if (root.Length == 0) throw new ArgumentException("The worker plan folder has no path.", nameof(remoteRoot));
+        return root + "-scratch";
+    }
+
+    internal static string BuildScratchCopyCommand(string platform, string remoteRoot, string scratch)
+    {
+        if (platform != "windows")
+            return $"rm -rf -- {QuotePosix(scratch)} && cp -a -- {QuotePosix(remoteRoot)} {QuotePosix(scratch)}";
+        string source = PowerShellLiteral(WindowsPath(remoteRoot));
+        string target = PowerShellLiteral(WindowsPath(scratch));
+        return $"if (Test-Path -LiteralPath {target}) {{ Remove-Item -LiteralPath {target} -Recurse -Force }}; " +
+            $"New-Item -ItemType Directory -Path {target} | Out-Null; robocopy {source} {target} /E /COPY:DAT /R:1 /W:1; " +
+            "if ($LASTEXITCODE -gt 7) { exit $LASTEXITCODE }; exit 0";
+    }
+
+    internal static string BuildScratchDeleteCommand(string platform, string scratch) =>
+        platform == "windows"
+            ? $"Remove-Item -LiteralPath {PowerShellLiteral(WindowsPath(scratch))} -Recurse -Force -ErrorAction SilentlyContinue"
+            : $"rm -rf -- {QuotePosix(scratch)}";
+
+    private static string PowerShellLiteral(string value) => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
+
+    private async Task RunRemoteRawAsync(string commandText, CancellationToken cancellationToken)
+    {
+        using SshCommand command = _ssh!.CreateCommand(commandText);
+        command.CommandTimeout = _commandTimeout;
+        await command.ExecuteAsync(cancellationToken);
+        if (command.ExitStatus != 0) throw new IOException("Could not prepare the worker scratch copy.");
     }
 
     public Task<string> RunGitCommandAsync(string repositoryPath, string arguments, CancellationToken cancellationToken) =>
