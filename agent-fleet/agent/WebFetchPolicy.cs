@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 
@@ -28,6 +29,62 @@ internal static class WebFetchPolicy
         }
 
         return normalized.Order(StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    public static IReadOnlyList<string> NormalizeAllowedHosts(IReadOnlyList<string>? hosts)
+    {
+        var normalized = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string? entry in hosts ?? [])
+        {
+            string value = (entry ?? "").Trim();
+            bool wildcard = value.StartsWith("*.", StringComparison.Ordinal);
+            string candidate = wildcard ? value[2..] : value;
+            bool address = IPAddress.TryParse(candidate, out _);
+            // Names are compared in the punycode form that URLs carry, so a Unicode entry matches its URL.
+            string? ascii = address ? candidate : PunycodeName(candidate);
+            string host = ascii is null ? "" : CanonicalHost(ascii);
+            if (host.Length == 0 || value.Any(char.IsWhiteSpace) ||
+                (wildcard && address) || (!address && (ascii is null || !IsHostName(ascii))))
+            {
+                throw new InvalidOperationException(
+                    "tools.webFetch.allowedHosts entries must be exact host names, IP addresses or *. followed by a host name.");
+            }
+
+            normalized.Add(wildcard ? "*." + host : host);
+        }
+
+        return normalized.Order(StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    private static bool IsHostName(string name) => Uri.CheckHostName(name.TrimEnd('.')) == UriHostNameType.Dns;
+
+    private static string? PunycodeName(string name)
+    {
+        if (name.All(char.IsAscii))
+        {
+            return name;
+        }
+
+        try
+        {
+            return new IdnMapping().GetAscii(name);
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
+    }
+
+    public static bool IsAllowedHost(string host, IReadOnlyList<string> allowedHosts)
+    {
+        string canonical = CanonicalHost(host);
+        return allowedHosts.Count == 0 || allowedHosts.Any(entry =>
+        {
+            string allowed = CanonicalHost(entry);
+            return allowed.StartsWith("*.", StringComparison.Ordinal)
+                ? canonical.EndsWith(allowed[1..], StringComparison.OrdinalIgnoreCase)
+                : string.Equals(canonical, allowed, StringComparison.OrdinalIgnoreCase);
+        });
     }
 
     public static bool IsAllowedInternalHost(string host, IReadOnlyList<string> allowedHosts) =>

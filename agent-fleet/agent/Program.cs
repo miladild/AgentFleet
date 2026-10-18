@@ -289,7 +289,7 @@ Dictionary<string, string> toolDescriptions = new(StringComparer.Ordinal)
     ["web_search"] = "Searches the public internet and returns a numbered list of results (title, URL, snippet). " +
         "Use this whenever you need current information, documentation, or anything you're not certain about, " +
         "instead of guessing a URL or answering from memory alone - use web_fetch on the most relevant result " +
-        "afterward to actually read it.",
+        "afterward to actually read it. Never put file contents, secrets or code in a search query.",
     ["web_fetch"] = "Fetches a URL and returns its readable text content (HTML tags, scripts, and styles stripped) " +
         "- not raw markup. Use this to actually read a page found via web_search, or any URL you already have.",
     ["project_overview"] = "Shows a local project folder at a glance. In chat it includes build/test hints from project manifests; in a plan step it shows the selected worker's staged tree, so use read_file on manifests or the README for details. " +
@@ -922,13 +922,7 @@ app.MapPut("/api/fleet-config", async (FleetConfigUpdateRequest request, Cancell
     try
     {
         FleetConfig current = fleetConfigStore.Current;
-        Dictionary<string, FleetToolConfig>? updatedTools = request.Tools is { Count: > 0 }
-            ? request.Tools.ToDictionary(kv => kv.Key, kv => new FleetToolConfig(kv.Value), StringComparer.Ordinal)
-            : null;
-        if (updatedTools is not null && current.Tools.TryGetValue("webFetch", out FleetToolConfig? webFetchConfig))
-        {
-            updatedTools["webFetch"] = webFetchConfig;
-        }
+        Dictionary<string, FleetToolConfig>? updatedTools = FleetConfigStore.MergeToolSwitches(current.Tools, request.Tools);
 
         FleetConfig updated = current with
         {

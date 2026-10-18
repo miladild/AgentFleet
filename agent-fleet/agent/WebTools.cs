@@ -13,8 +13,8 @@ namespace AgentFleet;
 /// plain-HTML endpoint (html.duckduckgo.com/html/), the same lite, JS-free page
 /// simple clients and CLI tools commonly use; no official API, no key, no per-query
 /// cost. Fetch returns readable text (scripts/styles/nav stripped, HTML entities
-/// decoded), not raw markup, since that's what these models can actually use. Same
-/// no-allowlist, no-approval-gate posture as every other tool in this fleet.
+/// decoded), not raw markup, since that's what these models can actually use.
+/// Optional host restrictions apply to fetches through the fleet configuration.
 /// </summary>
 internal static class WebTools
 {
@@ -121,10 +121,16 @@ internal static class WebTools
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(20));
         CancellationToken fetchToken = timeout.Token;
-        IReadOnlySet<string> fleetNodeAddresses = await WebFetchPolicy.FleetNodeAddressesAsync(config, resolve, fetchToken);
+        IReadOnlySet<string>? fleetNodeAddresses = null;
         Uri current = parsed;
         for (int redirects = 0; ; redirects++)
         {
+            if (!WebFetchPolicy.IsAllowedHost(current.IdnHost, config.WebFetchAllowedHosts))
+            {
+                return $"web_fetch only reads the hosts listed in tools.webFetch.allowedHosts; {current.IdnHost.Trim('[', ']')} is not on the list.";
+            }
+
+            fleetNodeAddresses ??= await WebFetchPolicy.FleetNodeAddressesAsync(config, resolve, fetchToken);
             if (WebFetchPolicy.Problem(current, config) is { } blockedHost)
             {
                 return Refused(blockedHost);

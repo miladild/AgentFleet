@@ -118,13 +118,22 @@ The optional `webFetch` entry configures the addresses `web_fetch` may read:
 
 ```json
 "tools": {
-  "webFetch": { "enabled": true, "allowedInternalHosts": [] }
+  "webFetch": { "enabled": true, "allowedInternalHosts": [], "allowedHosts": ["docs.example.com", "*.example.com"] }
 }
 ```
 
 `allowedInternalHosts` is empty by default. Add an exact host name or IP address only when `web_fetch` needs to read a
 trusted internal documentation server. Fleet node addresses remain blocked. The list is edited in the file and is kept
 when tool switches are saved in the Config panel.
+
+`allowedHosts` is optional and empty by default, so public hosts that pass the address guard remain reachable. A non-empty
+list limits every fetch and redirect to an exact host name, IP literal or wildcard such as `*.example.com`. The wildcard
+matches subdomains at any depth but does not match `example.com` itself; list that name separately when needed. Matching
+ignores case and a trailing dot. Entries are trimmed, lower-cased, deduplicated and sorted when loaded or saved; Unicode
+names are stored in their punycode form; schemes, paths, ports, spaces and a bare wildcard are rejected. The key must be
+spelled exactly `allowedHosts`: a file that spells it in another case is refused on load, because the list would
+otherwise be ignored. An internal host must also pass `allowedInternalHosts`, and fleet
+node destinations remain blocked. The Config panel keeps this file-configured list when saving tool switches.
 
 ### `mcpServers`
 

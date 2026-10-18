@@ -142,7 +142,10 @@ internal sealed class FleetConfigStore
             FleetConfig? loaded;
             try
             {
-                loaded = JsonSerializer.Deserialize<FleetConfig>(File.ReadAllText(_path), SerializerOptions);
+                string text = File.ReadAllText(_path);
+                loaded = JsonSerializer.Deserialize<FleetConfig>(text, SerializerOptions);
+                using JsonDocument document = JsonDocument.Parse(text);
+                RejectOtherSpellingsOfAllowedHosts(document.RootElement);
             }
             catch (JsonException exception)
             {
@@ -245,6 +248,51 @@ internal sealed class FleetConfigStore
         return normalized;
     }
 
+    // The loader matches property names exactly, so a list spelled in another case would be ignored and web_fetch
+    // would stay unrestricted without any sign of it. Refusing the file is the safe way to say so.
+    private static void RejectOtherSpellingsOfAllowedHosts(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (JsonProperty property in element.EnumerateObject())
+            {
+                if (property.Name != "allowedHosts" && string.Equals(property.Name, "allowedHosts", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(
+                        "fleet.config.json spells the web_fetch host list in another case; use allowedHosts exactly, or the list is not applied.");
+                }
+
+                RejectOtherSpellingsOfAllowedHosts(property.Value);
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement item in element.EnumerateArray())
+            {
+                RejectOtherSpellingsOfAllowedHosts(item);
+            }
+        }
+    }
+
+    // The web_fetch entry is kept whole: its host lists are edited only through the file, never by a switch in the panel.
+    internal static Dictionary<string, FleetToolConfig>? MergeToolSwitches(
+        IReadOnlyDictionary<string, FleetToolConfig> current,
+        IReadOnlyDictionary<string, bool>? requested)
+    {
+        if (requested is not { Count: > 0 })
+        {
+            return null;
+        }
+
+        Dictionary<string, FleetToolConfig> merged = requested.ToDictionary(kv => kv.Key, kv => new FleetToolConfig(kv.Value), StringComparer.Ordinal);
+        if (current.TryGetValue("webFetch", out FleetToolConfig? webFetchConfig))
+        {
+            merged["webFetch"] = webFetchConfig;
+        }
+
+        return merged;
+    }
+
     // Fills in the roles a config file may leave out, so a hand-written or older file
     // still loads: no tier means standard, vision nodes carry no tier and never act as
     // the fallback, and with no explicit fallback the first heavy text node takes it
@@ -297,7 +345,12 @@ internal sealed class FleetConfigStore
             Tools = config.Tools.ToDictionary(
                 pair => pair.Key,
                 pair => pair.Key == "webFetch"
-                    ? pair.Value with { Enabled = true, AllowedInternalHosts = WebFetchPolicy.NormalizeAllowedInternalHosts(pair.Value.AllowedInternalHosts) }
+                    ? pair.Value with
+                    {
+                        Enabled = true,
+                        AllowedInternalHosts = WebFetchPolicy.NormalizeAllowedInternalHosts(pair.Value.AllowedInternalHosts),
+                        AllowedHosts = pair.Value.AllowedHosts is null ? null : WebFetchPolicy.NormalizeAllowedHosts(pair.Value.AllowedHosts)
+                    }
                     : pair.Value,
                 StringComparer.Ordinal),
             McpServers = config.McpServers is null

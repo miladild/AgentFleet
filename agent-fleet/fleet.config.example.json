@@ -57,7 +57,7 @@
     "move_file": { "enabled": true },
     "delete_file": { "enabled": true },
     "http_request": { "enabled": true },
-    "webFetch": { "enabled": true, "allowedInternalHosts": [] }
+    "webFetch": { "enabled": true, "allowedInternalHosts": [], "allowedHosts": [] }
   },
   "mcpServers": {
     "microsoft-learn": {

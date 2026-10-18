@@ -134,6 +134,12 @@ service and then steering the model to disclose the result. A trusted internal d
 to `tools.webFetch.allowedInternalHosts` in `fleet.config.json`; fleet node addresses remain blocked. Keep that list empty
 unless an internal documentation server is needed.
 
+An optional `tools.webFetch.allowedHosts` list further limits `web_fetch` to listed hosts, including every redirect,
+before resolving or connecting. An empty or missing list keeps the public-host behaviour above. Entries may be exact
+host names, IP literals or `*.example.com` for subdomains at any depth, excluding the bare domain. Internal exceptions
+must also match this list when it is non-empty; fleet nodes remain blocked. This list limits `web_fetch` only.
+`web_search` queries still leave the network and must never contain file contents, secrets or code.
+
 ## Secrets
 
 - Never put a token or password in `fleet.config.json`, in the code, or in a plan. Give MCP servers secrets through
