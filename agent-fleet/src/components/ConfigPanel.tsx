@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { McpServerConfig } from "./mcpCatalog";
 import { ApprovalSettings } from "./ApprovalSettings";
+import { DEFAULT_APPROVAL_CONFIG, type ApprovalLevel } from "./approvalPresentation";
 import { HistorySettings } from "./HistorySettings";
 import { ModelsTab } from "./ModelsTab";
 import { SandboxSettings } from "./SandboxSettings";
@@ -52,7 +53,7 @@ type FleetConfigData = {
   mcpServers: Record<string, McpServerConfig>;
   mcpStatus: McpStatus[];
   history?: { deleteAfterDays: number };
-  chatApprovals?: { enabled: boolean; timeoutSeconds: number };
+  chatApprovals?: { mode: ApprovalLevel; enabled: boolean; timeoutSeconds: number };
   weeklyProbe?: WeeklyProbeConfig;
   customTools?: Record<string, CommandToolConfig>;
   customStatus?: CommandToolStatus[];
@@ -888,7 +889,7 @@ export function ConfigPanel() {
               ) : tab === "tools" ? (
                 <div className="space-y-6">
                   <ApprovalSettings
-                    settings={draft.chatApprovals ?? { enabled: false, timeoutSeconds: 240 }}
+                    settings={draft.chatApprovals ?? DEFAULT_APPROVAL_CONFIG}
                     onSaved={(chatApprovals, version, text) => {
                       // The saved snapshot is left as it is (machines and routing model only): taking a new one would mark
                       // machine edits that are still unsaved as saved.

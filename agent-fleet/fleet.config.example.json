@@ -82,7 +82,8 @@
     "deleteAfterDays": 0
   },
   "chatApprovals": {
-    "enabled": false,
+    "mode": "risky",
+    "enabled": true,
     "timeoutSeconds": 240
   }
 }

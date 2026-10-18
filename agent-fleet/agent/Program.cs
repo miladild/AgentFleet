@@ -604,7 +604,7 @@ int planRoundsPerRung = int.TryParse(builder.Configuration["FLEET_PLAN_ROUNDS_PE
     : RepairLadder.DefaultRoundsPerRung;
 
 var invoker = new FleetFunctionInvoker(contextJournal, planModeService, planStore, readOnlyTools, planTools, toolLoopLogger, planStepToolRounds,
-    chatApprovals, () => fleetConfigStore.Current.ChatApprovalSettings.Enabled);
+    chatApprovals, () => fleetConfigStore.Current.ChatApprovalSettings.Mode!);
 IChatClient agentClient = FleetHarness.BuildAgentClient(fleetClient, toolRegistry, contextJournal, planModeService, invoker, loggerFactory,
     string.Equals(builder.Configuration["FLEET_CHAT_RECOVERY_NOTE"], "on", StringComparison.OrdinalIgnoreCase));
 

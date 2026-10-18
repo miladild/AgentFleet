@@ -73,6 +73,11 @@ internal sealed class FleetConfigStore
                 return false;
             }
 
+            if (!FleetChatApprovalConfig.IsValidMode(config.ChatApprovals?.Mode))
+            {
+                throw new InvalidOperationException(FleetChatApprovalConfig.InvalidModeMessage);
+            }
+
             FleetConfig prepared = Prepare(config);
             WriteAtomically(prepared);
             _current = prepared;
@@ -362,7 +367,7 @@ internal sealed class FleetConfigStore
             // Clamped here, where every load and every save passes, so the file and the API show the wait that is in use.
             ChatApprovals = config.ChatApprovals is null
                 ? null
-                : config.ChatApprovals with { TimeoutSeconds = FleetChatApprovalConfig.ClampTimeout(config.ChatApprovals.TimeoutSeconds) },
+                : config.ChatApprovals.Resolved(),
             WeeklyProbe = config.WeeklyProbe?.Normalized()
         };
     }

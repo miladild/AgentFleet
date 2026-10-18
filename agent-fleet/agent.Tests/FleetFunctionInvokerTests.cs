@@ -30,7 +30,7 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
         return new FleetPlanModeService(configStore, RequestContext);
     }
 
-    private FleetFunctionInvoker NewInvoker(bool planMode = false, int rounds = 25, ChatApprovals? approvals = null, bool approvalsOn = false, IReadOnlySet<string>? readOnly = null)
+    private FleetFunctionInvoker NewInvoker(bool planMode = false, int rounds = 25, ChatApprovals? approvals = null, string approvalLevel = "off", IReadOnlySet<string>? readOnly = null)
     {
         Directory.CreateDirectory(_plansDir);
         var plans = new FleetPlanStore(new ConfigurationBuilder().AddInMemoryCollection(
@@ -40,7 +40,7 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
             Task.FromResult("Exit code: 0\n--- stdout ---\nok");
         var tools = new PlanTools(plans, validator, checkCommand);
         return new FleetFunctionInvoker(Journal, PlanMode(planMode), plans, new SwappableNameSet(readOnly ?? PlanGate.BuiltInReadOnlyTools), tools, NullLogger.Instance, rounds,
-            approvals, () => approvalsOn);
+            approvals, () => approvalLevel);
     }
 
     private sealed class ScriptedModel(Func<int, FunctionCallContent?> call) : IChatClient
@@ -303,7 +303,7 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
         };
         ActivitySource.AddActivityListener(listener);
         var approvals = NewApprovals();
-        var invoker = NewInvoker(approvals: approvals, approvalsOn: true);
+        var invoker = NewInvoker(approvals: approvals, approvalLevel: "all");
         var tool = AIFunctionFactory.Create((string path, string content) => "wrote", "write_file", "Writes a file.");
 
         Task<string[]> turn = RunAsync(invoker, OneWriteCall("write_file"), tool, runner: false);
@@ -689,7 +689,7 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
     public async Task With_chat_approvals_off_a_chat_tool_runs_without_asking()
     {
         var approvals = NewApprovals();
-        var invoker = NewInvoker(approvals: approvals, approvalsOn: false);
+        var invoker = NewInvoker(approvals: approvals, approvalLevel: "off");
         int runs = 0;
         var tool = AIFunctionFactory.Create((string path, string content) => { runs++; return "wrote"; }, "write_file", "Writes a file.");
 
@@ -704,7 +704,7 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
     public async Task With_chat_approvals_on_a_chat_tool_waits_for_the_user_and_runs_once_approved()
     {
         var approvals = NewApprovals();
-        var invoker = NewInvoker(approvals: approvals, approvalsOn: true);
+        var invoker = NewInvoker(approvals: approvals, approvalLevel: "all");
         int runs = 0;
         var tool = AIFunctionFactory.Create((string path, string content) => { runs++; return "wrote"; }, "write_file", "Writes a file.");
         string contextId = NewContextId();
@@ -726,7 +726,7 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
     public async Task A_rejected_chat_tool_is_not_run_the_model_is_told_and_the_call_is_recorded_as_an_error()
     {
         var approvals = NewApprovals();
-        var invoker = NewInvoker(approvals: approvals, approvalsOn: true);
+        var invoker = NewInvoker(approvals: approvals, approvalLevel: "all");
         int runs = 0;
         var tool = AIFunctionFactory.Create((string path, string content) => { runs++; return "wrote"; }, "write_file", "Writes a file.");
         var model = OneWriteCall("write_file");
@@ -750,7 +750,7 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
     {
         var clock = new ManualClock();
         var approvals = NewApprovals(clock);
-        var invoker = NewInvoker(approvals: approvals, approvalsOn: true);
+        var invoker = NewInvoker(approvals: approvals, approvalLevel: "all");
         int runs = 0;
         var tool = AIFunctionFactory.Create((string path, string content) => { runs++; return "wrote"; }, "write_file", "Writes a file.");
 
@@ -768,7 +768,7 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
     public async Task A_read_only_tool_never_waits_for_approval()
     {
         var approvals = NewApprovals();
-        var invoker = NewInvoker(approvals: approvals, approvalsOn: true);
+        var invoker = NewInvoker(approvals: approvals, approvalLevel: "all");
         int runs = 0;
         var tool = AIFunctionFactory.Create((string path) => { runs++; return "a.cs"; }, "read_file", "Reads a file.");
         var model = new ScriptedModel(round =>
@@ -781,18 +781,24 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
         Assert.Empty(approvals.Pending());
     }
 
-    [Fact]
-    public async Task A_plan_runner_call_never_waits_for_approval()
+    [Theory]
+    [InlineData("off", "write_file")]
+    [InlineData("risky", "write_file")]
+    [InlineData("all", "write_file")]
+    [InlineData("off", "run_command")]
+    [InlineData("risky", "run_command")]
+    [InlineData("all", "run_command")]
+    public async Task A_plan_runner_call_never_waits_for_approval(string level, string name)
     {
         var approvals = NewApprovals();
-        var invoker = NewInvoker(approvals: approvals, approvalsOn: true);
+        var invoker = NewInvoker(approvals: approvals, approvalLevel: level);
         int runs = 0;
-        var tool = AIFunctionFactory.Create((string path, string content) => { runs++; return "wrote"; }, "write_file", "Writes a file.");
+        var tool = AIFunctionFactory.Create((string path, string content) => { runs++; return "ran"; }, name, "Test tool.");
 
-        string[] results = await RunAsync(invoker, OneWriteCall("write_file"), tool, runner: true).WaitAsync(SafetyLimit);
+        string[] results = await RunAsync(invoker, OneWriteCall(name), tool, runner: true).WaitAsync(SafetyLimit);
 
         Assert.Equal(1, runs);
-        Assert.Equal("wrote", results[0]);
+        Assert.Equal("ran", results[0]);
         Assert.Empty(approvals.Pending());
     }
 
@@ -803,7 +809,7 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
     {
         var approvals = NewApprovals();
         // No tool counts as read-only here, so only the bookkeeping exemption can keep these calls from waiting.
-        var invoker = NewInvoker(approvals: approvals, approvalsOn: true, readOnly: new HashSet<string>());
+        var invoker = NewInvoker(approvals: approvals, approvalLevel: "all", readOnly: new HashSet<string>());
         int runs = 0;
         var tool = AIFunctionFactory.Create((string value) => { runs++; return "noted"; }, toolName, "Bookkeeping.");
         int callCount = 0;
@@ -818,5 +824,63 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
         Assert.Equal(1, runs);
         Assert.Equal("noted", results[0]);
         Assert.Empty(approvals.Pending());
+    }
+
+    [Theory]
+    [InlineData("run_command")]
+    [InlineData("run_git_command")]
+    [InlineData("http_request")]
+    public async Task Risky_command_and_network_tools_wait(string name)
+    {
+        var approvals = NewApprovals();
+        var invoker = NewInvoker(approvals: approvals, approvalLevel: "risky");
+        int runs = 0;
+        var tool = AIFunctionFactory.Create((string path, string content) => { runs++; return "ran"; }, name, "Test tool.");
+        Task<string[]> turn = RunAsync(invoker, OneWriteCall(name), tool, runner: false);
+        PendingApproval waiting = (await ChatApprovalsTests.WaitForPendingAsync(approvals)).Single();
+        Assert.Equal(0, runs);
+        Assert.Equal(name, waiting.Tool);
+        Assert.True(approvals.Decide(waiting.Id, approve: true));
+        Assert.Equal("ran", (await turn.WaitAsync(SafetyLimit))[0]);
+        Assert.Equal(1, runs);
+    }
+
+    [Theory]
+    [InlineData("risky", "write_file")]
+    [InlineData("risky", "read_file")]
+    [InlineData("off", "run_command")]
+    public async Task Tools_outside_the_selected_level_run_without_waiting(string level, string name)
+    {
+        var approvals = NewApprovals();
+        var invoker = NewInvoker(approvals: approvals, approvalLevel: level);
+        int runs = 0;
+        var tool = AIFunctionFactory.Create((string path, string content) => { runs++; return "ran"; }, name, "Test tool.");
+        string[] results = await RunAsync(invoker, OneWriteCall(name), tool, runner: false).WaitAsync(SafetyLimit);
+        Assert.Equal(1, runs);
+        Assert.Equal("ran", results[0]);
+        Assert.Empty(approvals.Pending());
+    }
+
+    [Fact]
+    public async Task In_plan_mode_a_command_is_refused_before_anyone_is_asked()
+    {
+        var approvals = NewApprovals();
+        var invoker = NewInvoker(planMode: true, approvals: approvals, approvalLevel: "risky");
+        int runs = 0;
+        var tool = AIFunctionFactory.Create((string command) => { runs++; return "ran"; }, "run_command", "Runs a command.");
+
+        Assert.Equal("refused", await ToolOutcomeAsync(invoker, OneWriteCall("run_command"), tool, "run_command", runner: false));
+        Assert.Equal(0, runs);
+        Assert.Empty(approvals.Pending());
+    }
+
+    [Fact]
+    public void No_risky_tool_is_read_only_or_fleet_bookkeeping()
+    {
+        Assert.Empty(FleetFunctionInvoker.RiskyTools.Intersect(PlanGate.BuiltInReadOnlyTools));
+        foreach (string bookkeeping in new[] { "propose_plan", "record_decision", "search_context" })
+        {
+            Assert.DoesNotContain(bookkeeping, FleetFunctionInvoker.RiskyTools);
+        }
     }
 }

@@ -153,9 +153,9 @@ internal sealed record FleetConfig(
     public IReadOnlyDictionary<string, FleetMcpServerConfig> McpServerMap =>
         McpServers ?? new Dictionary<string, FleetMcpServerConfig>(StringComparer.Ordinal);
 
-    /// <summary>What applies when the file has no chatApprovals block: approval off, and the default wait.</summary>
+    /// <summary>Without a chatApprovals block, command and HTTP tools ask before running.</summary>
     [System.Text.Json.Serialization.JsonIgnore]
-    public FleetChatApprovalConfig ChatApprovalSettings => ChatApprovals ?? new FleetChatApprovalConfig();
+    public FleetChatApprovalConfig ChatApprovalSettings => (ChatApprovals ?? new FleetChatApprovalConfig(Mode: "risky")).Resolved();
 
     /// <summary>What applies when the file has no weeklyProbe block: the weekly measurement is off.</summary>
     [System.Text.Json.Serialization.JsonIgnore]
@@ -185,18 +185,29 @@ internal sealed record FleetConfig(
 internal sealed record FleetLabConfig(double MinSpeedFraction = 0.70, double FullFitShare = 0.90, double ConstrainedSpeedFraction = 0.80);
 
 /// <summary>
-/// Whether a chat tool that can change something waits for the user before it runs (see ChatApprovals). Off by
-/// default: a chat that runs tools without a question is how the fleet has always behaved. Plan runs are never asked.
+/// Which chat tool calls wait for the user before running. Plan runs are never asked.
 /// </summary>
 /// <param name="Enabled">Ask before a chat tool call that is not read-only runs.</param>
 /// <param name="TimeoutSeconds">
 /// How long a call waits for an answer before it is refused. Kept between 30 and 280 seconds: the web proxy drops a
 /// stream that stays silent for 300 seconds, and the chat is silent while a call waits.
 /// </param>
-internal sealed record FleetChatApprovalConfig(bool Enabled = false, int TimeoutSeconds = 240)
+internal sealed record FleetChatApprovalConfig(bool Enabled = false, int TimeoutSeconds = 240, string? Mode = null)
 {
     public const int MinTimeoutSeconds = 30;
     public const int MaxTimeoutSeconds = 280;
+
+    public const string InvalidModeMessage = "chatApprovals.mode must be off, risky or all.";
+
+    // Level names are read without regard to case, so a file edited by hand with "Risky" means risky.
+    public static bool IsValidMode(string? mode) => mode is null || mode.ToLowerInvariant() is "off" or "risky" or "all";
+
+    // Unknown values must never silently weaken approval requirements.
+    public FleetChatApprovalConfig Resolved()
+    {
+        string level = Mode is null ? (Enabled ? "all" : "off") : IsValidMode(Mode) ? Mode.ToLowerInvariant() : "all";
+        return this with { Mode = level, Enabled = level != "off", TimeoutSeconds = ClampTimeout(TimeoutSeconds) };
+    }
 
     public static int ClampTimeout(int seconds) => Math.Clamp(seconds, MinTimeoutSeconds, MaxTimeoutSeconds);
 }

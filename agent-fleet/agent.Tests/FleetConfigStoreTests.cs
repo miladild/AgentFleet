@@ -368,12 +368,13 @@ public sealed class FleetConfigStoreTests : IDisposable
     }
 
     [Fact]
-    public void Chat_approvals_are_off_and_wait_four_minutes_when_the_file_has_no_block()
+    public void Chat_approvals_default_to_risky_so_commands_ask_even_without_a_block()
     {
         FleetConfig config = Open().Current;
 
         Assert.Null(config.ChatApprovals);
-        Assert.False(config.ChatApprovalSettings.Enabled);
+        Assert.True(config.ChatApprovalSettings.Enabled);
+        Assert.Equal("risky", config.ChatApprovalSettings.Mode);
         Assert.Equal(240, config.ChatApprovalSettings.TimeoutSeconds);
     }
 
@@ -400,6 +401,100 @@ public sealed class FleetConfigStoreTests : IDisposable
 
         store.Save(store.Current with { ChatApprovals = new FleetChatApprovalConfig(Enabled: true, TimeoutSeconds: 120) });
 
-        Assert.Equal(new FleetChatApprovalConfig(Enabled: true, TimeoutSeconds: 120), Open().Current.ChatApprovals);
+        Assert.Equal(new FleetChatApprovalConfig(Enabled: true, TimeoutSeconds: 120, Mode: "all"), Open().Current.ChatApprovals);
+    }
+
+    [Theory]
+    [InlineData("{\"enabled\":true}", "all")]
+    [InlineData("{\"enabled\":false}", "off")]
+    [InlineData("{}", "off")]
+    [InlineData("{\"mode\":\"risky\",\"enabled\":false}", "risky")]
+    [InlineData("{\"mode\":\"off\",\"enabled\":true}", "off")]
+    [InlineData("{\"mode\":\"unknown\",\"enabled\":false}", "all")]
+    [InlineData("{\"timeoutSeconds\":60}", "off")]
+    public void Chat_approval_levels_resolve_without_weakening_unknown_values(string block, string expected)
+    {
+        var store = Open();
+        var document = JsonNode.Parse(File.ReadAllText(ConfigPath))!.AsObject();
+        document["chatApprovals"] = JsonNode.Parse(block);
+        File.WriteAllText(ConfigPath, document.ToJsonString());
+        var settings = Open().Current.ChatApprovalSettings;
+        Assert.Equal(expected, settings.Mode);
+        Assert.Equal(expected != "off", settings.Enabled);
+    }
+
+    [Theory]
+    [InlineData("off", true)]
+    [InlineData("risky", false)]
+    [InlineData("all", false)]
+    public void Saving_an_approval_level_writes_consistent_legacy_enabled(string mode, bool enabled)
+    {
+        var store = Open();
+        store.Save(store.Current with { ChatApprovals = new FleetChatApprovalConfig(enabled, Mode: mode) });
+        var block = JsonNode.Parse(File.ReadAllText(ConfigPath))!["chatApprovals"]!;
+        Assert.Equal(mode, block["mode"]!.GetValue<string>());
+        Assert.Equal(mode != "off", block["enabled"]!.GetValue<bool>());
+        Assert.Equal(mode, Open().Current.ChatApprovalSettings.Mode);
+    }
+
+    [Fact]
+    public void An_unknown_approval_level_is_a_bad_request_and_cannot_change_the_file()
+    {
+        // The save endpoint turns this exception into a 400 with its message; the store must leave the file as it was.
+        var store = Open();
+        byte[] before = File.ReadAllBytes(ConfigPath);
+        var error = Assert.Throws<InvalidOperationException>(() => store.Save(store.Current with { ChatApprovals = new FleetChatApprovalConfig(Mode: "unknown") }));
+        Assert.Equal(FleetChatApprovalConfig.InvalidModeMessage, error.Message);
+        Assert.Equal(before, File.ReadAllBytes(ConfigPath));
+    }
+
+    [Fact]
+    public void The_settings_used_by_config_responses_serialize_the_resolved_missing_block_level()
+    {
+        var config = Open().Current;
+        Assert.Null(config.ChatApprovals);
+        var json = JsonSerializer.SerializeToNode(config.ChatApprovalSettings, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase })!;
+        Assert.Equal("risky", json["mode"]!.GetValue<string>());
+        Assert.True(json["enabled"]!.GetValue<bool>());
+    }
+
+    [Theory]
+    [InlineData("Risky", "risky")]
+    [InlineData("OFF", "off")]
+    [InlineData("All", "all")]
+    public void Chat_approval_levels_in_capitals_are_read_as_their_level(string mode, string expected)
+    {
+        Open();
+        var document = JsonNode.Parse(File.ReadAllText(ConfigPath))!.AsObject();
+        document["chatApprovals"] = JsonNode.Parse($"{{\"mode\":\"{mode}\"}}");
+        File.WriteAllText(ConfigPath, document.ToJsonString());
+        var settings = Open().Current.ChatApprovalSettings;
+        Assert.Equal(expected, settings.Mode);
+        Assert.Equal(expected != "off", settings.Enabled);
+    }
+
+    [Fact]
+    public void Saving_only_the_wait_keeps_the_level_the_file_has()
+    {
+        var store = Open();
+        store.Save(store.Current with { ChatApprovals = new FleetChatApprovalConfig(Mode: "risky") });
+        FleetChatApprovalConfig current = store.Current.ChatApprovalSettings;
+        store.Save(store.Current with { ChatApprovals = current with { TimeoutSeconds = 60 } });
+        FleetChatApprovalConfig reread = Open().Current.ChatApprovalSettings;
+        Assert.Equal("risky", reread.Mode);
+        Assert.Equal(60, reread.TimeoutSeconds);
+    }
+
+    [Theory]
+    [InlineData("Risky", "risky")]
+    [InlineData("OFF", "off")]
+    [InlineData("All", "all")]
+    public void Saving_a_level_in_capitals_is_accepted_and_written_in_lower_case(string mode, string expected)
+    {
+        var store = Open();
+        store.Save(store.Current with { ChatApprovals = new FleetChatApprovalConfig(Mode: mode) });
+        var block = JsonNode.Parse(File.ReadAllText(ConfigPath))!["chatApprovals"]!;
+        Assert.Equal(expected, block["mode"]!.GetValue<string>());
+        Assert.Equal(expected != "off", block["enabled"]!.GetValue<bool>());
     }
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { describeApproval, formatCountdown, sortApprovals } from "./approvalPresentation.ts";
+import { describeApproval, formatCountdown, sortApprovals, DEFAULT_APPROVAL_CONFIG, APPROVAL_LEVEL_TEXT } from "./approvalPresentation.ts";
 
 const call = (tool, args) => ({
   id: "a".repeat(32),
@@ -113,4 +113,14 @@ test("requests that run out at the same time keep a fixed order by id", () => {
   const second = { id: "2".repeat(32), expiresAtUtc: "2026-10-14T10:01:00Z" };
   assert.deepEqual(sortApprovals([second, first]), [first, second]);
   assert.deepEqual(sortApprovals([]), []);
+});
+
+test("missing approval settings show commands and HTTP with the usual wait", () => {
+  assert.deepEqual(DEFAULT_APPROVAL_CONFIG, { mode: "risky", enabled: true, timeoutSeconds: 240 });
+});
+
+test("each approval level explains the tools that ask", () => {
+  assert.equal(APPROVAL_LEVEL_TEXT.off, "Chat tools run without asking.");
+  assert.equal(APPROVAL_LEVEL_TEXT.risky, "Ask before shell commands, Git commands and HTTP requests.");
+  assert.equal(APPROVAL_LEVEL_TEXT.all, "Ask before every tool that is not read-only or fleet bookkeeping, including connected tools.");
 });

@@ -1,8 +1,9 @@
 "use client";
 
 import { useState } from "react";
+import { APPROVAL_LEVEL_TEXT, type ApprovalLevel } from "./approvalPresentation";
 
-export type ApprovalConfig = { enabled: boolean; timeoutSeconds: number };
+export type ApprovalConfig = { mode: ApprovalLevel; enabled: boolean; timeoutSeconds: number };
 
 const WAIT_CHOICES: [number, string][] = [
   [60, "1 minute"],
@@ -11,8 +12,7 @@ const WAIT_CHOICES: [number, string][] = [
 ];
 
 /**
- * Whether the chat asks before a tool that can change something runs. Plans are never asked, and neither are read-only
- * tools. A call nobody answers is refused when its wait runs out.
+ * The chat approval level and wait. Plans and read-only tools never wait; an unanswered call is refused.
  */
 export function ApprovalSettings({
   settings,
@@ -51,9 +51,7 @@ export function ApprovalSettings({
       onSaved(
         saved,
         typeof data.version === "string" ? data.version : "",
-        saved.enabled
-          ? "Saved. The chat now asks before it runs a command or changes a file."
-          : "Saved. The chat runs its tools without asking.",
+        `Saved. ${APPROVAL_LEVEL_TEXT[saved.mode]}`,
       );
     } catch {
       setError("Could not reach the backend.");
@@ -65,23 +63,29 @@ export function ApprovalSettings({
 
   return (
     <div className="space-y-3 border border-neutral-700 rounded-md p-3">
-      <label className="flex items-start gap-3 text-sm text-neutral-200">
-        <input
-          type="checkbox"
-          checked={shown.enabled}
-          disabled={saving}
-          onChange={(e) => void save({ ...shown, enabled: e.target.checked })}
-          className="mt-0.5"
-        />
-        <span>
-          Ask before the chat runs a command or changes a file
-          <span className="block text-[11px] text-neutral-500 mt-1">
-            A tool call that can change something waits for your Approve or Reject, shown as a card on the chat and live pages.
-            Tools that only read, and plans you have approved, never wait. A call you do not answer in time is refused and the
-            assistant is told so. Chats in VS Code are asked too: keep this page open to answer them. Off by default.
-          </span>
-        </span>
-      </label>
+      <fieldset disabled={saving} className="space-y-2 text-sm text-neutral-200">
+        <legend className="mb-2">Chat approvals</legend>
+        {(["off", "risky", "all"] as const).map((mode) => (
+          <label key={mode} className="flex items-start gap-3">
+            <input
+              type="radio"
+              name="chat-approval-level"
+              value={mode}
+              checked={shown.mode === mode}
+              onChange={() => void save({ ...shown, mode, enabled: mode !== "off" })}
+              className="mt-0.5"
+            />
+            <span>
+              {mode === "off" ? "Off" : mode === "risky" ? "Commands and HTTP (default)" : "All changes"}
+              <span className="block text-[11px] text-neutral-500 mt-1">{APPROVAL_LEVEL_TEXT[mode]}</span>
+            </span>
+          </label>
+        ))}
+        <p className="text-[11px] text-neutral-500">
+          Plans never wait. Unanswered calls are refused. Connected servers and command tools made in Config
+          require All changes to ask; the default covers only the three built-in command and HTTP tools.
+        </p>
+      </fieldset>
 
       <div className="flex items-center gap-3 text-xs text-neutral-300">
         <label htmlFor="approval-wait">Wait for an answer for</label>

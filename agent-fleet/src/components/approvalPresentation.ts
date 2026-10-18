@@ -1,3 +1,13 @@
+export type ApprovalLevel = "off" | "risky" | "all";
+
+export const DEFAULT_APPROVAL_CONFIG = { mode: "risky" as ApprovalLevel, enabled: true, timeoutSeconds: 240 };
+
+export const APPROVAL_LEVEL_TEXT: Record<ApprovalLevel, string> = {
+  off: "Chat tools run without asking.",
+  risky: "Ask before shell commands, Git commands and HTTP requests.",
+  all: "Ask before every tool that is not read-only or fleet bookkeeping, including connected tools.",
+};
+
 /** A chat tool call that waits for the user's answer, as GET /api/approvals lists it. */
 export type PendingApproval = {
   id: string;

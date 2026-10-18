@@ -29,7 +29,7 @@ internal sealed record PendingApproval(
 
 /// <summary>
 /// Chat tool calls that wait for the user's answer. The function invoker asks here only when chat approvals are on
-/// (FleetChatApprovalConfig, off by default), so with the setting off nothing is listed and nothing waits. A waiting
+/// (FleetChatApprovalConfig), so with the setting off nothing is listed and nothing waits. A waiting
 /// call holds its chat request open. The web UI lists the calls with Pending() and answers one with Decide(); a call
 /// nobody answers is refused when its time runs out. Every outcome removes the call from the list, and each call is
 /// answered once.

@@ -947,21 +947,23 @@ test("the Models tab posts one import with the typed model and prints what the b
   await expect(section.getByText("Imported 2 runs. 1 run was already stored and not added again.", { exact: true })).toBeVisible();
 });
 
-test("the Tools tab turns chat approvals on and leaves the wait as it was", async ({ page }) => {
+test("the Tools tab shows the default approval level and saves another one, leaving the wait as it was", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Config", exact: true }).click();
   await page.getByRole("button", { name: "Tools", exact: true }).click();
 
-  const checkbox = page.getByRole("checkbox", { name: /Ask before the chat runs a command/ });
-  await expect(checkbox).not.toBeChecked();
+  const commandsAndHttp = page.getByRole("radio", { name: /Commands and HTTP/ });
+  const allChanges = page.getByRole("radio", { name: /All changes/ });
+  await expect(commandsAndHttp).toBeChecked();
+  await expect(allChanges).not.toBeChecked();
   const saveRequest = page.waitForRequest((request) => request.url().endsWith("/api/fleet-config") && request.method() === "PUT");
-  await checkbox.check();
+  await allChanges.check();
   const body = (await saveRequest).postDataJSON();
 
-  expect(body.chatApprovals).toEqual({ enabled: true, timeoutSeconds: 240 });
+  expect(body.chatApprovals).toEqual({ mode: "all", enabled: true, timeoutSeconds: 240 });
   expect(body.nodes).toBeUndefined();
-  await expect(page.getByText("Saved. The chat now asks before it runs a command or changes a file.")).toBeVisible();
-  await expect(checkbox).toBeChecked();
+  await expect(page.getByText("Saved. Ask before every tool that is not read-only or fleet bookkeeping, including connected tools.")).toBeVisible();
+  await expect(allChanges).toBeChecked();
 });
 
 test("the Setup tab turns the weekly measurement on and shows an open regression", async ({ page }) => {
@@ -1009,8 +1011,8 @@ test("turning chat approvals on does not hide unsaved machine edits", async ({ p
 
   await page.getByRole("button", { name: "Tools", exact: true }).click();
   await expect(page.getByText("Unsaved machine changes: see the Machines tab.")).toBeVisible();
-  await page.getByRole("checkbox", { name: /Ask before the chat runs a command/ }).check();
-  await expect(page.getByText("Saved. The chat now asks before it runs a command or changes a file.")).toBeVisible();
+  await page.getByRole("radio", { name: /All changes/ }).check();
+  await expect(page.getByText("Saved. Ask before every tool that is not read-only or fleet bookkeeping, including connected tools.")).toBeVisible();
 
   await expect(page.getByText("Unsaved machine changes: see the Machines tab.")).toBeVisible();
 });

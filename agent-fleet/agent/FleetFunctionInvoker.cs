@@ -19,8 +19,20 @@ internal sealed class FleetFunctionInvoker(
     ILogger toolLoopLogger,
     int planStepToolRounds,
     ChatApprovals? chatApprovals = null,
-    Func<bool>? chatApprovalsOn = null)
+    Func<string>? chatApprovalsOn = null)
 {
+    internal static readonly IReadOnlySet<string> RiskyTools = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "run_command", "run_git_command", "http_request"
+    };
+
+    private static bool ShouldAsk(string level, string toolName) => level switch
+    {
+        "off" => false,
+        "risky" => RiskyTools.Contains(toolName),
+        _ => true
+    };
+
     public async ValueTask<object?> InvokeAsync(FunctionInvocationContext context, CancellationToken cancellationToken)
     {
         string toolName = context.Function.Name;
@@ -101,7 +113,7 @@ internal sealed class FleetFunctionInvoker(
 
         // The user answers a chat tool call before it runs, after the gate and the argument fixes above, so the arguments
         // shown are the ones that run. The plan runner is exempt: an approved plan runs unattended by design.
-        if (!fromRunner && chatApprovals is not null && chatApprovalsOn?.Invoke() == true &&
+        if (!fromRunner && chatApprovals is not null && ShouldAsk(chatApprovalsOn?.Invoke() ?? "off", toolName) &&
             !readOnlyTools.Contains(toolName) && !IsFleetBookkeeping(toolName))
         {
             ApprovalDecision decision = await chatApprovals.RequestAsync(

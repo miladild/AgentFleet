@@ -32,7 +32,7 @@ fallback, found 2."
   "mcpServers": { ... },
   "sandbox": { ... },
   "history": { "deleteAfterDays": 90 },
-  "chatApprovals": { "enabled": false, "timeoutSeconds": 240 },
+  "chatApprovals": { "mode": "risky", "enabled": true, "timeoutSeconds": 240 },
   "weeklyProbe": { "enabled": false, "dayOfWeek": "sunday", "startHour": 2, "hours": 4 },
   "notifyUrl": "http://192.0.2.10:8080/fleet"
 }
@@ -182,15 +182,24 @@ How long the durable record keeps chats. See [context.md](context.md#keeping-it-
 
 ### `chatApprovals`
 
-Off when missing. When it is on, a tool call the model makes in ordinary chat waits for your answer before it runs. Read-only
-tools never wait, nor do the fleet's own bookkeeping calls (plan proposals, decision pins and record searches). A plan never
-waits: an approved plan runs unattended, as before. The Tools tab of the Config panel in the web UI has a switch for it and
-for the wait.
+The default is `risky`: ordinary chat asks before `run_command`, `run_git_command` and `http_request` run. `all` asks
+before every tool that is not read-only or fleet bookkeeping; `off` runs tools without asking. Read-only tools and the
+fleet's bookkeeping calls never wait. Approved plan runs stay unattended in every level. Choose a level and wait time
+in the Tools tab of the Config panel.
 
 | Field | Meaning |
 |---|---|
-| `enabled` | `true` to ask before a chat tool that can change something runs. Missing or `false` means chat runs tools without a question, as it always has. |
+| `mode` | `off`, `risky` or `all`, in any letter case. Takes precedence over `enabled`. Unknown values are rejected on save and treated as `all` on load. |
+| `enabled` | Compatibility for older files and readers. In a block without `mode`, `true` means `all` and `false` or missing means `off`, so a block with only `timeoutSeconds` is `off`. Saves write both fields, with `enabled` true unless the level is `off`. |
 | `timeoutSeconds` | How long a call waits for an answer before it is refused. Missing means 240. A value outside 30 to 280 is brought into that range: the web proxy drops a stream that stays silent for 300 seconds, and the chat is silent while a call waits. |
+
+Migration: a file without a `chatApprovals` block now asks before shell, Git and HTTP calls in chat. Set
+`"chatApprovals": { "mode": "off" }` to keep the old behaviour. A block that already has `enabled` keeps its meaning.
+MCP servers and command tools made in Config are outside `risky`; choose `all` when connecting tools that can fetch or run things.
+
+A caller that uses the chat endpoint directly, from a script or another client with nothing to answer approvals, should
+know that with the default level a shell, Git or HTTP call is held for the wait (240 seconds by default) and then refused.
+For such callers choose `"mode": "off"`, or `all` when the client does answer approvals.
 
 A call that is rejected, or not answered in time, does not run. The model is told so and carries on, and can say what did not
 run. The web UI shows each waiting call as a card with **Approve** and **Reject** on the chat page and on the live view, so a
