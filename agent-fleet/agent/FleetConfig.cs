@@ -187,12 +187,12 @@ internal sealed record FleetLabConfig(double MinSpeedFraction = 0.70, double Ful
 /// <summary>
 /// Which chat tool calls wait for the user before running. Plan runs are never asked.
 /// </summary>
-/// <param name="Enabled">Ask before a chat tool call that is not read-only runs.</param>
+/// <param name="Enabled">Legacy switch: true asks before every chat tool call that is not read-only, false asks before none. Null when not stated.</param>
 /// <param name="TimeoutSeconds">
 /// How long a call waits for an answer before it is refused. Kept between 30 and 280 seconds: the web proxy drops a
 /// stream that stays silent for 300 seconds, and the chat is silent while a call waits.
 /// </param>
-internal sealed record FleetChatApprovalConfig(bool Enabled = false, int TimeoutSeconds = 240, string? Mode = null)
+internal sealed record FleetChatApprovalConfig(bool? Enabled = null, int TimeoutSeconds = 240, string? Mode = null)
 {
     public const int MinTimeoutSeconds = 30;
     public const int MaxTimeoutSeconds = 280;
@@ -202,10 +202,13 @@ internal sealed record FleetChatApprovalConfig(bool Enabled = false, int Timeout
     // Level names are read without regard to case, so a file edited by hand with "Risky" means risky.
     public static bool IsValidMode(string? mode) => mode is null || mode.ToLowerInvariant() is "off" or "risky" or "all";
 
-    // Unknown values must never silently weaken approval requirements.
+    // A block with neither mode nor enabled uses the default level (risky). Unknown values must never silently weaken
+    // approval requirements.
     public FleetChatApprovalConfig Resolved()
     {
-        string level = Mode is null ? (Enabled ? "all" : "off") : IsValidMode(Mode) ? Mode.ToLowerInvariant() : "all";
+        string level = Mode is not null
+            ? IsValidMode(Mode) ? Mode.ToLowerInvariant() : "all"
+            : Enabled is null ? "risky" : Enabled.Value ? "all" : "off";
         return this with { Mode = level, Enabled = level != "off", TimeoutSeconds = ClampTimeout(TimeoutSeconds) };
     }
 

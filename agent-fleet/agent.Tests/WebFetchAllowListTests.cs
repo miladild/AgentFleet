@@ -351,12 +351,66 @@ public sealed class WebFetchAllowListTests : IDisposable
     }
 
     [Fact]
-    public void A_list_spelled_in_another_case_is_refused_on_load_instead_of_being_ignored()
+    public void Property_names_spelled_in_another_case_are_read_and_both_lists_apply()
+    {
+        File.WriteAllText(ConfigPath, JsonSerializer.Serialize(Config(["docs.example.com"], ["internal.example.test"]), CamelCase)
+            .Replace("\"allowedHosts\"", "\"AllowedHosts\"")
+            .Replace("\"allowedInternalHosts\"", "\"AllowedInternalHosts\""));
+        FleetConfigStore store = Open();
+        Assert.Equal(["docs.example.com"], store.Current.WebFetchAllowedHosts);
+        Assert.Equal(["internal.example.test"], store.Current.WebFetchAllowedInternalHosts);
+    }
+
+    [Fact]
+    public void Property_names_in_all_capitals_are_read_and_the_list_applies()
     {
         File.WriteAllText(ConfigPath, JsonSerializer.Serialize(Config(["docs.example.com"]), CamelCase)
-            .Replace("\"allowedHosts\"", "\"AllowedHosts\""));
-        var error = Assert.Throws<InvalidOperationException>(() => Open());
-        Assert.Contains("allowedHosts", error.Message);
+            .Replace("\"allowedHosts\"", "\"ALLOWEDHOSTS\""));
+        Assert.Equal(["docs.example.com"], Open().Current.WebFetchAllowedHosts);
+    }
+
+    [Fact]
+    public void A_tools_key_spelled_in_another_case_carries_its_list_under_the_exact_key()
+    {
+        File.WriteAllText(ConfigPath, JsonSerializer.Serialize(Config(["docs.example.com"]), CamelCase)
+            .Replace("\"webFetch\"", "\"WebFetch\""));
+        FleetConfigStore store = Open();
+        Assert.Equal(["docs.example.com"], store.Current.WebFetchAllowedHosts);
+        Assert.False(store.Current.Tools.ContainsKey("WebFetch"));
+        Assert.True(store.Current.Tools.ContainsKey("webFetch"));
+    }
+
+    [Fact]
+    public void When_both_tools_key_spellings_exist_the_exact_key_wins()
+    {
+        File.WriteAllText(ConfigPath, JsonSerializer.Serialize(Config(["exact.example.com"]), CamelCase)
+            .Replace("\"tools\":{", "\"tools\":{\"WebFetch\":{\"enabled\":true,\"allowedHosts\":[\"other.example.com\"]},"));
+        Assert.Equal(["exact.example.com"], Open().Current.WebFetchAllowedHosts);
+    }
+
+    [Fact]
+    public void The_exact_tools_key_wins_when_another_spelling_comes_after_it()
+    {
+        var document = System.Text.Json.Nodes.JsonNode.Parse(JsonSerializer.Serialize(Config(["exact.example.com"]), CamelCase))!.AsObject();
+        document["tools"]!.AsObject()["WebFetch"] = System.Text.Json.Nodes.JsonNode.Parse("{\"enabled\":true,\"allowedHosts\":[\"other.example.com\"]}");
+        File.WriteAllText(ConfigPath, document.ToJsonString());
+        Assert.Equal(["exact.example.com"], Open().Current.WebFetchAllowedHosts);
+    }
+
+    [Fact]
+    public void Saving_and_reloading_writes_the_camel_case_names()
+    {
+        File.WriteAllText(ConfigPath, JsonSerializer.Serialize(Config(["docs.example.com"], ["internal.example.test"]), CamelCase)
+            .Replace("\"allowedHosts\"", "\"AllowedHosts\"")
+            .Replace("\"webFetch\"", "\"WEBFETCH\""));
+        FleetConfigStore store = Open();
+        store.Save(store.Current);
+        string saved = File.ReadAllText(ConfigPath);
+        Assert.Contains("\"allowedHosts\"", saved);
+        Assert.Contains("\"allowedInternalHosts\"", saved);
+        Assert.Contains("\"webFetch\"", saved);
+        Assert.DoesNotContain("AllowedHosts", saved);
+        Assert.Equal(["docs.example.com"], Open().Current.WebFetchAllowedHosts);
     }
 
     [Fact]

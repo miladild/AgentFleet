@@ -407,11 +407,13 @@ public sealed class FleetConfigStoreTests : IDisposable
     [Theory]
     [InlineData("{\"enabled\":true}", "all")]
     [InlineData("{\"enabled\":false}", "off")]
-    [InlineData("{}", "off")]
+    [InlineData("{}", "risky")]
     [InlineData("{\"mode\":\"risky\",\"enabled\":false}", "risky")]
     [InlineData("{\"mode\":\"off\",\"enabled\":true}", "off")]
     [InlineData("{\"mode\":\"unknown\",\"enabled\":false}", "all")]
-    [InlineData("{\"timeoutSeconds\":60}", "off")]
+    [InlineData("{\"timeoutSeconds\":60}", "risky")]
+    [InlineData("{\"timeoutSeconds\":60,\"enabled\":false}", "off")]
+    [InlineData("{\"enabled\":true}", "all")]
     public void Chat_approval_levels_resolve_without_weakening_unknown_values(string block, string expected)
     {
         var store = Open();
@@ -421,6 +423,31 @@ public sealed class FleetConfigStoreTests : IDisposable
         var settings = Open().Current.ChatApprovalSettings;
         Assert.Equal(expected, settings.Mode);
         Assert.Equal(expected != "off", settings.Enabled);
+    }
+
+    [Theory]
+    [InlineData("{\"Mode\":\"all\"}", "all")]
+    [InlineData("{\"Mode\":\"off\"}", "off")]
+    [InlineData("{\"ENABLED\":true}", "all")]
+    public void Property_names_in_the_approvals_block_are_read_without_regard_to_case(string block, string expected)
+    {
+        Open();
+        var document = JsonNode.Parse(File.ReadAllText(ConfigPath))!.AsObject();
+        document["ChatApprovals"] = JsonNode.Parse(block);
+        File.WriteAllText(ConfigPath, document.ToJsonString());
+        Assert.Equal(expected, Open().Current.ChatApprovalSettings.Mode);
+    }
+
+    [Fact]
+    public void Saving_and_reloading_the_approvals_block_writes_camel_case_names()
+    {
+        var store = Open();
+        store.Save(store.Current with { ChatApprovals = new FleetChatApprovalConfig(Mode: "all", TimeoutSeconds: 90) });
+        string saved = File.ReadAllText(ConfigPath);
+        Assert.Contains("\"chatApprovals\"", saved);
+        Assert.Contains("\"timeoutSeconds\"", saved);
+        Assert.DoesNotContain("TimeoutSeconds", saved);
+        Assert.Equal("all", Open().Current.ChatApprovalSettings.Mode);
     }
 
     [Theory]

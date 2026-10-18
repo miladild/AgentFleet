@@ -130,9 +130,9 @@ when tool switches are saved in the Config panel.
 list limits every fetch and redirect to an exact host name, IP literal or wildcard such as `*.example.com`. The wildcard
 matches subdomains at any depth but does not match `example.com` itself; list that name separately when needed. Matching
 ignores case and a trailing dot. Entries are trimmed, lower-cased, deduplicated and sorted when loaded or saved; Unicode
-names are stored in their punycode form; schemes, paths, ports, spaces and a bare wildcard are rejected. The key must be
-spelled exactly `allowedHosts`: a file that spells it in another case is refused on load, because the list would
-otherwise be ignored. An internal host must also pass `allowedInternalHosts`, and fleet
+names are stored in their punycode form; schemes, paths, ports, spaces and a bare wildcard are rejected. Property names in the file
+are read without regard to case, so `AllowedHosts` and `allowedHosts` are the same property; the tools key `webFetch` is
+read the same way (`WebFetch` carries its list too, and if both spellings are present the exact `webFetch` wins). An internal host must also pass `allowedInternalHosts`, and fleet
 node destinations remain blocked. The Config panel keeps this file-configured list when saving tool switches.
 
 ### `mcpServers`
@@ -190,11 +190,11 @@ in the Tools tab of the Config panel.
 | Field | Meaning |
 |---|---|
 | `mode` | `off`, `risky` or `all`, in any letter case. Takes precedence over `enabled`. Unknown values are rejected on save and treated as `all` on load. |
-| `enabled` | Compatibility for older files and readers. In a block without `mode`, `true` means `all` and `false` or missing means `off`, so a block with only `timeoutSeconds` is `off`. Saves write both fields, with `enabled` true unless the level is `off`. |
+| `enabled` | Compatibility for older files and readers. In a block without `mode`, `true` means `all` and `false` means `off`. A block with neither `mode` nor `enabled` (for example only `timeoutSeconds`) uses the default level, `risky`. Saves write both fields, with `enabled` true unless the level is `off`. |
 | `timeoutSeconds` | How long a call waits for an answer before it is refused. Missing means 240. A value outside 30 to 280 is brought into that range: the web proxy drops a stream that stays silent for 300 seconds, and the chat is silent while a call waits. |
 
 Migration: a file without a `chatApprovals` block now asks before shell, Git and HTTP calls in chat. Set
-`"chatApprovals": { "mode": "off" }` to keep the old behaviour. A block that already has `enabled` keeps its meaning.
+`"chatApprovals": { "mode": "off" }` to keep the old behaviour. A block that already has `enabled` keeps its meaning, and a block with neither `mode` nor `enabled` uses the default level, `risky`.
 MCP servers and command tools made in Config are outside `risky`; choose `all` when connecting tools that can fetch or run things.
 
 A caller that uses the chat endpoint directly, from a script or another client with nothing to answer approvals, should

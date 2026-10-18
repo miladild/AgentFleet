@@ -21,7 +21,9 @@ internal sealed class FleetConfigStore
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
         WriteIndented = true,
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        // Property names in the file are read without regard to case, so "AllowedHosts" and "allowedHosts" are the same.
+        PropertyNameCaseInsensitive = true
     };
 
     private static readonly Regex NodeNamePattern = new("^[a-z0-9][a-z0-9-]{0,31}$", RegexOptions.Compiled);
@@ -149,8 +151,6 @@ internal sealed class FleetConfigStore
             {
                 string text = File.ReadAllText(_path);
                 loaded = JsonSerializer.Deserialize<FleetConfig>(text, SerializerOptions);
-                using JsonDocument document = JsonDocument.Parse(text);
-                RejectOtherSpellingsOfAllowedHosts(document.RootElement);
             }
             catch (JsonException exception)
             {
@@ -253,32 +253,6 @@ internal sealed class FleetConfigStore
         return normalized;
     }
 
-    // The loader matches property names exactly, so a list spelled in another case would be ignored and web_fetch
-    // would stay unrestricted without any sign of it. Refusing the file is the safe way to say so.
-    private static void RejectOtherSpellingsOfAllowedHosts(JsonElement element)
-    {
-        if (element.ValueKind == JsonValueKind.Object)
-        {
-            foreach (JsonProperty property in element.EnumerateObject())
-            {
-                if (property.Name != "allowedHosts" && string.Equals(property.Name, "allowedHosts", StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new InvalidOperationException(
-                        "fleet.config.json spells the web_fetch host list in another case; use allowedHosts exactly, or the list is not applied.");
-                }
-
-                RejectOtherSpellingsOfAllowedHosts(property.Value);
-            }
-        }
-        else if (element.ValueKind == JsonValueKind.Array)
-        {
-            foreach (JsonElement item in element.EnumerateArray())
-            {
-                RejectOtherSpellingsOfAllowedHosts(item);
-            }
-        }
-    }
-
     // The web_fetch entry is kept whole: its host lists are edited only through the file, never by a switch in the panel.
     internal static Dictionary<string, FleetToolConfig>? MergeToolSwitches(
         IReadOnlyDictionary<string, FleetToolConfig> current,
@@ -296,6 +270,31 @@ internal sealed class FleetConfigStore
         }
 
         return merged;
+    }
+
+    // A tools key is a dictionary key, not a property name, so the case rule does not reach it. The web_fetch entry is
+    // the one the code reads, so "WebFetch" carries its list under the exact key. If both spellings are present the
+    // exact key wins; between two spellings in other cases, the first one in the file is kept.
+    private static Dictionary<string, FleetToolConfig> CanonicalToolKeys(IReadOnlyDictionary<string, FleetToolConfig> tools)
+    {
+        var canonical = new Dictionary<string, FleetToolConfig>(StringComparer.Ordinal);
+        foreach (KeyValuePair<string, FleetToolConfig> pair in tools)
+        {
+            if (pair.Key == "webFetch")
+            {
+                canonical["webFetch"] = pair.Value;
+            }
+            else if (string.Equals(pair.Key, "webFetch", StringComparison.OrdinalIgnoreCase))
+            {
+                canonical.TryAdd("webFetch", pair.Value);
+            }
+            else
+            {
+                canonical[pair.Key] = pair.Value;
+            }
+        }
+
+        return canonical;
     }
 
     // Fills in the roles a config file may leave out, so a hand-written or older file
@@ -347,7 +346,7 @@ internal sealed class FleetConfigStore
         return config with
         {
             Nodes = nodes,
-            Tools = config.Tools.ToDictionary(
+            Tools = CanonicalToolKeys(config.Tools).ToDictionary(
                 pair => pair.Key,
                 pair => pair.Key == "webFetch"
                     ? pair.Value with
