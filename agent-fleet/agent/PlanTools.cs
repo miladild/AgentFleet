@@ -26,6 +26,7 @@ internal sealed partial class PlanTools
     private readonly FleetContextJournal? _journal;
     private readonly Func<string, bool>? _programExists;
     private readonly bool _workerWorkspacesEnabled;
+    private readonly TestFirstMode _testFirst;
     private readonly ConcurrentDictionary<string, int> _diagramAttempts = new(StringComparer.Ordinal);
 
     /// <param name="programExists">Whether a check's program is installed; defaults to looking on PATH (a seam for tests).</param>
@@ -35,8 +36,10 @@ internal sealed partial class PlanTools
         Func<string, string?, CancellationToken, Task<string>> runCommand,
         FleetContextJournal? journal = null,
         Func<string, bool>? programExists = null,
-        bool workerWorkspacesEnabled = false)
+        bool workerWorkspacesEnabled = false,
+        TestFirstMode testFirst = TestFirstMode.Off)
     {
+        _testFirst = testFirst;
         _programExists = programExists;
         _workerWorkspacesEnabled = workerWorkspacesEnabled;
         _store = store;
@@ -59,7 +62,8 @@ internal sealed partial class PlanTools
         JsonElement? risks,
         string? diagram,
         JsonElement? steps,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool plannerProposed = true)
     {
         List<PlanStepInput> stepInputs = ToSteps(steps);
         if (stepInputs.Count == 0)
@@ -70,7 +74,7 @@ internal sealed partial class PlanTools
 
         // Mistakes that would only show in the night, as a blocked plan: caught now, while the planner can fix them.
         Func<string, bool>? programExists = _workerWorkspacesEnabled ? _ => true : _programExists;
-        var problems = PlanReview.Problems(workingDirectory, stepInputs, programExists).ToList();
+        var problems = PlanReview.Problems(workingDirectory, stepInputs, programExists, plannerProposed ? _testFirst : TestFirstMode.Off).ToList();
         if (!_workerWorkspacesEnabled)
         {
             problems.AddRange(await ProjectToolchainReview.ProblemsAsync(workingDirectory, stepInputs, cancellationToken));
@@ -186,7 +190,7 @@ internal sealed partial class PlanTools
                 parallelGroup = step.ParallelGroup,
                 dependsOn = step.DependsOn
             })),
-            cancellationToken);
+            cancellationToken, plannerProposed: false);
 
         return result.StartsWith("Plan saved", StringComparison.Ordinal)
             ? result
@@ -300,7 +304,8 @@ internal sealed partial class PlanTools
         string? note,
         CancellationToken cancellationToken,
         IReadOnlyCollection<string>? requiredFiles = null,
-        bool deferCommit = false)
+        bool deferCommit = false,
+        bool fullCheckOutput = false)
     {
         PlanRecord? plan = _store.Get(planId?.Trim() ?? string.Empty);
         if (plan is null)
@@ -356,7 +361,8 @@ internal sealed partial class PlanTools
 
             string result = await _runCommand(step.Verify, plan.WorkingDirectory, cancellationToken);
             passed = result.StartsWith("Exit code: 0", StringComparison.Ordinal);
-            output = ShortenCheckOutput(FailureLocation.ProjectRelative(result, plan.WorkingDirectory));
+            output = fullCheckOutput ? FailureLocation.ProjectRelative(result, plan.WorkingDirectory)
+                : ShortenCheckOutput(FailureLocation.ProjectRelative(result, plan.WorkingDirectory));
             restored.AddRange(await RestoreUnnamedDeletionsAsync(plan, cancellationToken));
         }
 
@@ -1047,7 +1053,8 @@ internal sealed partial class PlanTools
             Field(step, "tier", "complexity"),
             Field(step, "parallelGroup", "parallel_group"),
             BooleanField(step, "retrySafe", "retry_safe"),
-            StepNumbers(Raw(step, "dependsOn", "depends_on", "dependencies", "depends")));
+            StepNumbers(Raw(step, "dependsOn", "depends_on", "dependencies", "depends")),
+            Kind: Field(step, "kind"));
     }
 
     // [1, 3], "1, 3" and ["step 1", "Step 3"] all name steps 1 and 3; nothing named means the chain.

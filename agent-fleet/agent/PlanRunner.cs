@@ -133,10 +133,10 @@ internal sealed class FleetStepSession(AIAgent agent, string? role = null) : ISt
         bool readOnlyOnly = calls.Length > 0 && calls.All(call => call.Name is
             "read_file" or "list_directory" or "find_files" or "search_files" or "project_overview" or "get_plan" or "search_context");
         var seen = calls.ToList();
-        // A conversation with a role is not a step: it has no change to make, and an answer in words is a valid result.
+        // A reader role has no change to make, and an answer in words is a valid result.
         // A turn that wrote text and called no tool at all (an analysis of what is wrong, ending where the work should start) is
         // the same: measured, a small worker wrote the right diagnosis of its failing tests and stopped there, round after round.
-        if (role is null && (calls.Length == 0 || readOnlyOnly))
+        if (role is null or PlanRunnerToolPolicy.TestWriterRole && (calls.Length == 0 || readOnlyOnly))
         {
             response = await _agent.RunAsync(FleetStepAgent.Nudge, _session, options, cancellationToken);
             FunctionCallContent[] nudgedCalls = response.Messages.SelectMany(reply => reply.Contents)
@@ -249,6 +249,9 @@ internal sealed partial class PlanRunner
     private readonly bool _stepGuidance;
     private readonly FitProbeService? _fitProbes;
     private readonly FailFirstMode _failFirstMode;
+    private readonly TestFirstMode _testFirstMode;
+    private readonly ConcurrentDictionary<string, bool> _testFirstSnapshotAttempts = new(StringComparer.Ordinal);
+    private readonly Func<string?>? _testWriterNode;
 
     public PlanRunner(
         FleetPlanStore store,
@@ -271,12 +274,16 @@ internal sealed partial class PlanRunner
         IPlanNotifier? notifier = null,
         bool stepGuidance = false,
         FitProbeService? fitProbes = null,
-        FailFirstMode failFirst = FailFirstMode.Off)
+        FailFirstMode failFirst = FailFirstMode.Off,
+        TestFirstMode testFirst = TestFirstMode.Off,
+        Func<string?>? testWriterNode = null)
     {
         _notifier = notifier;
         _stepGuidance = stepGuidance;
         _fitProbes = fitProbes;
         _failFirstMode = failFirst;
+        _testFirstMode = testFirst;
+        _testWriterNode = testWriterNode;
         _roundsPerRung = Math.Max(1, roundsPerRung);
         _stepClock = stepClock is { } clock && clock > TimeSpan.Zero ? clock : DefaultStepClock;
         _transientDelay = transientDelay ?? DefaultTransientDelay;
@@ -414,14 +421,15 @@ internal sealed partial class PlanRunner
                 recoveryBlock = await ReconcileInterruptedWorkspaceAsync(plan, unsafeInterrupted, runCancellation.Token);
                 plan = _store.Get(planId)!;
             }
-            PlanStep? unsafeReplay = plan.Steps.FirstOrDefault(step => step.Status == StepStatus.Running && !step.RetrySafe &&
+            PlanStep? unsafeReplay = plan.Steps.FirstOrDefault(step => step.Status == StepStatus.Running && (!step.RetrySafe || IsTestsStep(step)) &&
                 HasInterruptedAttempt(plan, step));
 
             if (recoveryBlock is not null || unsafeReplay is not null)
             {
                 PlanStep blockedStep = recoveryBlock is not null ? unsafeInterrupted! : unsafeReplay!;
-                string reason = recoveryBlock ??
-                    $"Step {blockedStep.Id} is not marked safe to replay after a backend restart. Its workspace was preserved; review the changes, then approve the plan to continue.";
+                string reason = recoveryBlock ?? (IsTestsStep(blockedStep)
+                    ? "The tests step was interrupted and its original change baseline is unavailable; review it before retrying."
+                    : $"Step {blockedStep.Id} is not marked safe to replay after a backend restart. Its workspace was preserved; review the changes, then approve the plan to continue.");
                 _store.Update(planId, current => FleetPlanStoreSteps.With(current, blockedStep.Id, step => step with
                 {
                     Status = StepStatus.Failed,
@@ -613,6 +621,8 @@ internal sealed partial class PlanRunner
     private void RemoveFailFirstSnapshots(string planId)
     {
         string prefix = planId + ":";
+        foreach (string key in _testFirstSnapshotAttempts.Keys.Where(key => key.StartsWith(prefix, StringComparison.Ordinal)))
+            _testFirstSnapshotAttempts.TryRemove(key, out _);
         foreach (string key in _failFirstSnapshots.Keys.Where(key => key.StartsWith(prefix, StringComparison.Ordinal)))
             _failFirstSnapshots.TryRemove(key, out _);
     }
@@ -688,6 +698,7 @@ internal sealed partial class PlanRunner
 
     private async Task<string?> ParallelFallbackReasonAsync(PlanRecord plan, IReadOnlyList<PlanStep> steps, CancellationToken cancellationToken)
     {
+        if (steps.Any(IsTestsStep)) return "tests steps need an isolated step-start change baseline";
         if (_workerWorkspaces is not null)
         {
             return "worker workspaces sync each completed step to the shared project before the next one starts";
@@ -936,7 +947,7 @@ internal sealed partial class PlanRunner
 
         for (int attempt = firstAttempt; attempt <= MaxAttemptsPerStep && !gaveUp; attempt++)
         {
-            session ??= _agent.OpenSession();
+            session ??= IsTestsStep(step) ? _agent.OpenSession(PlanRunnerToolPolicy.TestWriterRole) : _agent.OpenSession();
             IStepSession conversation = session;
             if (!conversation.HasHistory)
             {
@@ -965,6 +976,7 @@ internal sealed partial class PlanRunner
                 if (conversation.HasHistory)
                 {
                     repairMessage = BuildRepairMessage(plan, step, lastFailure, round, lastRound, handover, rollback);
+                    if (IsTestsStep(step)) repairMessage = PlanTestsStepPrompt.Append(repairMessage);
                 }
                 else if (RepairMessages.Brief(StepEventsSinceRetry(plan.Id, step.Id)) is { Length: > 0 } earlierRounds)
                 {
@@ -982,7 +994,7 @@ internal sealed partial class PlanRunner
                     round: new RoundContext(conversation, rung, round, repairMessage, brief), limit: LimitFor(plan, worked));
                 roundActivity?.SetTag("fleet.model_node", model.ModelNode);
                 roundActivity?.SetTag("fleet.workspace_node", model.Machine);
-                if (model.WorkBefore is { } firstSnapshot)
+                if ((!IsTestsStep(step) || _testFirstSnapshotAttempts.TryAdd($"{plan.Id}:{step.Id}", true)) && model.WorkBefore is { } firstSnapshot)
                     _failFirstSnapshots.TryAdd($"{plan.Id}:{step.Id}", firstSnapshot);
                 if (model.Machine is not null)
                 {
@@ -1127,7 +1139,7 @@ internal sealed partial class PlanRunner
                 string? checkNote = null;
                 string? parkReason = null;
                 FailFirstResult? failFirst = null;
-                bool isFinalValidation = step.Id == plan.Steps.Max(candidate => candidate.Id);
+                bool isFinalValidation = !IsTestsStep(step) && step.Id == plan.Steps.Max(candidate => candidate.Id);
                 try
                 {
                     using IDisposable? workerScope = model.Workspace?.Enter();
@@ -1167,7 +1179,7 @@ internal sealed partial class PlanRunner
                             "Synced the worker project after verification; the checked changes are now in the hub checkout.",
                             modelNode: model.ModelNode, workspaceNode: model.Machine);
 
-                        if (result.Done && !(isFinalValidation && plan.Steps.Count > 1) && _failFirstMode != FailFirstMode.Off &&
+                        if (!IsTestsStep(step) && result.Done && !(isFinalValidation && plan.Steps.Count > 1) && _failFirstMode != FailFirstMode.Off &&
                             _failFirstSnapshots.TryGetValue($"{plan.Id}:{step.Id}", out PlanTools.WorkSnapshot? stepStart))
                         {
                             WorkChange current = await ChangedFilesSinceAsync(plan, stepStart, cancellationToken);
@@ -1208,7 +1220,7 @@ internal sealed partial class PlanRunner
                                     FailFirst.Evidence(failFirst), modelNode: model.ModelNode, workspaceNode: model.Machine,
                                     durationSeconds: (int)Math.Ceiling(failFirst.DurationSeconds));
                         }
-                        else if (result.Done && !(isFinalValidation && plan.Steps.Count > 1) && _failFirstMode != FailFirstMode.Off)
+                        else if (!IsTestsStep(step) && result.Done && !(isFinalValidation && plan.Steps.Count > 1) && _failFirstMode != FailFirstMode.Off)
                         {
                             failFirst = new FailFirstResult("unavailable", [], null);
                             _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.FailFirst, tier, model.Machine,
@@ -1251,8 +1263,16 @@ internal sealed partial class PlanRunner
                 }
 
                 WorkChange change = await ChangedFilesSinceAsync(plan, model.WorkBefore, cancellationToken);
+                if (IsTestsStep(step))
+                {
+                    _failFirstSnapshots.TryGetValue($"{plan.Id}:{step.Id}", out PlanTools.WorkSnapshot? start);
+                    WorkChange total = await ChangedFilesSinceAsync(plan, start, cancellationToken);
+                    bool known = start is not null && total.After is not null && start.Uncaptured.Count == 0 &&
+                        total.After.Uncaptured.Count == 0 && start.Head == total.After.Head;
+                    result = DecideTestsStep(plan, step, attempt, tier, rung, round, model, result, known ? total.Files : null);
+                }
                 // A check that passes although the step changed nothing it names cannot show that the step's work is done.
-                lastUnverified = result.Done ? UnverifiedPassReason(plan, step, model, change.Files, isFinalValidation, result.Output ?? result.Message) : null;
+                lastUnverified = !IsTestsStep(step) && result.Done ? UnverifiedPassReason(plan, step, model, change.Files, isFinalValidation, result.Output ?? result.Message) : null;
                 if (lastUnverified is not null)
                 {
                     string unverified = UnverifiedPassMessage(step, lastUnverified);
@@ -1266,7 +1286,7 @@ internal sealed partial class PlanRunner
                 }
 
                 // A check that passes is not yet a step that is done: a model that did not write the code reads it against the step.
-                string? findings = result.Done
+                string? findings = !IsTestsStep(step) && result.Done
                     ? await ReviewAcceptedStepAsync(plan, step, attempt, tier, model, change.Files, rung, round, cancellationToken)
                     : null;
                 lastReviewFailed = findings is not null;
@@ -1286,7 +1306,7 @@ internal sealed partial class PlanRunner
                     _tools.CommitStepDone(plan.Id, step.Id, Summarize(model.Summary));
                     _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.CheckPassed, tier,
                         node: model.ModelNode ?? model.Machine,
-                        detail: isFinalValidation ? $"Final validation passed: `{step.Verify}`." : $"`{step.Verify}` passed.",
+                        detail: IsTestsStep(step) ? $"`{step.Verify}` failed on the new tests as required." : isFinalValidation ? $"Final validation passed: `{step.Verify}`." : $"`{step.Verify}` passed.",
                         modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round);
                     if (isFinalValidation)
                     {
@@ -1731,6 +1751,9 @@ internal sealed partial class PlanRunner
 
     private async Task<string?> ReconcileInterruptedWorkspaceAsync(PlanRecord plan, PlanStep step, CancellationToken cancellationToken)
     {
+        if (IsTestsStep(step))
+            return $"Step {step.Id} was interrupted while writing tests. The original change baseline is unavailable; review it before retrying.";
+
         PlanRunEvent? staged = (plan.Events ?? [])
             .Where(runEvent => runEvent.StepId == step.Id && runEvent.Kind == RunEventKind.WorkspaceStaged && runEvent.Attempt is not null)
             .OrderByDescending(runEvent => runEvent.AtUtc)
@@ -2835,6 +2858,21 @@ internal sealed partial class PlanRunner
 
         // Climbing to the hub is the decision of the repair ladder (see RunStepAsync), passed in as the model machine.
         string? modelMachine = modelMachineOverride ?? ModelMachineFor(_modeService?.Mode, step.Machine, machine, fallbackHub);
+        if (IsTestsStep(step))
+        {
+            string? writer = _testWriterNode?.Invoke() ?? fallbackHub;
+            bool hubDeclined = writer is not null && string.Equals(writer, fallbackHub, StringComparison.OrdinalIgnoreCase) && !HubRescueAllowed(plan, step);
+            modelMachine = hubDeclined
+                ? _fleetOptions?.Nodes.FirstOrDefault(node => !node.Fallback && !node.Vision && node.Tier == FleetTiers.Heavy)?.Name
+                : writer;
+            if (hubDeclined)
+            {
+                tier = FleetTiers.Heavy;
+                attemptDetail += " The test writer hub is not allowed by recovery scope or fleet mode; using the heavy tier in the same worker workspace.";
+                if (modelMachine is null)
+                    return new ModelAttemptResult(step.Id, string.Empty, "No non-hub heavy-tier test writer is configured.", ShouldVerify: false, Machine: machine);
+            }
+        }
 
         _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.AttemptStarted, tier, node: modelMachine, detail: attemptDetail,
             modelNode: modelMachine, workspaceNode: machine, rung: conversation.Rung, round: conversation.Round);
@@ -2908,7 +2946,7 @@ internal sealed partial class PlanRunner
                     BuildPrompt(plan, step, attempt, lastFailure, fileContext, parallelGroup,
                         durableContext: contextId is not null, retryRoute: retryRoute,
                         workerWorkspace: worker is not null, workerMachine: machine, workerPlatform: worker?.Platform,
-                        brief: conversation.Brief, stepGuidance: _stepGuidance),
+                        brief: IsTestsStep(step) ? PlanTestsStepPrompt.Append(conversation.Brief) : conversation.Brief, stepGuidance: _stepGuidance),
                     tier,
                     modelMachine,
                     attemptCancellation.Token);

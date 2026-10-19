@@ -47,6 +47,7 @@ internal sealed class FleetRoutingChatClient : IChatClient
     private readonly ILogger _logger;
     private readonly FleetContextJournal? _journal;
     private bool _disposed;
+    private readonly TestFirstMode _testFirst;
 
     public FleetRoutingChatClient(
         IChatClient triageClient,
@@ -58,8 +59,10 @@ internal sealed class FleetRoutingChatClient : IChatClient
         IReadOnlySet<string> readOnlyTools,
         FleetActivityLog activityLog,
         ILogger logger,
-        FleetContextJournal? journal = null)
+        FleetContextJournal? journal = null,
+        TestFirstMode testFirst = TestFirstMode.Off)
     {
+        _testFirst = testFirst;
         _journal = journal;
         _triageClient = triageClient;
         _targets = targets;
@@ -689,7 +692,7 @@ internal sealed class FleetRoutingChatClient : IChatClient
         switch (gate.Phase)
         {
             case PlanPhase.Planning:
-                string instructions = PlanGate.PlanningInstructions(gate.Plan, MachinesByTier());
+                string instructions = PlanGate.PlanningInstructions(gate.Plan, MachinesByTier(), _testFirst);
                 if (PlanFile.NamedInLatestRequest(messages) is { } named)
                 {
                     instructions += "\n\n" + PlanGate.PlanFileNote(named.Path, named.Steps);

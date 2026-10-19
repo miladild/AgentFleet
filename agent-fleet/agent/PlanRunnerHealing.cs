@@ -37,6 +37,10 @@ internal sealed partial class PlanRunner
     private async Task<CheckRun> RunCheckWithRepairsAsync(
         PlanRecord plan, PlanStep step, int attempt, string tier, int rung, int round, ModelAttemptResult model, CancellationToken cancellationToken)
     {
+        if (IsTestsStep(step))
+            return new CheckRun(await _tools.TryCompleteStepAsync(plan.Id, step.Id, Summarize(model.Summary),
+                cancellationToken, deferCommit: true, fullCheckOutput: true), step, null, null);
+
         string? note = null;
         bool blockerNoted = false;
         StepCompletion result = new(false, string.Empty);
@@ -294,7 +298,7 @@ internal sealed partial class PlanRunner
         {
             PlanRecord plan = _store.Get(planId)!;
             PlanStep? step = plan.Steps.FirstOrDefault(candidate => candidate.Id == stepId);
-            if (step is null || step.Status != StepStatus.Pending || string.IsNullOrWhiteSpace(step.Verify) ||
+            if (step is null || IsTestsStep(step) || step.Status != StepStatus.Pending || string.IsNullOrWhiteSpace(step.Verify) ||
                 CheckDefects.FromCommand(step.Verify, plan.WorkingDirectory) is not { } defect)
             {
                 continue;

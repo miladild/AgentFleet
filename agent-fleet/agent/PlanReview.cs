@@ -26,7 +26,7 @@ internal static partial class PlanReview
     [GeneratedRegex(@"\.[A-Za-z0-9]{1,6}$")]
     private static partial Regex FileExtension();
 
-    public static IReadOnlyList<string> Problems(string? workingDirectory, IReadOnlyList<PlanStepInput> steps, Func<string, bool>? programExists = null)
+    public static IReadOnlyList<string> Problems(string? workingDirectory, IReadOnlyList<PlanStepInput> steps, Func<string, bool>? programExists = null, TestFirstMode testFirst = TestFirstMode.Off)
     {
         programExists ??= program => QuickProcess.FindOnPath(program) is not null;
         var problems = new List<string>();
@@ -71,6 +71,7 @@ internal static partial class PlanReview
             problems.Add($"The last step ({steps[^1].Title}) needs a whole-project build or test-suite command as its check. The runner executes this command after the step's edits and uses its output for bounded repair retries; a syntax check of one file is not enough.");
         }
 
+        if (testFirst == TestFirstMode.On) problems.AddRange(TestFirst.PlanProblems(steps));
         problems.AddRange(PlanGraph.Problems(steps));
         for (int index = 0; index < steps.Count; index++)
         {

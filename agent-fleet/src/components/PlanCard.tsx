@@ -16,6 +16,7 @@ export type PlanStep = {
   tier: string;
   machine?: string | null;
   parallelGroup?: string | null;
+  kind?: string | null;
   /** The numbers of the steps this one waits for. Every step has them once the plan is read from the backend. */
   dependsOn?: number[] | null;
   retrySafe?: boolean;
@@ -402,6 +403,9 @@ export function PlanCard({ planId }: { planId: string }) {
                   <div className="min-w-0 flex-1">
                     <div className="text-xs text-neutral-200">
                       {step.id}. {step.title}{" "}
+                      {step.kind === "tests" && (
+                        <span className="ml-1 rounded bg-violet-400/10 px-1 text-[10px] text-violet-300">tests</span>
+                      )}
                       <span className="text-[10px] text-neutral-500">({step.tier})</span>
                       {step.status === "done" && planEvidenceLabel(step.evidence) && (
                         <span className={`ml-1 inline-flex rounded-full border px-1.5 py-0.5 text-[10px] ${planEvidenceClass(step.evidence)}`}>

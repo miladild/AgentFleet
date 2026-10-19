@@ -164,9 +164,9 @@ internal static partial class PlanGate
     // (minutes of generation on a large model) before being refused. So the planning phase never
     // shows it those instructions at all.
     /// <param name="machines">Which machines serve which tier, so the planner can spread independent steps over them.</param>
-    public static string PlanningInstructions(PlanRecord? existing, string? machines = null) =>
+    public static string PlanningInstructions(PlanRecord? existing, string? machines = null, TestFirstMode testFirst = TestFirstMode.Off) =>
         $"You are a careful software planner working on the user's own machine, which runs {HubPlatform.Name}: use " +
-        "paths in that machine's own style exactly as given, never rewrite them into another style.\n\n" + PlanningDirective(existing, machines);
+        "paths in that machine's own style exactly as given, never rewrite them into another style.\n\n" + PlanningDirective(existing, machines) + (testFirst == TestFirstMode.On ? PlanTestsStepPrompt.PlanningRules : string.Empty);
 
     /// <summary>Added while the user's latest message names a plan file in the fleet's format (see PlanFile.NamedInLatestRequest).</summary>
     public static string PlanFileNote(string path, int steps) =>

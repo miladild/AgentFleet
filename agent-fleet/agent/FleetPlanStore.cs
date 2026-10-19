@@ -631,6 +631,7 @@ internal sealed partial class FleetPlanStore
             };
             string machine = step.Machine is null ? string.Empty : $", machine: {step.Machine}";
             text.AppendLine($"- {box} **{step.Id}. {step.Title}** ({step.Tier}{machine})");
+            if (step.Kind is not null) text.AppendLine($"  - Kind: {step.Kind}");
             if (!string.IsNullOrWhiteSpace(step.Detail))
             {
                 text.AppendLine($"  - {step.Detail.ReplaceLineEndings(" ")}");
@@ -958,7 +959,8 @@ internal sealed partial class FleetPlanStore
             DependsOn: input.DependsOn is { Length: > 0 } declared ? declared.Where(id => id > 0).Distinct().Order().ToList() : null,
             AutoRetries: input.Retries is { } retries ? Math.Clamp(retries, 0, PlanAutoRetry.Max) : null,
             Rescue: NormalizeRecoveryScope(input.Rescue),
-            Review: PlanSecondOpinion.Normalize(input.Review));
+            Review: PlanSecondOpinion.Normalize(input.Review),
+            Kind: string.IsNullOrWhiteSpace(input.Kind) ? null : input.Kind.Trim());
     }
 
     /// <summary>The most files a light-tier step may name; a step that names more is raised to the standard tier.</summary>

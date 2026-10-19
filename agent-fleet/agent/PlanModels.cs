@@ -192,7 +192,8 @@ internal sealed record PlanStep(
     int? AutoRetries = null,
     string? Rescue = null,
     string? Review = null,
-    [property: JsonConverter(typeof(NullablePlanEvidenceJsonConverter))] PlanEvidence? Evidence = null);
+    [property: JsonConverter(typeof(NullablePlanEvidenceJsonConverter))] PlanEvidence? Evidence = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Kind = null);
 
 internal static class RunEventKind
 {
@@ -234,6 +235,7 @@ internal static class RunEventKind
     public const string CheckHealed = "check-healed";
     public const string CheckAudit = "check-audit";
     public const string FailFirst = "fail-first";
+    public const string TestFirst = "test-first";
     public const string StepReview = "step-review";
     public const string EnvironmentRepaired = "environment-repaired";
     public const string BlockerReported = "blocker-reported";
@@ -349,7 +351,8 @@ internal sealed record PlanStepInput(
     [property: Description("Numbers of the earlier steps this one needs finished first. Leave empty for the usual chain (each step needs the one before it); the last step always needs all of them. A step that cannot be finished holds back only the steps that need it")] int[]? DependsOn = null,
     [property: Description("Optional, only when the user asked: how many times the fleet may retry this step by itself before it waits for the user (0 to 5). Leave empty to use the plan's setting")] int? Retries = null,
     [property: Description("Optional, only when the user asked: allow-hub-rescue or worker-only for this step. Leave empty to use the plan's setting")] string? Rescue = null,
-    [property: Description("Optional, only when the user asked: auto or off, whether a second model reads this step before it is accepted. Leave empty to use the plan's setting")] string? Review = null);
+    [property: Description("Optional, only when the user asked: auto or off, whether a second model reads this step before it is accepted. Leave empty to use the plan's setting")] string? Review = null,
+    [property: Description("tests for a step that only writes tests; empty for every other step")] string? Kind = null);
 
 internal sealed record StepMachineRequest(int StepId, string? Machine);
 

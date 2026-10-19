@@ -145,7 +145,8 @@ internal sealed record FleetConfig(
     string? NotifyUrl = null,
     FleetLabConfig? Lab = null,
     FleetChatApprovalConfig? ChatApprovals = null,
-    FleetWeeklyProbeConfig? WeeklyProbe = null)
+    FleetWeeklyProbeConfig? WeeklyProbe = null,
+    FleetPlanConfig? Plan = null)
 {
     public const int MaxHistoryDays = 3650;
 
@@ -181,6 +182,8 @@ internal sealed record FleetConfig(
     public bool IsToolEnabled(string name) =>
         !Tools.TryGetValue(name, out FleetToolConfig? tool) || tool.Enabled;
 }
+
+internal sealed record FleetPlanConfig(string? TestWriterNode = null);
 
 internal sealed record FleetLabConfig(double MinSpeedFraction = 0.70, double FullFitShare = 0.90, double ConstrainedSpeedFraction = 0.80);
 

@@ -114,6 +114,7 @@ FleetPlanStore planStore = app.Services.GetRequiredService<FleetPlanStore>();
 ChatApprovals chatApprovals = app.Services.GetRequiredService<ChatApprovals>();
 FitProbeService fitProbeService = app.Services.GetRequiredService<FitProbeService>();
 ILoggerFactory loggerFactory = app.Services.GetRequiredService<ILoggerFactory>();
+TestFirstMode testFirstMode = TestFirst.ParseMode(builder.Configuration["FLEET_PLAN_TEST_FIRST"], loggerFactory.CreateLogger("AgentFleet.TestFirst"));
 
 // The durable record. Every AG-UI run joins the context named by its thread id, and everything the
 // run does (routing, tool calls, decisions, plan steps) is written into it. See ContextAssembler.
@@ -186,7 +187,7 @@ FleetRoutingChatClient BuildRouter(FleetConfig config)
         readOnlyTools,
         activityLog,
         loggerFactory.CreateLogger("AgentFleet.Router"),
-        contextJournal);
+        contextJournal, testFirst: testFirstMode);
 }
 
 // What the current router was built from, to tell whether a save needs a new one.
@@ -413,7 +414,7 @@ var planTools = new PlanTools(
     (command, workingDirectory, cancellationToken) =>
         WorkspaceTools.RunCommandAsync(command, workingDirectory, shellOptions, shellLogger, cancellationToken),
     contextJournal,
-    workerWorkspacesEnabled: true);
+    workerWorkspacesEnabled: true, testFirst: testFirstMode);
 
 AITool proposePlanTool = AIFunctionFactory.Create(
     // The descriptions are not decoration: a raw JsonElement parameter is described to the model as
@@ -728,7 +729,8 @@ var planRunner = new PlanRunner(
     notifier: planNotifier,
     stepGuidance: stepGuidanceEnabled,
     fitProbes: fitProbeService,
-    failFirst: failFirstMode);
+    failFirst: failFirstMode,
+    testFirst: testFirstMode, testWriterNode: () => fleetConfigStore.Current.Plan?.TestWriterNode);
 planStore.Approved += planRunner.Enqueue;
 app.Lifetime.ApplicationStarted.Register(() => planRunner.Start(app.Lifetime.ApplicationStopping));
 
@@ -826,6 +828,7 @@ app.MapGet("/api/fleet-config", () =>
         customTools = config.CustomToolMap,
         chatApprovals = config.ChatApprovalSettings,
         weeklyProbe = config.WeeklyProbeSettings,
+        plan = config.Plan,
         customStatus = toolRegistry.CustomStatuses
     });
 });
@@ -956,6 +959,7 @@ app.MapPut("/api/fleet-config", async (FleetConfigUpdateRequest request, Cancell
             History = request.History ?? current.History,
             ChatApprovals = request.ChatApprovals ?? current.ChatApprovals,
             WeeklyProbe = request.WeeklyProbe ?? current.WeeklyProbe,
+            Plan = request.Plan ?? current.Plan,
             // Like MCP servers, an empty object is meaningful: it removes every command tool.
             CustomTools = request.CustomTools is not null
                 ? request.CustomTools.ToDictionary(kv => kv.Key.Trim(), kv => kv.Value, StringComparer.Ordinal)
@@ -1007,6 +1011,7 @@ app.MapPut("/api/fleet-config", async (FleetConfigUpdateRequest request, Cancell
             customTools = saved.CustomToolMap,
             chatApprovals = saved.ChatApprovalSettings,
             weeklyProbe = saved.WeeklyProbeSettings,
+            plan = saved.Plan,
             customStatus = toolRegistry.CustomStatuses,
             restartRequired,
             message = machinesChanged
@@ -1248,7 +1253,7 @@ app.MapPost("/api/plans", async (PlanSubmitRequest request, CancellationToken ca
     using (contextJournal.Push(new FleetRequestIdentity(contextId, RunId: null, Surface: source)))
     {
         result = await planTools.ProposePlanAsync(
-            title, goal, request.WorkingDirectory, request.Assumptions, request.OpenQuestions, request.Risks, diagram: null, request.Steps, cancellationToken);
+            title, goal, request.WorkingDirectory, request.Assumptions, request.OpenQuestions, request.Risks, diagram: null, request.Steps, cancellationToken, plannerProposed: false);
     }
 
     if (FleetPlanStore.FindMarkerId(result) is not { } planId || planStore.Get(planId) is not { } plan)
@@ -1976,6 +1981,7 @@ internal sealed record FleetConfigUpdateRequest(
     IReadOnlyDictionary<string, FleetCustomToolConfig>? CustomTools = null,
     FleetChatApprovalConfig? ChatApprovals = null,
     FleetWeeklyProbeConfig? WeeklyProbe = null,
+    FleetPlanConfig? Plan = null,
     string? IfVersion = null);
 
 internal sealed record FleetConfigContextUpdateRequest(int? ContextLength, string? IfVersion = null);

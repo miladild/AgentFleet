@@ -15,6 +15,8 @@ internal static partial class PlanRunnerToolPolicy
     /// <summary>The role of a model asked whether a step's check is broken.</summary>
     public const string CheckAuditRole = "check-audit";
 
+    public const string TestWriterRole = "test-writer";
+
     // The auditor reads and proposes. It cannot run a command, write a file or call anything else.
     private static readonly HashSet<string> AuditTools = new(StringComparer.Ordinal)
     {
@@ -50,7 +52,7 @@ internal static partial class PlanRunnerToolPolicy
         // A model carrying out a step is shown the tools it may call and no others. It used to be shown all nineteen (web search,
         // HTTP requests, the sandbox, diagrams, decision records: refused if called) at about 1000 tokens, and a small model is
         // tempted by what it sees.
-        if (fromRunner && role is null)
+        if (fromRunner && role is null or TestWriterRole)
         {
             return AllowedTools.Contains(toolName);
         }

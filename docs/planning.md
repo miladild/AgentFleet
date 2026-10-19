@@ -370,6 +370,43 @@ when the run ends with steps waiting, when the plan is done, and when the run de
 Some stops are never healed, because a person has to look first: the run deadline, a backend restart in the middle of a step
 that is not safe to repeat, a worker whose files conflict with the hub's, and a permission or security failure.
 
+## Tests first
+
+Set `FLEET_PLAN_TEST_FIRST=on` to have the planner separate tests from implementation.
+It is off by default and is read once at startup. Ordinary steps keep their usual rules.
+For each new behaviour, the plan uses:
+
+1. An ordinary skeleton step if the code does not exist yet: names and signatures with bodies that throw
+   "not implemented", checked by a build or syntax check.
+2. A step with `kind: "tests"`, only test files, and a check that runs just those tests. These tests must fail
+   until the behaviour exists.
+3. An ordinary implementation step whose check runs those tests.
+
+The last step always runs the whole project's checks and is never a tests step. These shape rules apply to
+plans the planner proposes; plans submitted through the API or a plan file keep their supplied shape.
+The API can carry `kind` on a step. The plan card labels tests steps with a small **tests** tag.
+
+A tests step uses the node named by `plan.testWriterNode`, or the fallback node when it is unset, while its
+files and checks stay in its worker workspace. If recovery scope or Conservative mode excludes the hub,
+a non-hub heavy-tier node writes the tests instead. A tests step has the same local project tools as an ordinary
+step and is instructed to write only tests.
+
+The runner accepts a tests step only when its check exits unsuccessfully, readable output shows at least one
+executed test and one named failing test (a test file that fails to load is not a named test), and every changed
+file since the step started is a test path. A tests step is only as good as its check command: a check that runs
+more than the new tests, such as the whole suite, can be satisfied by an unrelated failing test even when the new tests
+pass, so the planner is told to run just those tests.
+Passing tests, a step that wrote no file, no tests, import failures, build or syntax errors, unreadable results
+and implementation edits are sent back for repair. Recognised counts currently come from the standard test summaries of `dotnet test`
+and Node's test runner; an unsupported output format is refused. Unknown changes, including files too large
+for the change snapshot, are also refused. Interrupted tests steps wait for review because the original
+change snapshot is no longer available.
+
+Tests steps skip check auditing, check healing, comparison against old code and second opinion. Groups
+containing them run in order so another step cannot contaminate their change baseline. The run log records
+each acceptance decision as a `test-first` event with its outcome and counts. Accepted tests are not frozen;
+later implementation steps remain responsible for passing their checks.
+
 ## Reading what happened overnight
 
 Every plan keeps a **run log**: when the run started, each round with its rung, the tier and the machine that answered,

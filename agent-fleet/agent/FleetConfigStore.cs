@@ -481,6 +481,12 @@ internal sealed class FleetConfigStore
             }
         }
 
+        if (config.Plan?.TestWriterNode is { } writer &&
+            !config.Nodes.Any(node => node.Name == writer && !node.Vision))
+        {
+            throw new InvalidOperationException($"plan.testWriterNode '{writer}' must name a configured non-vision node.");
+        }
+
         int fallbackCount = config.Nodes.Count(node => node.Fallback);
         if (fallbackCount != 1)
         {
