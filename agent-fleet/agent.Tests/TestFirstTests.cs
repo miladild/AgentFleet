@@ -102,9 +102,13 @@ public sealed class TestFirstTests
     [Fact]
     public void Off_planning_text_is_identical_and_on_appends_the_shape()
     {
-        Assert.Equal(PlanGate.PlanningInstructions(null), PlanGate.PlanningInstructions(null, testFirst: TestFirstMode.Off));
+        string off = PlanGate.PlanningInstructions(null, testFirst: TestFirstMode.Off);
+        Assert.Equal(PlanGate.PlanningInstructions(null), off);
+        // Both calls above run the same code, so what the off text must not contain is checked on its own.
+        Assert.DoesNotContain(PlanTestsStepPrompt.PlanningRules, off);
+        Assert.DoesNotContain("kind `tests`", off);
         string rules = PlanGate.PlanningInstructions(null, testFirst: TestFirstMode.On);
-        Assert.StartsWith(PlanGate.PlanningInstructions(null), rules);
+        Assert.StartsWith(off, rules);
         Assert.Contains("kind `tests`", rules);
         Assert.Contains("skeleton", rules);
         Assert.Contains("last step", rules);

@@ -2936,17 +2936,19 @@ internal sealed partial class PlanRunner
                     _logger.LogInformation("Step guidance added to step {StepId} of plan {PlanId}", step.Id, plan.Id);
                 }
 
+                // The brief is read by the prompt providers, so what a tests step adds to it has to be in the data they get.
+                string? stepBrief = IsTestsStep(step) ? PlanTestsStepPrompt.Append(conversation.Brief) : conversation.Brief;
                 conversation.Session.ConfigurePrompt(conversation.RepairMessage is null
                     ? new PlanStepPromptData(plan, step, attempt, lastFailure, fileContext, parallelGroup,
                         contextId is not null, retryRoute, worker is not null, machine, worker?.Platform,
-                        conversation.Brief, _stepGuidance)
+                        stepBrief, _stepGuidance)
                     : null);
                 reply = await conversation.Session.SendAsync(
                     conversation.RepairMessage ??
                     BuildPrompt(plan, step, attempt, lastFailure, fileContext, parallelGroup,
                         durableContext: contextId is not null, retryRoute: retryRoute,
                         workerWorkspace: worker is not null, workerMachine: machine, workerPlatform: worker?.Platform,
-                        brief: IsTestsStep(step) ? PlanTestsStepPrompt.Append(conversation.Brief) : conversation.Brief, stepGuidance: _stepGuidance),
+                        brief: stepBrief, stepGuidance: _stepGuidance),
                     tier,
                     modelMachine,
                     attemptCancellation.Token);
