@@ -1,0 +1,1 @@
+[{"Messages":[{"Role":"user","Text":"Inspect the project."}],"Instructions":"Synthetic instructions."},{"Messages":[{"Role":"user","Text":"Inspect the project."},{"Role":"assistant","Text":"Done."},{"Role":"user","Text":"Explain the result."}],"Instructions":"Synthetic instructions."}]

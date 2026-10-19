@@ -110,7 +110,7 @@ public sealed class FailureLocationTests : IDisposable
         const string line = "- src/semver.js line 4: const ids = prerelease.split('.');";
 
         string followUp = RepairMessages.Build(plan, step, failure, 2, [], [], sameOutput: false, changedFiles: null);
-        string retry = PlanRunner.BuildPrompt(plan, step, 2, failure);
+        string retry = PlanPromptComposition.BuildPrompt(plan, step, 2, failure);
 
         foreach (string message in new[] { followUp, retry })
         {

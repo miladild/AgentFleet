@@ -114,6 +114,10 @@ internal sealed class FakeAuditSession(FakeStepAgent owner, string role) : IStep
 
 internal sealed class FakeStepSession(FakeStepAgent owner, int index) : IStepSession
 {
+    private PlanStepPromptData? _promptData;
+
+    public void ConfigurePrompt(PlanStepPromptData? data) => _promptData = data;
+
     public int Index => index;
 
     public List<FakeStepCall> Messages { get; } = [];
@@ -123,6 +127,12 @@ internal sealed class FakeStepSession(FakeStepAgent owner, int index) : IStepSes
 
     public async Task<StepAgentReply> SendAsync(string message, string tier, string? machine, CancellationToken cancellationToken)
     {
+        PlanStepPromptData? data = _promptData;
+        _promptData = null;
+        if (data is not null)
+        {
+            message = await PlanPromptComposition.ComposeAsync(message, data);
+        }
         StepAgentReply reply = await owner.SendAsync(this, message, tier, machine, cancellationToken);
         HasHistory = true;
         return reply;

@@ -10,8 +10,8 @@ public sealed class PlanStepGuidanceTests : PlanTestBase
         PlanRecord plan = Store.Approve(NewPlan(new PlanStepInput(
             "write parser tests", "Cover the parser rules.", ["src/parser.ts", "tests/parser.test.ts"], "npm test")).Id)!;
 
-        string prompt = PlanRunner.BuildPrompt(plan, plan.Steps[0], 1, null, stepGuidance: true);
-        string repeated = PlanRunner.BuildPrompt(plan, plan.Steps[0], 1, null, stepGuidance: true);
+        string prompt = PlanPromptComposition.BuildPrompt(plan, plan.Steps[0], 1, null, stepGuidance: true);
+        string repeated = PlanPromptComposition.BuildPrompt(plan, plan.Steps[0], 1, null, stepGuidance: true);
         int files = prompt.IndexOf("Files: src/parser.ts, tests/parser.test.ts", StringComparison.Ordinal);
         int guidance = prompt.IndexOf(ExpectedGuidance, StringComparison.Ordinal);
         int verification = prompt.IndexOf("When you stop, your work is checked automatically", StringComparison.Ordinal);
@@ -27,8 +27,8 @@ public sealed class PlanStepGuidanceTests : PlanTestBase
         PlanRecord plan = Store.Approve(NewPlan(new PlanStepInput(
             "write tests", "Test the step.", ["tests/parser.test.ts"], "npm test")).Id)!;
 
-        string defaultPrompt = PlanRunner.BuildPrompt(plan, plan.Steps[0], 1, null);
-        string disabledPrompt = PlanRunner.BuildPrompt(plan, plan.Steps[0], 1, null, stepGuidance: false);
+        string defaultPrompt = PlanPromptComposition.BuildPrompt(plan, plan.Steps[0], 1, null);
+        string disabledPrompt = PlanPromptComposition.BuildPrompt(plan, plan.Steps[0], 1, null, stepGuidance: false);
 
         Assert.Equal(disabledPrompt, defaultPrompt);
         Assert.DoesNotContain(ExpectedGuidance, defaultPrompt, StringComparison.Ordinal);
@@ -40,7 +40,7 @@ public sealed class PlanStepGuidanceTests : PlanTestBase
         PlanRecord plan = Store.Approve(NewPlan(new PlanStepInput(
             "update latest", "The tests should be considered during this change.", ["src/latest.js"], "npm test")).Id)!;
 
-        string prompt = PlanRunner.BuildPrompt(plan, plan.Steps[0], 1, null, stepGuidance: true);
+        string prompt = PlanPromptComposition.BuildPrompt(plan, plan.Steps[0], 1, null, stepGuidance: true);
 
         Assert.DoesNotContain(ExpectedGuidance, prompt, StringComparison.Ordinal);
     }
@@ -56,7 +56,7 @@ public sealed class PlanStepGuidanceTests : PlanTestBase
         PlanRecord plan = Store.Approve(NewPlan(new PlanStepInput("test", "detail", [file], "check")).Id)!;
 
         Assert.Contains(ExpectedGuidance,
-            PlanRunner.BuildPrompt(plan, plan.Steps[0], 1, null, stepGuidance: true), StringComparison.Ordinal);
+            PlanPromptComposition.BuildPrompt(plan, plan.Steps[0], 1, null, stepGuidance: true), StringComparison.Ordinal);
     }
 
     [Theory]

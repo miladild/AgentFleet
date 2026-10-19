@@ -12,7 +12,7 @@ public sealed class PlanPromptTests : PlanTestBase
     {
         PlanRecord plan = NewApproved();
 
-        string prompt = PlanRunner.BuildPrompt(plan, plan.Steps[0], 1, null);
+        string prompt = PlanPromptComposition.BuildPrompt(plan, plan.Steps[0], 1, null);
 
         Assert.Contains("Run the check yourself", prompt);
     }
@@ -22,7 +22,7 @@ public sealed class PlanPromptTests : PlanTestBase
     {
         PlanRecord plan = NewApproved(verify: null);
 
-        string prompt = PlanRunner.BuildPrompt(plan, plan.Steps[0], 1, null);
+        string prompt = PlanPromptComposition.BuildPrompt(plan, plan.Steps[0], 1, null);
 
         Assert.DoesNotContain("Run the check yourself", prompt);
         Assert.Contains("no automatic check", prompt);
@@ -33,7 +33,7 @@ public sealed class PlanPromptTests : PlanTestBase
     {
         PlanRecord plan = NewApproved();
 
-        string prompt = PlanRunner.BuildPrompt(plan, plan.Steps[0], 2, "Exit code: 1\nexpected 3 got 2");
+        string prompt = PlanPromptComposition.BuildPrompt(plan, plan.Steps[0], 2, "Exit code: 1\nexpected 3 got 2");
 
         Assert.Contains("expected 3 got 2", prompt);
         Assert.Contains("an earlier step wrote", prompt);
@@ -46,8 +46,8 @@ public sealed class PlanPromptTests : PlanTestBase
     {
         PlanRecord plan = Store.Approve(NewPlan(new PlanStepInput("holidays", "d", ["src/marketHours.ts", "test/marketHours.test.ts"], "node --test", "heavy")).Id)!;
 
-        Assert.Contains("the test can be the mistake", PlanRunner.BuildPrompt(plan, plan.Steps[0], 2, "Exit code: 1\n✖ session"));
-        Assert.DoesNotContain("the test can be the mistake", PlanRunner.BuildPrompt(plan, plan.Steps[0], 1, null));
+        Assert.Contains("the test can be the mistake", PlanPromptComposition.BuildPrompt(plan, plan.Steps[0], 2, "Exit code: 1\n✖ session"));
+        Assert.DoesNotContain("the test can be the mistake", PlanPromptComposition.BuildPrompt(plan, plan.Steps[0], 1, null));
     }
 
     [Fact]
@@ -56,7 +56,7 @@ public sealed class PlanPromptTests : PlanTestBase
         PlanRecord plan = NewApproved();
 
         // No command was running, so the hint about a process that stays alive would be wrong here.
-        string prompt = PlanRunner.BuildPrompt(plan, plan.Steps[0], 2,
+        string prompt = PlanPromptComposition.BuildPrompt(plan, plan.Steps[0], 2,
             "A model call got no reply within 15 minutes: what it was writing was too long to finish, and is lost.");
 
         Assert.Contains("Write less in each call", prompt);
@@ -70,7 +70,7 @@ public sealed class PlanPromptTests : PlanTestBase
     {
         PlanRecord plan = NewApproved();
 
-        string prompt = PlanRunner.BuildPrompt(plan, plan.Steps[0], 2, failure);
+        string prompt = PlanPromptComposition.BuildPrompt(plan, plan.Steps[0], 2, failure);
 
         Assert.Contains("keeps the process alive", prompt);
     }
@@ -136,8 +136,8 @@ public sealed class PlanPromptTests : PlanTestBase
     {
         PlanRecord plan = NewApproved();
 
-        Assert.Contains(PlanRunner.ActFirst, PlanRunner.BuildPrompt(plan, plan.Steps[0], 1, null));
-        Assert.Contains(PlanRunner.ActFirst, PlanRunner.BuildPrompt(plan, plan.Steps[0], 2, "Exit code: 1"));
+        Assert.Contains(PlanRunner.ActFirst, PlanPromptComposition.BuildPrompt(plan, plan.Steps[0], 1, null));
+        Assert.Contains(PlanRunner.ActFirst, PlanPromptComposition.BuildPrompt(plan, plan.Steps[0], 2, "Exit code: 1"));
         Assert.Contains(PlanRunner.ActFirst, FleetStepAgent.Nudge);
     }
 
@@ -145,7 +145,7 @@ public sealed class PlanPromptTests : PlanTestBase
     public void A_steps_commands_run_in_its_project_folder_and_the_prompt_says_so()
     {
         PlanRecord plan = Store.Approve(Store.Create("Board", "Test it", PlansDirectory, [], [], [], null, null, [Step("add a runner")]).Id)!;
-        string prompt = PlanRunner.BuildPrompt(plan, plan.Steps[0], 1, null);
+        string prompt = PlanPromptComposition.BuildPrompt(plan, plan.Steps[0], 1, null);
         var tools = new PlanTools(Store, new FakeValidator(code => new DiagramCheck(true, true, code, null)), (_, _, _) => Task.FromResult("Exit code: 0"));
 
         Assert.Equal(PlansDirectory, tools.StepWorkingDirectory([new Microsoft.Extensions.AI.ChatMessage(Microsoft.Extensions.AI.ChatRole.User, prompt)]));
@@ -155,7 +155,7 @@ public sealed class PlanPromptTests : PlanTestBase
 
         // A plan whose folder is gone gives no folder rather than a wrong one.
         PlanRecord elsewhere = Store.Approve(NewPlan(Step("x")).Id)!;
-        Assert.Null(tools.StepWorkingDirectory([new Microsoft.Extensions.AI.ChatMessage(Microsoft.Extensions.AI.ChatRole.User, PlanRunner.BuildPrompt(elsewhere, elsewhere.Steps[0], 1, null))]));
+        Assert.Null(tools.StepWorkingDirectory([new Microsoft.Extensions.AI.ChatMessage(Microsoft.Extensions.AI.ChatRole.User, PlanPromptComposition.BuildPrompt(elsewhere, elsewhere.Steps[0], 1, null))]));
     }
 
     [Theory]
@@ -165,7 +165,7 @@ public sealed class PlanPromptTests : PlanTestBase
     {
         PlanRecord plan = NewApproved();
 
-        string prompt = PlanRunner.BuildPrompt(
+        string prompt = PlanPromptComposition.BuildPrompt(
             plan, plan.Steps[0], 1, null, workerWorkspace: true, workerMachine: "worker-test", workerPlatform: platform);
 
         Assert.Contains("isolated workspace of the selected worker", prompt);
@@ -217,7 +217,7 @@ public sealed class PlanPromptTests : PlanTestBase
     {
         PlanRecord plan = NewApproved();
 
-        string runnerPrompt = PlanRunner.BuildPrompt(plan, plan.Steps[0], 1, null);
+        string runnerPrompt = PlanPromptComposition.BuildPrompt(plan, plan.Steps[0], 1, null);
         string planning = PlanGate.PlanningInstructions(null);
 
         Assert.Contains(HubPlatform.Name, runnerPrompt);
