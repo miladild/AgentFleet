@@ -88,7 +88,8 @@ internal sealed partial class FleetPlanStore
         string? diagram,
         string? diagramNote,
         IReadOnlyList<PlanStepInput> steps,
-        string? recoveryScope = null)
+        string? recoveryScope = null,
+        IReadOnlyList<string>? requirements = null)
     {
         if (string.IsNullOrWhiteSpace(title))
         {
@@ -121,7 +122,10 @@ internal sealed partial class FleetPlanStore
             now,
             now,
             null,
-            RecoveryScope: NormalizeRecoveryScope(recoveryScope));
+            RecoveryScope: NormalizeRecoveryScope(recoveryScope),
+            Requirements: requirements is { Count: > 0 }
+                ? requirements.Select((text, index) => new PlanRequirement("R" + (index + 1), text.Trim(), new List<string>())).ToList()
+                : null);
 
         plan = PlanGraph.Normalize(plan);
         Save(plan);
@@ -602,6 +606,7 @@ internal sealed partial class FleetPlanStore
         AppendList(text, "Assumptions", plan.Assumptions);
         AppendList(text, "Open questions", plan.OpenQuestions);
         AppendList(text, "Risks", plan.Risks);
+        AppendRequirements(text, plan.Requirements);
 
         if (plan.Diagram is not null)
         {
@@ -916,6 +921,22 @@ internal sealed partial class FleetPlanStore
         foreach (string item in items)
         {
             text.AppendLine($"- {item}");
+        }
+    }
+
+    private static void AppendRequirements(StringBuilder text, IReadOnlyList<PlanRequirement>? requirements)
+    {
+        if (requirements is not { Count: > 0 })
+        {
+            return;
+        }
+
+        text.AppendLine();
+        text.AppendLine("## Requirements");
+        foreach (PlanRequirement requirement in requirements)
+        {
+            text.AppendLine($"- {requirement.Id}: {requirement.Text}");
+            text.AppendLine($"  Covered by: {(requirement.CoveredBy.Count == 0 ? "no test yet" : string.Join(", ", requirement.CoveredBy))}");
         }
     }
 

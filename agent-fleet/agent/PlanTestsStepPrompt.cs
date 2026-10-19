@@ -11,6 +11,9 @@ internal static class PlanTestsStepPrompt
         Then use a step with kind `tests`, only test files, and a verify command that runs just those tests.
         Those tests must FAIL until the behaviour exists. Follow it with an ordinary implementation step whose verify
         command runs those tests. The last step still runs the whole project's checks and is never a tests step.
+        Also pass the task's requirements to propose_plan as requirements: one per must or should clause, named edge case
+        or example, each written so a test can check it. The tests steps cover them: each test name starts with the ids
+        of the requirements it covers, and the last tests step must cover every requirement.
         """;
 
     internal const string Addendum = """
@@ -21,5 +24,15 @@ internal static class PlanTestsStepPrompt
         import error is not. If tests cannot import the code under test, say so with report_blocker.
         """;
 
-    internal static string Append(string? brief) => string.IsNullOrEmpty(brief) ? Addendum : brief + "\n\n" + Addendum;
+    internal static string Append(string? brief, IReadOnlyList<PlanRequirement>? requirements = null)
+    {
+        string addendum = requirements is { Count: > 0 } ? Addendum + "\n\n" + RequirementList(requirements) : Addendum;
+        return string.IsNullOrEmpty(brief) ? addendum : brief + "\n\n" + addendum;
+    }
+
+    internal static string RequirementList(IReadOnlyList<PlanRequirement> requirements) =>
+        "The plan lists these requirements. Each one needs at least one test that covers it:\n" +
+        string.Join("\n", requirements.Select(requirement => $"- {requirement.Id}: {requirement.Text}")) +
+        "\nEach test name must start with the ids of the requirements it covers, for example test(\"R3 R4: rejects leading zeros\", ...), " +
+        "or in C# a method named R3_R4_rejects_leading_zeros. A requirement that no test name starts with is not accepted.";
 }

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useAgent } from "@copilotkit/react-core/v2";
 import { MermaidDiagram } from "./MermaidDiagram";
 import { planEvidenceClass, planEvidenceLabel, type PlanEvidence } from "./planEvidence";
+import { requirementRows, type PlanRequirement } from "./planRequirements";
 
 export type PlanStep = {
   id: number;
@@ -70,6 +71,8 @@ export type Plan = {
   assumptions: string[];
   openQuestions: string[];
   risks: string[];
+  /** The requirement list, when the test-first setting made one; each row names the tests that cover it. */
+  requirements?: PlanRequirement[] | null;
   diagram: string | null;
   diagramNote: string | null;
   steps: PlanStep[];
@@ -159,6 +162,25 @@ function usePlan(planId: string) {
   }, [refresh]);
 
   return { plan, error, refresh };
+}
+
+/** The requirements the tests have to cover, read-only, each with the names of the tests that cover it. */
+function RequirementsSection({ requirements }: { requirements: PlanRequirement[] | null | undefined }) {
+  const rows = requirementRows(requirements);
+  if (rows.length === 0) return null;
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wide text-neutral-500 mb-0.5">Requirements</div>
+      <ul className="space-y-1 text-xs text-neutral-300">
+        {rows.map((row) => (
+          <li key={row.id}>
+            <span className="font-mono text-neutral-400">{row.id}</span> {row.text}
+            <div className="text-[11px] text-neutral-500">{row.coverage}</div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }
 
 function Section({ title, items }: { title: string; items: string[] }) {
@@ -383,6 +405,7 @@ export function PlanCard({ planId }: { planId: string }) {
         )}
         <Section title="Open questions" items={plan.openQuestions} />
         <Section title="Assumptions" items={plan.assumptions} />
+        <RequirementsSection requirements={plan.requirements} />
         <Section title="Risks" items={plan.risks} />
 
         {plan.diagram && <MermaidDiagram code={plan.diagram} />}

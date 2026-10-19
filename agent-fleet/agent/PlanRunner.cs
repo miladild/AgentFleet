@@ -976,7 +976,7 @@ internal sealed partial class PlanRunner
                 if (conversation.HasHistory)
                 {
                     repairMessage = BuildRepairMessage(plan, step, lastFailure, round, lastRound, handover, rollback);
-                    if (IsTestsStep(step)) repairMessage = PlanTestsStepPrompt.Append(repairMessage);
+                    if (IsTestsStep(step)) repairMessage = PlanTestsStepPrompt.Append(repairMessage, plan.Requirements);
                 }
                 else if (RepairMessages.Brief(StepEventsSinceRetry(plan.Id, step.Id)) is { Length: > 0 } earlierRounds)
                 {
@@ -2937,7 +2937,7 @@ internal sealed partial class PlanRunner
                 }
 
                 // The brief is read by the prompt providers, so what a tests step adds to it has to be in the data they get.
-                string? stepBrief = IsTestsStep(step) ? PlanTestsStepPrompt.Append(conversation.Brief) : conversation.Brief;
+                string? stepBrief = IsTestsStep(step) ? PlanTestsStepPrompt.Append(conversation.Brief, plan.Requirements) : conversation.Brief;
                 conversation.Session.ConfigurePrompt(conversation.RepairMessage is null
                     ? new PlanStepPromptData(plan, step, attempt, lastFailure, fileContext, parallelGroup,
                         contextId is not null, retryRoute, worker is not null, machine, worker?.Platform,

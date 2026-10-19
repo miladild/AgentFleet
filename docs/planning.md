@@ -407,6 +407,28 @@ containing them run in order so another step cannot contaminate their change bas
 each acceptance decision as a `test-first` event with its outcome and counts. Accepted tests are not frozen;
 later implementation steps remain responsible for passing their checks.
 
+### Requirements and coverage
+
+The planner also lists the requirements the task states in `requirements`: one per must or should clause, named
+edge case or example, each written so a test can check it. A plan whose goal runs to two or more sentences, or is
+over 160 characters, is refused without a list, and so is a blank or repeated requirement. The fleet numbers the
+list itself (R1, R2, ...); any ids the planner sends are ignored. Plans from a plan file or the API carry no list.
+
+The tests step is told the list and asked to start each test's name with the ids of the requirements it covers,
+for example `test("R3 R4: rejects leading zeros", ...)`, or a C# method named `R3_R4_rejects_leading_zeros`.
+When the last tests step is accepted, every requirement must be covered by at least one test name across the
+test files of all the plan's tests steps. The fleet reads those files from the hub checkout, where a worker's
+edits are synced before the check is decided. A requirement with no covering name refuses the step with the
+requirement's text in the feedback (outcome `uncovered` in the `test-first` event). Earlier tests steps are not
+held to the full list. The names that cover each requirement are stored on the plan and shown on the plan card,
+and the exported plan file lists them.
+
+The limits: an id counts only in a name the fleet reads as a test name (JavaScript and TypeScript `test`, `it` and
+`describe` strings, C# methods and `DisplayName` strings, Python `def test_`, Go `func Test`), and a comment never
+counts. A file whose names cannot be read at all is searched as plain text, comments included, and the record says
+so. Ids match as whole tokens (R3 is not R30). Coverage shows that a test is named after a requirement, not that
+the test really checks it; that judgement stays with the fail-first run and the implementation steps.
+
 ## Reading what happened overnight
 
 Every plan keeps a **run log**: when the run started, each round with its rung, the tier and the machine that answered,

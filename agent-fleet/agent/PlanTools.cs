@@ -63,7 +63,8 @@ internal sealed partial class PlanTools
         string? diagram,
         JsonElement? steps,
         CancellationToken cancellationToken,
-        bool plannerProposed = true)
+        bool plannerProposed = true,
+        JsonElement? requirements = null)
     {
         List<PlanStepInput> stepInputs = ToSteps(steps);
         if (stepInputs.Count == 0)
@@ -72,9 +73,16 @@ internal sealed partial class PlanTools
                    "title, detail, files, verify and tier.";
         }
 
+        // Only a planner's plan under the test-first setting has a requirement list; the other routes and the setting off ignore it.
+        List<string>? requirementTexts = plannerProposed && _testFirst == TestFirstMode.On ? ToRequirementTexts(requirements) : null;
+
         // Mistakes that would only show in the night, as a blocked plan: caught now, while the planner can fix them.
         Func<string, bool>? programExists = _workerWorkspacesEnabled ? _ => true : _programExists;
         var problems = PlanReview.Problems(workingDirectory, stepInputs, programExists, plannerProposed ? _testFirst : TestFirstMode.Off).ToList();
+        if (requirementTexts is not null)
+        {
+            problems.AddRange(PlanRequirements.Problems(goal, requirementTexts));
+        }
         if (!_workerWorkspacesEnabled)
         {
             problems.AddRange(await ProjectToolchainReview.ProblemsAsync(workingDirectory, stepInputs, cancellationToken));
@@ -138,7 +146,8 @@ internal sealed partial class PlanTools
                 // Escalation to the hub follows the plan's scope, not the fleet mode (see RepairLadder): a plan runs
                 // unattended, so a step its worker cannot fix is offered to the hub unless the user keeps the plan on
                 // its workers at approval, where the choice is shown.
-                PlanRecoveryScope.AllowHubRescue);
+                PlanRecoveryScope.AllowHubRescue,
+                requirements: requirementTexts is { Count: > 0 } ? requirementTexts : null);
         }
         catch (ArgumentException exception)
         {
@@ -939,6 +948,59 @@ internal sealed partial class PlanTools
         }
 
         return items.Where(item => !IsPlaceholder(item)).ToList();
+    }
+
+    // The requirement list: strings, or objects with a text or description field; one string holding JSON; or one object.
+    // Ids the model sends are ignored, because the store numbers the list. Blank entries are kept, so the review can refuse them.
+    internal static List<string> ToRequirementTexts(JsonElement? value)
+    {
+        var texts = new List<string>();
+        if (value is not { } element)
+        {
+            return texts;
+        }
+
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.String:
+                if (TryParseJsonText(element.GetString(), out JsonElement parsed))
+                {
+                    return ToRequirementTexts(parsed);
+                }
+
+                texts.AddRange(SplitItems(element.GetString()));
+                break;
+            case JsonValueKind.Array:
+                foreach (JsonElement item in element.EnumerateArray())
+                {
+                    texts.Add(RequirementText(item));
+                }
+
+                break;
+            case JsonValueKind.Object:
+                texts.Add(RequirementText(element));
+                break;
+        }
+
+        return texts.Where(text => string.IsNullOrWhiteSpace(text) || !IsPlaceholder(text)).Select(text => text.Trim()).ToList();
+    }
+
+    private static string RequirementText(JsonElement item)
+    {
+        if (item.ValueKind == JsonValueKind.String)
+        {
+            return item.GetString() ?? string.Empty;
+        }
+
+        foreach (string field in new[] { "text", "description" })
+        {
+            if (item.ValueKind == JsonValueKind.Object && item.TryGetProperty(field, out JsonElement value) && value.ValueKind == JsonValueKind.String)
+            {
+                return value.GetString() ?? string.Empty;
+            }
+        }
+
+        return string.Empty;
     }
 
     // Steps as objects (the documented shape), as plain strings, or as one numbered text block.

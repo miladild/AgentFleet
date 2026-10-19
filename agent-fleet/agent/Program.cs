@@ -429,10 +429,11 @@ AITool proposePlanTool = AIFunctionFactory.Create(
         string? diagram = null,
         [Description("Array of step objects, each with title, detail, files (array), verify, tier, and retrySafe. Set retrySafe true only for project-local work and commands that are safe to repeat after a backend restart; otherwise false")] System.Text.Json.JsonElement? steps = null,
         [Description("Full path of a plan file the user pointed to, written in the fleet's plan format (\"## Step 1: title\" sections with Tier, Files and Check lines). The fleet reads every step from the file exactly as written; leave steps empty.")] string? planFile = null,
+        [Description("Array of strings, or objects with a text field: each requirement the task states, one per must or should clause, named edge case or example, written so a test can check it. Leave empty for a one-sentence goal")] System.Text.Json.JsonElement? requirements = null,
         CancellationToken cancellationToken = default) =>
         !string.IsNullOrWhiteSpace(planFile)
             ? planTools.ProposePlanFromFileAsync(planFile, cancellationToken)
-            : planTools.ProposePlanAsync(title, string.IsNullOrWhiteSpace(goal) ? title : goal, workingDirectory, assumptions, openQuestions, risks, diagram, steps, cancellationToken),
+            : planTools.ProposePlanAsync(title, string.IsNullOrWhiteSpace(goal) ? title : goal, workingDirectory, assumptions, openQuestions, risks, diagram, steps, cancellationToken, requirements: requirements),
     name: "propose_plan",
     description: toolDescriptions["propose_plan"]);
 

@@ -315,11 +315,15 @@ internal sealed record PlanRecord(
     DateTimeOffset? RunDeadlineUtc = null,
     string? HealChecks = null,
     int? AutoRetries = null,
-    string? Review = null)
+    string? Review = null,
+    IReadOnlyList<PlanRequirement>? Requirements = null)
 {
     [JsonConverter(typeof(NullablePlanEvidenceJsonConverter))]
     public PlanEvidence? Evidence => PlanEvidenceRules.Weakest(Steps);
 }
+
+/// <summary>A requirement the task states, with the names of the tests that cover it once a tests step is accepted.</summary>
+internal sealed record PlanRequirement(string Id, string Text, IReadOnlyList<string> CoveredBy);
 
 internal sealed record PlanSummary(
     string Id,
