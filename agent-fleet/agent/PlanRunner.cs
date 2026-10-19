@@ -1139,6 +1139,8 @@ internal sealed partial class PlanRunner
                 string? checkNote = null;
                 string? parkReason = null;
                 FailFirstResult? failFirst = null;
+                List<string> restoredNow = [];
+                List<string> frozenNow = [];
                 bool isFinalValidation = !IsTestsStep(step) && step.Id == plan.Steps.Max(candidate => candidate.Id);
                 try
                 {
@@ -1155,6 +1157,7 @@ internal sealed partial class PlanRunner
                     // the check runs again in the same workspace, so it costs no round.
                     using Activity? checkActivity = FleetTelemetry.StartPlanCheck(plan.Id, step.Id, attempt, round, rung,
                         model.Machine, model.ModelNode);
+                    if (model.Workspace is not null) await RestoreFrozenTestsAsync(plan, model.Workspace, restoredNow, cancellationToken);
                     CheckRun run = model.Workspace is null
                         ? await RunCheckWithRepairsAsync(plan, step, attempt, tier, rung, round, model, cancellationToken)
                         : await RunWithReconnectsAsync(
@@ -1170,6 +1173,13 @@ internal sealed partial class PlanRunner
                     {
                         step = run.Step;
                         plan = _store.Get(plan.Id) ?? plan;
+                    }
+
+                    if (result.Done && ImplementationSetsFor(plan, step) is { Count: > 0 } frozenSets)
+                    {
+                        if (model.Workspace is not null) await RestoreFrozenTestsAsync(plan, model.Workspace, restoredNow, cancellationToken);
+                        if (await FrozenTestsRefusalAsync(plan, frozenSets, cancellationToken) is { } frozenRefusal)
+                            result = new StepCompletion(false, frozenRefusal, frozenRefusal, result.Restored);
                     }
 
                     if (model.Workspace is not null)
@@ -1269,7 +1279,9 @@ internal sealed partial class PlanRunner
                     WorkChange total = await ChangedFilesSinceAsync(plan, start, cancellationToken);
                     bool known = start is not null && total.After is not null && start.Uncaptured.Count == 0 &&
                         total.After.Uncaptured.Count == 0 && start.Head == total.After.Head;
-                    result = DecideTestsStep(plan, step, attempt, tier, rung, round, model, result, known ? total.Files : null);
+                    IReadOnlyList<string>? accepted = known ? total.Files : null;
+                    result = DecideTestsStep(plan, step, attempt, tier, rung, round, model, result, accepted);
+                    if (result.Done && accepted is not null) FreezeAcceptedTests(plan, step, accepted, frozenNow);
                 }
                 // A check that passes although the step changed nothing it names cannot show that the step's work is done.
                 lastUnverified = !IsTestsStep(step) && result.Done ? UnverifiedPassReason(plan, step, model, change.Files, isFinalValidation, result.Output ?? result.Message) : null;
@@ -1296,6 +1308,7 @@ internal sealed partial class PlanRunner
                     result = new StepCompletion(false, rejected, rejected, result.Restored);
                 }
 
+                RecordFrozenTests(plan, step, attempt, tier, model, rung, round, frozenNow, restoredNow);
                 long? verification = RecordCheck(plan, step, attempt, result, model.ModelNode);
                 TimeSpan roundTime = _utcNow() - roundStarted;
                 worked += roundTime;
@@ -1321,6 +1334,7 @@ internal sealed partial class PlanRunner
                 }
 
                 lastFailure = WithStrayNote(plan, step, result.Output ?? result.Message);
+                if (restoredNow.Count > 0) lastFailure = $"{RestoredNote(restoredNow)}\n\n{lastFailure}";
                 if (checkNote is not null)
                 {
                     lastFailure = $"{lastFailure}\n\n{checkNote}";

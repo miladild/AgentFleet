@@ -242,6 +242,7 @@ internal static class RunEventKind
     public const string StepParked = "step-parked";
     public const string StepRetried = "step-retried";
     public const string PlanNeedsAttention = "plan-needs-attention";
+    public const string FrozenTests = "frozen-tests";
 }
 
 /// <summary>
@@ -316,7 +317,8 @@ internal sealed record PlanRecord(
     string? HealChecks = null,
     int? AutoRetries = null,
     string? Review = null,
-    IReadOnlyList<PlanRequirement>? Requirements = null)
+    IReadOnlyList<PlanRequirement>? Requirements = null,
+    IReadOnlyList<PlanFrozenTestSet>? FrozenTests = null)
 {
     [JsonConverter(typeof(NullablePlanEvidenceJsonConverter))]
     public PlanEvidence? Evidence => PlanEvidenceRules.Weakest(Steps);
@@ -324,6 +326,15 @@ internal sealed record PlanRecord(
 
 /// <summary>A requirement the task states, with the names of the tests that cover it once a tests step is accepted.</summary>
 internal sealed record PlanRequirement(string Id, string Text, IReadOnlyList<string> CoveredBy);
+
+/// <summary>
+/// The test files one accepted tests step left behind. They are fixed for the rest of the plan: the worker refuses to change
+/// them, a restore puts back one that a command changed, and the step that implements them must make them pass.
+/// </summary>
+internal sealed record PlanFrozenTestSet(int StepId, string Command, IReadOnlyList<PlanFrozenTestFile> Files);
+
+/// <summary>A frozen test file: its project-relative path and the SHA-256 of the content that was accepted.</summary>
+internal sealed record PlanFrozenTestFile(string Path, string Sha256);
 
 internal sealed record PlanSummary(
     string Id,

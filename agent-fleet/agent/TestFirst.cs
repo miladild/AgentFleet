@@ -76,6 +76,8 @@ internal static partial class TestFirst
         ".cs", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".py", ".go", ".rs", ".java", ".kt", ".rb", ".php", ".c", ".cpp", ".h"
     };
 
+    internal static bool IsCodeFile(string path) => CodeExtensions.Contains(Path.GetExtension(path));
+
     internal static IEnumerable<string> PlanProblems(IReadOnlyList<PlanStepInput> steps)
     {
         bool earlierTests = false;

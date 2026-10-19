@@ -254,6 +254,9 @@ public sealed partial class PlanRunnerTests : PlanTestBase
 
         public Func<FakeScratchCall, Task<FailFirstCheckResult>>? ScratchBehaviour { get; set; }
 
+        /// <summary>What each session's restore of frozen test files reports as put back (none by default).</summary>
+        public Func<IReadOnlyList<string>>? FrozenRestore { get; set; }
+
         public Task<FailFirstCheckResult> RunScratchCheckAsync(PlanRecord plan, PlanStep step, string machine, IWorkerWorkspaceSession workspace,
             IReadOnlyDictionary<string, byte[]?> overlay, string command, CancellationToken cancellationToken)
         {
@@ -269,7 +272,8 @@ public sealed partial class PlanRunnerTests : PlanTestBase
             {
                 Answers = WorkerAnswers,
                 SyncFailure = SyncFailure,
-                SyncFailuresRemaining = SyncFailures
+                SyncFailuresRemaining = SyncFailures,
+                RestoreFrozen = FrozenRestore
             };
             Sessions.Add(session);
             return session;
@@ -305,6 +309,7 @@ public sealed partial class PlanRunnerTests : PlanTestBase
         public int ReconnectCalls { get; private set; }
         public Exception? ReconnectFailure { get; set; }
         public int ReconnectFailuresRemaining { get; set; }
+        public Func<IReadOnlyList<string>>? RestoreFrozen { get; set; }
         public Task<bool> AnswersAsync(CancellationToken cancellationToken) => Task.FromResult(Answers);
         public string SnapshotId() => "synthetic-snapshot";
         public Dictionary<string, string> BaselineHashes() => new(StringComparer.OrdinalIgnoreCase) { ["a.cs"] = "baseline" };
@@ -321,6 +326,8 @@ public sealed partial class PlanRunnerTests : PlanTestBase
             return Task.CompletedTask;
         }
         public Task RefreshFromHubAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<IReadOnlyList<string>> RestoreFrozenTestsAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(RestoreFrozen?.Invoke() ?? (IReadOnlyList<string>)[]);
         public Task ReconnectAsync(CancellationToken cancellationToken)
         {
             ReconnectCalls++;

@@ -289,6 +289,13 @@ internal sealed partial class FleetPlanStore
         }
     }
 
+    /// <summary>Records the test files an accepted tests step froze. A set for the same step replaces the earlier one.</summary>
+    public PlanRecord? AddFrozenTests(string id, PlanFrozenTestSet set) =>
+        Update(id, current => current with
+        {
+            FrozenTests = (current.FrozenTests ?? []).Where(existing => existing.StepId != set.StepId).Append(set).ToList()
+        });
+
     /// <summary>Changes the next route only while the step is waiting or has failed.</summary>
     public PlanRecord? SelectMachine(string id, int stepId, string? machine, out string? error)
     {

@@ -404,8 +404,24 @@ change snapshot is no longer available.
 
 Tests steps skip check auditing, check healing, comparison against old code and second opinion. Groups
 containing them run in order so another step cannot contaminate their change baseline. The run log records
-each acceptance decision as a `test-first` event with its outcome and counts. Accepted tests are not frozen;
-later implementation steps remain responsible for passing their checks.
+each acceptance decision as a `test-first` event with its outcome and counts. Accepted tests are frozen for the
+rest of the plan, as described below.
+
+Freezing. When a tests step is accepted, the test files it changed are recorded with their SHA-256 hashes, together
+with that step's check command. From then on, in every later step, the worker's file tools refuse to write, edit,
+move or delete those files, and the refusal says to change the code, not the test. Before each check, the runner
+compares the frozen files in the worker workspace with the accepted hashes and puts back from the hub copy any file
+that a command changed or deleted. The model is told in its next round which files were put back, and the run log
+records one `frozen-tests` event per round that froze or restored something. The sync from the worker to the hub copy never
+carries a frozen file, so the hub copy stays the accepted one. When a plan is staged again, a frozen file that differs
+from the hub copy is replaced by it, even when no sync record exists.
+
+Implementation rule. The first ordinary step after a tests step that names a non-test code file is that set's
+implementation step. After its own check passes, the frozen command runs in the worker workspace, and the step is
+accepted only when that command finds tests and exits successfully. Otherwise the step is sent back with the output
+and the message that the fixed tests still fail, or did not run. Other steps keep only their own checks. With the
+setting off, nothing is frozen and no frozen command runs. When several tests steps name the same implementation step, every one of their commands must pass; a
+command that appears more than once runs once. A step that runs without a worker workspace, such as a plan run on the hub alone or a step handed to the hub after its worker could not finish it, gets no refusal and no restore.
 
 ### Requirements and coverage
 

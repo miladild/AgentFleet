@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text.Json;
 
 namespace AgentFleet;
@@ -81,5 +82,86 @@ internal sealed partial class PlanRunner
         }
 
         return files;
+    }
+
+    // Every frozen set whose implementation step is this step: the first ordinary step after its tests step that names a non-test
+    // code file. Several tests steps can name the same implementation step, and each of their sets must then be proven.
+    private IReadOnlyList<PlanFrozenTestSet> ImplementationSetsFor(PlanRecord plan, PlanStep step)
+    {
+        if (_testFirstMode != TestFirstMode.On || plan.FrozenTests is not { Count: > 0 }) return [];
+        return plan.FrozenTests.Where(set =>
+        {
+            PlanStep? implementation = plan.Steps.FirstOrDefault(candidate => candidate.Id > set.StepId && candidate.Kind != "tests" &&
+                candidate.Files.Any(path => !IsTestPath(path) && TestFirst.IsCodeFile(path)));
+            return implementation?.Id == step.Id;
+        }).ToArray();
+    }
+
+    // The test files a tests step was accepted with are fixed from now on. Their hashes come from the hub copy, which the
+    // step's sync has just brought up to date.
+    private void FreezeAcceptedTests(PlanRecord plan, PlanStep step, IReadOnlyList<string> files, List<string> frozenNow)
+    {
+        var entries = new List<PlanFrozenTestFile>();
+        foreach (string file in files)
+        {
+            string relative;
+            try
+            {
+                relative = WorkerWorkspacePath.RelativeToProject(file, plan.WorkingDirectory!);
+            }
+            catch (WorkerPathRefusedException)
+            {
+                continue;
+            }
+
+            string local = Path.Combine(plan.WorkingDirectory!, relative.Replace('/', Path.DirectorySeparatorChar));
+            if (File.Exists(local)) entries.Add(new PlanFrozenTestFile(relative, Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(local)))));
+        }
+
+        if (entries.Count == 0 || string.IsNullOrWhiteSpace(step.Verify)) return;
+        _store.AddFrozenTests(plan.Id, new PlanFrozenTestSet(step.Id, step.Verify, entries));
+        frozenNow.AddRange(entries.Select(entry => entry.Path));
+    }
+
+    // Before a check, and before the implementation step's frozen run, the frozen files must be the accepted ones: a command the
+    // model ran can change or delete one, and no file tool sees that. The files put back are added to restoredNow.
+    private async Task RestoreFrozenTestsAsync(PlanRecord plan, IWorkerWorkspaceSession workspace, List<string> restoredNow,
+        CancellationToken cancellationToken)
+    {
+        if (_testFirstMode != TestFirstMode.On || plan.FrozenTests is not { Count: > 0 }) return;
+        restoredNow.AddRange(await workspace.RestoreFrozenTestsAsync(cancellationToken));
+    }
+
+    // The implementation step is accepted only when every frozen command runs, finds tests and passes in the step's workspace. Each
+    // distinct command runs once, and the first one that fails or does not run decides the refusal. Returns null when the step may be accepted.
+    private async Task<string?> FrozenTestsRefusalAsync(PlanRecord plan, IReadOnlyList<PlanFrozenTestSet> sets, CancellationToken cancellationToken)
+    {
+        foreach (string command in sets.Select(set => set.Command).Distinct(StringComparer.Ordinal))
+        {
+            string output = await _tools.RunFrozenTestsAsync(plan, command, cancellationToken);
+            bool noTests = CheckVacuity.NoTestsRan(output);
+            if (!noTests && output.StartsWith("Exit code: 0", StringComparison.Ordinal)) continue;
+
+            string tail = output.Length <= 4000 ? output : output[^4000..];
+            return noTests
+                ? $"Step not accepted: the fixed tests did not run. Make `{command}` run them; change the code, not the tests.\n\n{tail}"
+                : $"Step not accepted: the fixed tests still fail. Make `{command}` pass; change the code, not the tests.\n\n{tail}";
+        }
+
+        return null;
+    }
+
+    internal static string RestoredNote(IEnumerable<string> files) =>
+        $"These fixed test files were changed and have been put back; change the code, not the tests: {string.Join(", ", files.Distinct(StringComparer.Ordinal))}.";
+
+    // One run event per round that froze or restored something.
+    private void RecordFrozenTests(PlanRecord plan, PlanStep step, int attempt, string tier, ModelAttemptResult model, int rung, int round,
+        IReadOnlyList<string> frozenNow, IReadOnlyList<string> restoredNow)
+    {
+        if (frozenNow.Count == 0 && restoredNow.Count == 0) return;
+        _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.FrozenTests, tier, node: model.ModelNode,
+            detail: JsonSerializer.Serialize(new { frozen = frozenNow.Count, restored = restoredNow.Count,
+                files = frozenNow.Concat(restoredNow).Distinct(StringComparer.Ordinal).ToArray() }),
+            modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round);
     }
 }

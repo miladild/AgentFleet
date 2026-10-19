@@ -411,4 +411,29 @@ public sealed class WorkerWorkspaceTests : PlanTestBase
     {
         Assert.Equal(expected, WorkerWorkspaceSession.JudgeExistingWorkerFile(worker, hub, lastSynced).ToString());
     }
+
+    [Theory]
+    // A frozen file that differs from the hub copy is put back from it, even with no sync record: nothing unsynced can be lost.
+    [InlineData("edited", "better", null, "Replace")]
+    [InlineData("edited", "better", "worse", "Replace")]
+    // A frozen file that already matches the hub copy is left as it is.
+    [InlineData("better", "better", null, "Matches")]
+    // A frozen file the hub no longer has is not replaced: refuse, as before.
+    [InlineData("edited", null, null, "Refuse")]
+    [InlineData("edited", null, "worse", "Refuse")]
+    public void A_frozen_worker_file_that_differs_from_the_hub_copy_is_replaced_by_it(
+        string worker, string? hub, string? lastSynced, string expected)
+    {
+        Assert.Equal(expected, WorkerWorkspaceSession.JudgeExistingWorkerFile(worker, hub, lastSynced, frozen: true).ToString());
+    }
+
+    [Theory]
+    // The same inputs for a file that is not frozen keep the old answer: unknown unsynced work is refused.
+    [InlineData("edited", "better", null, "Refuse")]
+    [InlineData("edited", "better", "worse", "Refuse")]
+    public void The_same_file_that_is_not_frozen_is_still_refused_when_it_differs_from_the_hub_copy(
+        string worker, string? hub, string? lastSynced, string expected)
+    {
+        Assert.Equal(expected, WorkerWorkspaceSession.JudgeExistingWorkerFile(worker, hub, lastSynced, frozen: false).ToString());
+    }
 }

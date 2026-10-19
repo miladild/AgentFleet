@@ -30,6 +30,9 @@ internal interface IWorkerWorkspaceSession : IDisposable
     Task SyncToHubAsync(CancellationToken cancellationToken);
     Task RefreshFromHubAsync(CancellationToken cancellationToken);
     Task ReconnectAsync(CancellationToken cancellationToken);
+
+    // A session that does not hold frozen test files has none to put back.
+    Task<IReadOnlyList<string>> RestoreFrozenTestsAsync(CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<string>>([]);
 }
 
 internal sealed class WorkerCommandTimeoutException(string message, Exception innerException)
@@ -67,6 +70,10 @@ internal sealed class WorkerWorkspaceManager(FleetOptions fleet, ILogger logger,
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, IReadOnlyDictionary<string, string>> _lastSynced =
         new(StringComparer.OrdinalIgnoreCase);
 
+    // The test files every accepted tests step of the plan froze, in the order the steps were accepted.
+    internal static IReadOnlyList<PlanFrozenTestFile> FrozenFilesOf(PlanRecord plan) =>
+        (plan.FrozenTests ?? []).SelectMany(set => set.Files).ToArray();
+
     public async Task<IWorkerWorkspaceSession> StageAsync(PlanRecord plan, PlanStep step, string machine, CancellationToken cancellationToken)
     {
         FleetNodeDefinition node = fleet.Nodes.FirstOrDefault(candidate =>
@@ -86,7 +93,7 @@ internal sealed class WorkerWorkspaceManager(FleetOptions fleet, ILogger logger,
         cancellationToken.ThrowIfCancellationRequested();
         string key = $"{plan.Id}|{machine}";
         var session = new WorkerWorkspaceSession(machine, config, Path.GetFullPath(plan.WorkingDirectory), logger, commandTimeout,
-            onSynced: hashes => _lastSynced[key] = hashes);
+            onSynced: hashes => _lastSynced[key] = hashes, frozenFiles: FrozenFilesOf(plan));
         try
         {
             session.Connect();
@@ -115,7 +122,7 @@ internal sealed class WorkerWorkspaceManager(FleetOptions fleet, ILogger logger,
         if (string.IsNullOrWhiteSpace(plan.WorkingDirectory) || !Directory.Exists(plan.WorkingDirectory))
             throw new InvalidOperationException("Worker workspace unavailable: the plan's project folder does not exist on the hub.");
         var session = new WorkerWorkspaceSession(baseline.Machine, node.Workspace,
-            Path.GetFullPath(plan.WorkingDirectory!), logger, commandTimeout);
+            Path.GetFullPath(plan.WorkingDirectory!), logger, commandTimeout, frozenFiles: FrozenFilesOf(plan));
         try
         {
             session.Connect();
@@ -185,6 +192,9 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
     };
     private static readonly Regex SecretEnvironmentFile = new(@"^\.env(?:\..*)?$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    // Said to the model when a file tool is asked to change a test file that an accepted tests step fixed for the plan.
+    internal const string FrozenTestRefusal = "This test file is fixed for this plan; change the code, not the test. If you believe the test is wrong, say so in your reply.";
+
     // Windows reserves these names, with or without an extension, trailing dots and spaces ignored.
     private static readonly Regex WindowsDeviceName = new(@"^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
     private static readonly HashSet<string> PrivateDirectories = new(StringComparer.OrdinalIgnoreCase)
@@ -205,15 +215,18 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
     private readonly Dictionary<string, string> _baselineHashes = new(StringComparer.OrdinalIgnoreCase);
     private readonly Action<IReadOnlyDictionary<string, string>>? _onSynced;
     private readonly IWorkerWorkspaceFileAccess? _fileAccess;
+    private readonly IReadOnlyList<PlanFrozenTestFile> _frozenFiles;
     private SftpClient? _sftp;
     private SshClient? _ssh;
     private bool _disposed;
 
     internal WorkerWorkspaceSession(string machine, FleetWorkerWorkspaceConfig config, string hubRoot, ILogger logger, TimeSpan commandTimeout,
-        Action<IReadOnlyDictionary<string, string>>? onSynced = null, IWorkerWorkspaceFileAccess? fileAccess = null)
+        Action<IReadOnlyDictionary<string, string>>? onSynced = null, IWorkerWorkspaceFileAccess? fileAccess = null,
+        IReadOnlyList<PlanFrozenTestFile>? frozenFiles = null)
     {
         _onSynced = onSynced;
         _fileAccess = fileAccess;
+        _frozenFiles = frozenFiles ?? [];
         Machine = machine;
         _config = config;
         _hubRoot = hubRoot;
@@ -342,7 +355,7 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
             using var content = new MemoryStream();
             _sftp.DownloadFile(remote, content);
             string workerHash = HashBytes(content.ToArray());
-            switch (JudgeExistingWorkerFile(workerHash, onHub ? HashFile(sourceByRelative[relative]) : null, syncedHash))
+            switch (JudgeExistingWorkerFile(workerHash, onHub ? HashFile(sourceByRelative[relative]) : null, syncedHash, IsFrozen(relative)))
             {
                 case ExistingWorkerFile.Refuse when onHub:
                     throw new InvalidOperationException($"Worker workspace unavailable: existing worker file '{relative}' differs from the hub checkout. It may contain unsynced work, so the workspace was preserved.");
@@ -547,13 +560,19 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
     /// What to do with a file already in a worker's workspace when the project is staged again. A file that differs from the
     /// hub's is unsynced work only if it also differs from what the worker held at the last sync; when it is exactly that,
     /// nobody touched it there and the hub (which the runner or the user changed since) is the truth. Without a recorded
-    /// sync (a restart) the safe answer stays the old one: refuse.
+    /// sync (a restart) the safe answer stays the old one: refuse. A frozen test file is the exception: the hub copy is the
+    /// accepted one and the worker's copy is never synced back, so a frozen file that differs from the hub's is replaced by it.
     /// </summary>
-    internal static ExistingWorkerFile JudgeExistingWorkerFile(string workerHash, string? hubHash, string? lastSyncedHash)
+    internal static ExistingWorkerFile JudgeExistingWorkerFile(string workerHash, string? hubHash, string? lastSyncedHash, bool frozen = false)
     {
         if (hubHash is not null && string.Equals(workerHash, hubHash, StringComparison.Ordinal))
         {
             return ExistingWorkerFile.Matches;
+        }
+
+        if (frozen && hubHash is not null)
+        {
+            return ExistingWorkerFile.Replace;
         }
 
         if (lastSyncedHash is null || !string.Equals(workerHash, lastSyncedHash, StringComparison.Ordinal))
@@ -584,6 +603,8 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 string relative = RelativeRemote(RemoteRoot, path);
+                // A frozen test file is never carried to the hub, so the hub copy stays the accepted one (no write, no conflict).
+                if (IsFrozen(relative)) continue;
                 if (!AllowedRelative(relative)) continue;
                 if (_sftp.GetAttributes(path).Size > 20 * 1024 * 1024)
                     throw new IOException($"Worker sync refused an output larger than 20 MiB: {relative}.");
@@ -626,7 +647,7 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
 
             // Propagate intentional workspace deletions, but only for files this manager staged and only inside
             // the original project. If SFTP could not enumerate the workspace, the guard above prevents deletion.
-            foreach (string relative in _stagedFiles.Where(path => !remaining.Contains(path) && IsNamedByStep(path)))
+            foreach (string relative in _stagedFiles.Where(path => !remaining.Contains(path) && !IsFrozen(path) && IsNamedByStep(path)))
             {
                 string local = SafeHubPath(relative);
                 string? baseline = _baselineHashes.GetValueOrDefault(relative);
@@ -828,6 +849,7 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
 
     public async Task<string> WriteFileAsync(string path, string content, CancellationToken cancellationToken)
     {
+        if (FrozenRefusal(path) is { } frozenRefusal) return frozenRefusal;
         string remote = ResolveRemotePath(path); Audit("write_file", path);
         await _gate.WaitAsync(cancellationToken);
         try
@@ -843,6 +865,7 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
 
     public async Task<string> EditFileAsync(string path, string oldText, string newText, bool? replaceAll, CancellationToken cancellationToken)
     {
+        if (FrozenRefusal(path) is { } frozenRefusal) return frozenRefusal;
         if (string.IsNullOrEmpty(oldText)) return "Error: oldText must not be empty.";
         string current = await ReadFileAsync(path, null, null, cancellationToken);
         if (current.StartsWith("Error:", StringComparison.Ordinal)) return current;
@@ -938,6 +961,7 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
 
     public string MoveFile(string source, string destination, bool? overwrite)
     {
+        if (FrozenRefusal(source, destination) is { } frozenRefusal) return frozenRefusal;
         string from = ResolveRemotePath(source), to = ResolveRemotePath(destination); Audit("move_file", $"{source} -> {destination}");
         lock (_sftp!)
         {
@@ -952,6 +976,7 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
 
     public string DeleteFile(string path)
     {
+        if (FrozenRefusal(path) is { } frozenRefusal) return frozenRefusal;
         string remote = ResolveRemotePath(path); Audit("delete_file", path);
         lock (_sftp!)
         {
@@ -990,6 +1015,97 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
                 }
             }
         }
+    }
+
+    // Puts back every frozen test file that the worker no longer holds as accepted: changed or deleted, typically by a command the
+    // model ran, which no file tool sees. Runs before each check. Returns the project-relative paths it put back.
+    public async Task<IReadOnlyList<string>> RestoreFrozenTestsAsync(CancellationToken cancellationToken)
+    {
+        var restored = new List<string>();
+        if (_frozenFiles.Count == 0) return restored;
+
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            foreach (PlanFrozenTestFile frozen in _frozenFiles)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                string remote = JoinRemote(RemoteRoot, frozen.Path);
+                EnsureNoLinkComponents(remote);
+                byte[]? current = await ReadRemoteBytesAsync(remote, cancellationToken);
+                if (current is not null && string.Equals(HashBytes(current), frozen.Sha256, StringComparison.OrdinalIgnoreCase)) continue;
+
+                // The hub copy is the one the tests step was accepted with. It is checked here too: a copy that no longer matches
+                // must never be written to the worker.
+                string local = SafeHubPath(frozen.Path);
+                if (!File.Exists(local))
+                    throw new IOException($"Frozen test file {frozen.Path} is missing from the hub copy, so it cannot be put back on {Machine}.");
+                byte[] hubBytes = await File.ReadAllBytesAsync(local, cancellationToken);
+                if (!string.Equals(HashBytes(hubBytes), frozen.Sha256, StringComparison.OrdinalIgnoreCase))
+                    throw new IOException($"Frozen test file {frozen.Path} on the hub copy no longer matches the accepted test, so it cannot be put back on {Machine}.");
+                if (_fileAccess is not null)
+                {
+                    await WriteRemoteFileAsync(remote, Encoding.UTF8.GetString(hubBytes), cancellationToken);
+                }
+                else
+                {
+                    CreateDirectoryTree(Parent(remote));
+                    UploadHubFile(local, remote);
+                }
+
+                restored.Add(frozen.Path);
+            }
+
+            return restored;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    // The one rule for what a frozen test file is: the project-relative path, compared without case only on a Windows worker,
+    // where names do not depend on it.
+    private bool IsFrozen(string relative)
+    {
+        StringComparison comparison = string.Equals(_config.Platform, "windows", StringComparison.OrdinalIgnoreCase)
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        return _frozenFiles.Any(frozen => string.Equals(frozen.Path, relative, comparison));
+    }
+
+    // A frozen test file is fixed for the rest of the plan, so a file tool refuses to change it under any of the paths given.
+    // Paths are compared in project-relative form; the comparison ignores case only on a Windows worker, where names do not depend on it.
+    private string? FrozenRefusal(params string[] paths)
+    {
+        if (_frozenFiles.Count == 0) return null;
+        foreach (string path in paths)
+        {
+            string relative;
+            try
+            {
+                relative = WorkerWorkspacePath.RelativeToProject(path, _hubRoot, RemoteRoot);
+            }
+            catch (WorkerPathRefusedException)
+            {
+                // The path is outside the project; ResolveRemotePath reports that itself.
+                continue;
+            }
+
+            if (IsFrozen(relative)) return FrozenTestRefusal;
+        }
+
+        return null;
+    }
+
+    private async Task<byte[]?> ReadRemoteBytesAsync(string path, CancellationToken cancellationToken)
+    {
+        if (!RemoteFileExists(path)) return null;
+        if (_fileAccess is not null) return Encoding.UTF8.GetBytes(await _fileAccess.ReadTextAsync(path, cancellationToken));
+
+        using var content = new MemoryStream();
+        _sftp!.DownloadFile(path, content);
+        return content.ToArray();
     }
 
     public void Dispose()

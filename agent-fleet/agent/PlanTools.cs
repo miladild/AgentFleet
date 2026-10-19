@@ -454,6 +454,20 @@ internal sealed partial class PlanTools
         return (result.StartsWith("Exit code: 0", StringComparison.Ordinal), ShortenCheckOutput(FailureLocation.ProjectRelative(result, plan.WorkingDirectory)));
     }
 
+    /// <summary>
+    /// Runs a frozen test set's command the way a check runs, on the machine the current worker scope selects, and returns the
+    /// whole output (not shortened) so the caller can tell that no test ran. A refused command returns the refusal as its output.
+    /// </summary>
+    internal async Task<string> RunFrozenTestsAsync(PlanRecord plan, string command, CancellationToken cancellationToken)
+    {
+        if (PlanRunnerToolPolicy.CommandRefusal(command) is { } refusal)
+        {
+            return refusal;
+        }
+
+        return FailureLocation.ProjectRelative(await _runCommand(command, plan.WorkingDirectory, cancellationToken), plan.WorkingDirectory);
+    }
+
     public PlanRecord CommitStepDone(string planId, int stepId, string? note)
     {
         return _store.Update(planId, current =>
