@@ -46,11 +46,20 @@ internal static partial class TestFirst
         int total = TestTotal().Matches(text).Sum(match => int.TryParse(match.Groups["count"].Value, out int count) ? count : 0);
         int skipped = Regex.Matches(text, @"(?im)\bSkipped:\s*(?<count>\d+)|^[#ℹ]\s*skipped\s+(?<count>\d+)\s*$")
             .Sum(match => int.TryParse(match.Groups["count"].Value, out int count) ? count : 0);
+        // pytest, jest and vitest print their own summaries, which never hold a dotnet or node one, so these totals do not overlap.
+        TestRunnerTotals runners = TestRunnerSummary.Read(text);
+        total += runners.Total;
+        skipped += runners.Skipped;
         int executed = Math.Max(0, total - skipped);
         // A node file-level line ("not ok 1 - tests/a.test.js") names the file, not a test, so it never becomes a failing test name.
         string failures = TapFailures().Replace(text, match => BareTestFile().IsMatch(match.Groups["name"].Value) ? match.Value : "FAILED " + match.Groups["name"].Value);
         FailureFingerprint signature = PlanFailure.FailureSignature(failures);
-        int failing = signature.Items.Count(item => !PlanFailure.IsBuildErrorCode(item) && !BareTestFile().IsMatch(item));
+        // jest and vitest name their failing tests in their own lines (a jest block per failure, a vitest FAIL line per test with its file),
+        // and the signature reads the same test twice or reads a file-level line, so their names are counted from those lines instead.
+        IReadOnlyList<string>? runnerFailures = RunnerFailureNames(text, runners);
+        int failing = runnerFailures is not null
+            ? runnerFailures.Distinct(StringComparer.OrdinalIgnoreCase).Count()
+            : signature.Items.Count(item => !PlanFailure.IsBuildErrorCode(item) && !BareTestFile().IsMatch(item));
         TestFirstDecision Decision(string outcome, string feedback) => new(outcome, executed, failing, feedback);
 
         if (changedFiles is null) return Decision("unreadable", "the changed files could not be checked; report_blocker before continuing");
@@ -59,8 +68,12 @@ internal static partial class TestFirst
             return Decision("non-test-changed", $"a non-test file changed: {implementation}; restore it and write only tests");
         if (PlanFailure.BuildBroken(text) || signature.Items.Any(PlanFailure.IsBuildErrorCode))
             return Decision("build-error", "the check has a build or syntax error, not a failing behaviour test; fix the test setup or use report_blocker");
-        if (CheckVacuity.NoTestsRan(text) || NoExecution().IsMatch(text) || TestTotal().IsMatch(text) && executed == 0)
+        if (CheckVacuity.NoTestsRan(text) || NoExecution().IsMatch(text) || TestTotal().IsMatch(text) && executed == 0 ||
+            runners.Found && executed == 0 || runners.NoTestFiles)
             return Decision("no-test-ran", "no test ran: if the tests cannot import the code under test, say so with report_blocker");
+        // A test file that failed to load beside the others is not a test that ran, so the step cannot be accepted on the others alone.
+        if (runners.CollectionFailed)
+            return Decision("build-error", "a test file could not be loaded, so its tests did not run; fix the test setup or use report_blocker");
         Match exit = ExitCode().Match(text);
         if (executed < 1 || !exit.Success || !int.TryParse(exit.Groups["code"].Value, out int code))
             return Decision("unreadable", "no test ran: if the tests cannot import the code under test, say so with report_blocker");
@@ -70,6 +83,30 @@ internal static partial class TestFirst
             return Decision("unreadable", "no test ran: if the tests cannot import the code under test, say so with report_blocker");
         return Decision("accepted", "The new tests ran and failed on the missing behaviour as required.");
     }
+
+    // The failing test names a jest or vitest run printed, or null when the output is not from one of them. A jest block whose header
+    // is the suite failing to load, or the console block, is not a test.
+    private static IReadOnlyList<string>? RunnerFailureNames(string text, TestRunnerTotals runners)
+    {
+        if (runners.Jest)
+        {
+            return JestFailureBlock().Matches(text)
+                .Select(match => match.Groups["name"].Value.Trim())
+                .Where(name => name is not ("Test suite failed to run" or "Console"))
+                .ToArray();
+        }
+
+        // A vitest line for a file that failed to load has no test name after the file, so only "file > suite > test" lines count.
+        return runners.Vitest
+            ? VitestFailureLine().Matches(text).Select(match => match.Groups["name"].Value.Trim()).ToArray()
+            : null;
+    }
+
+    [GeneratedRegex(@"(?m)^\s*●\s+(?<name>[^\r\n]+?)\s*$")]
+    private static partial Regex JestFailureBlock();
+
+    [GeneratedRegex(@"(?m)^\s*FAIL\s+(?<name>\S[^\r\n]*? > [^\r\n]*?)\s*$")]
+    private static partial Regex VitestFailureLine();
 
     private static readonly HashSet<string> CodeExtensions = new(StringComparer.OrdinalIgnoreCase)
     {

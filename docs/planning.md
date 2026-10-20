@@ -398,7 +398,8 @@ more than the new tests, such as the whole suite, can be satisfied by an unrelat
 pass, so the planner is told to run just those tests.
 Passing tests, a step that wrote no file, no tests, import failures, build or syntax errors, unreadable results
 and implementation edits are sent back for repair. Recognised counts currently come from the standard test summaries of `dotnet test`
-and Node's test runner; an unsupported output format is refused. Unknown changes, including files too large
+and Node's test runner, and from the final summaries of pytest, jest and vitest; an unsupported output format is refused
+(Go's `go test` is not read yet). Unknown changes, including files too large
 for the change snapshot, are also refused. Interrupted tests steps wait for review because the original
 change snapshot is no longer available.
 
