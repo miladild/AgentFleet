@@ -23,6 +23,11 @@
 
 .PARAMETER HealthTimeoutSeconds
     How long to wait for /health before giving up. Default 90.
+
+.PARAMETER Setting
+    NAME=value settings to start the backend with, for comparing arms. Only FLEET_PLAN_TEST_FIRST (off, on) and
+    FLEET_PLAN_FAIL_FIRST (off, warn, enforce) are accepted. The settings are written to backend.settings.json in the
+    work folder, which Invoke-Bench.ps1 copies into run.json. Without this parameter the backend starts with none.
 #>
 [CmdletBinding()]
 param(
@@ -32,12 +37,16 @@ param(
     [string]$WorkRoot = (Join-Path ([IO.Path]::GetTempPath()) 'agent-fleet-bench'),
     [ValidateRange(10, 900)][int]$HealthTimeoutSeconds = 90,
     [switch]$NoHubModel,
+    [string[]]$Setting,
     [switch]$Stop
 )
 
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\..\scripts\FleetCommon.ps1"
+. "$PSScriptRoot\BenchSettings.ps1"
 $pidFile = Join-Path $WorkRoot 'backend.pid'
+# Refused before anything is stopped or published: a bad setting must not touch the backend that is running.
+$settings = ConvertTo-BenchSettings $Setting
 
 function Stop-BenchBackend {
     if (Test-Path -LiteralPath $pidFile) {
@@ -50,6 +59,8 @@ function Stop-BenchBackend {
 
 if ($Stop) {
     Stop-BenchBackend
+    # The file describes a backend that is gone now; a batch must not read its settings afterwards.
+    Remove-Item -LiteralPath (Join-Path $WorkRoot 'backend.settings.json') -Force -ErrorAction SilentlyContinue
     Write-Ok "The benchmark backend on port $Port is stopped."
     return
 }
@@ -57,6 +68,8 @@ if ($Stop) {
 New-Item -ItemType Directory -Path $WorkRoot -Force | Out-Null
 Stop-BenchBackend
 Start-Sleep -Seconds 1
+# A file left by an earlier start describes a backend that is gone; it is replaced once this one answers.
+Remove-Item -LiteralPath (Join-Path $WorkRoot 'backend.settings.json') -Force -ErrorAction SilentlyContinue
 
 $source = Find-FleetConfig $Config $InstallRoot
 if (-not $source) { throw 'No fleet.config.json found. Pass -Config <path>.' }
@@ -81,13 +94,20 @@ $env:FLEET_CONFIG_PATH = $configCopy
 $env:FLEET_PLANS_DIR = $plans
 $env:FLEET_FRONTEND_URL = 'http://localhost:3005'
 $env:ASPNETCORE_URLS = "http://localhost:$Port"
+$previousSettings = $null
 try {
+    # The settings must be in place when the process starts: the backend reads them once, at startup, from its environment.
+    # Names not given are removed here, so a value the launching shell holds is not passed on as if it were a setting.
+    $previousSettings = Set-BenchSettingEnvironment $settings
+    $startedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
     # Start-Process passes the argument text on as it is: the quotes keep a folder with a space in its path in one piece.
     $process = Start-Process dotnet -ArgumentList ('"' + (Join-Path $bin 'AgentFleet.dll') + '"') -WorkingDirectory $bin -PassThru -WindowStyle Hidden `
         -RedirectStandardOutput (Join-Path $WorkRoot 'backend.out.log') -RedirectStandardError (Join-Path $WorkRoot 'backend.err.log')
 }
 finally {
     $env:FLEET_CONFIG_PATH = $null; $env:FLEET_PLANS_DIR = $null; $env:FLEET_FRONTEND_URL = $null; $env:ASPNETCORE_URLS = $null
+    # The started process keeps the copy it took; this puts back what the shell had, rather than deleting it.
+    if ($null -ne $previousSettings) { Restore-BenchSettingEnvironment $previousSettings }
 }
 $process.Id | Set-Content -LiteralPath $pidFile
 
@@ -104,4 +124,9 @@ while (-not $up -and (Get-Date) -lt $deadline) {
     }
 }
 if (-not $up) { throw "The benchmark backend did not answer within $HealthTimeoutSeconds s. See $WorkRoot\backend.err.log" }
-Write-Ok "Benchmark backend up on port $Port (pid $($process.Id)). Run: .\bench\Invoke-Bench.ps1 -BaseUrl http://localhost:$Port"
+# The file says which backend it describes: the port it was started on and when, so a batch can tell it is the right one.
+$settingsDocument = [ordered]@{ port = $Port; startedAtUtc = $startedAtUtc; settings = $settings }
+[IO.File]::WriteAllText((Join-Path $WorkRoot 'backend.settings.json'), (($settingsDocument | ConvertTo-Json -Depth 3) + [Environment]::NewLine), (New-Object Text.UTF8Encoding($false)))
+$settingText = ''
+if ($settings.Count) { $settingText = ' with ' + (@($settings.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', ') }
+Write-Ok "Benchmark backend up on port $Port (pid $($process.Id))$settingText. Run: .\bench\Invoke-Bench.ps1 -BaseUrl http://localhost:$Port"

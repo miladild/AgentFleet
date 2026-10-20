@@ -21,6 +21,60 @@ if ($Tasks -notcontains 'all') { $ids = $Tasks }
 $scratch = Join-Path ([IO.Path]::GetTempPath()) ('agent-fleet-bench-check-' + [Guid]::NewGuid().ToString('N'))
 $bad = 0
 
+function Test-IsTestPath([string]$Path) { return ($Path -match '(^|/)test/' -or $Path -match '\.test\.js$') }
+
+# SHA-256 of every file under a folder, keyed by its path relative to that folder.
+function Get-TreeDigest([string]$Root) {
+    $map = @{}
+    if (-not (Test-Path -LiteralPath $Root)) { return $map }
+    $base = (Resolve-Path -LiteralPath $Root).Path
+    foreach ($file in Get-ChildItem -LiteralPath $base -Recurse -File -Force) {
+        $map[$file.FullName.Substring($base.Length).TrimStart('\')] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+    }
+    return $map
+}
+
+# A test-first task (id ends in -tf) must be its base task with the same project, hidden tests and solution, and with the
+# three steps the test-first arm runs: tests, implementation, then the base whole-suite step unchanged.
+function Get-TestFirstProblems([string]$Id, $Task, [string]$Dir) {
+    $problems = @()
+    $baseId = $Id.Substring(0, $Id.Length - 3)
+    $baseDir = Join-Path $tasksRoot $baseId
+    $base = $null
+    try { $base = Get-Content -LiteralPath (Join-Path $baseDir 'task.json') -Raw | ConvertFrom-Json } catch { }
+    if (-not $base) { return @("there is no base task '$baseId' to copy") }
+    foreach ($folder in 'project', 'hidden', 'solution') {
+        $mine = Get-TreeDigest (Join-Path $Dir $folder)
+        $theirs = Get-TreeDigest (Join-Path $baseDir $folder)
+        $differs = @(@($mine.Keys) + @($theirs.Keys) | Sort-Object -Unique | Where-Object { $mine[$_] -ne $theirs[$_] })
+        if ($differs.Count) { $problems += "$folder is not byte-identical to $baseId's: $($differs -join ', ')" }
+    }
+
+    $steps = @($Task.steps)
+    $baseSteps = @($base.steps)
+    if ($steps.Count -ne 3) { return @($problems + "a test-first task has three steps (tests, implementation, whole suite), not $($steps.Count)") }
+    $baseTests = @($baseSteps[0].files | Where-Object { Test-IsTestPath $_ })
+    $baseSource = @($baseSteps[0].files | Where-Object { -not (Test-IsTestPath $_) })
+    $tests = $steps[0]
+    $implementation = $steps[1]
+    $whole = $steps[2]
+    $baseWhole = $baseSteps[-1]
+
+    if ($tests.kind -ne 'tests') { $problems += "step 1 must have kind 'tests'" }
+    if ((@($tests.files) -join ',') -ne ($baseTests -join ',')) { $problems += "step 1 must name only the base test file: $($baseTests -join ', ')" }
+    if ($tests.verify -ne $baseSteps[0].verify) { $problems += 'step 1 must use the base task''s check command' }
+    if ($implementation.PSObject.Properties.Name -contains 'kind') { $problems += 'step 2 must not have a kind' }
+    if ((@($implementation.files) -join ',') -ne ($baseSource -join ',')) { $problems += "step 2 must name only the base source file: $($baseSource -join ', ')" }
+    if ($implementation.verify -ne $baseSteps[0].verify) { $problems += 'step 2 must use the base task''s check command' }
+    if ($whole.PSObject.Properties.Name -contains 'kind') { $problems += 'step 3 must not have a kind' }
+    if (@($whole.files).Count) { $problems += 'step 3 must name no files' }
+    if ($whole.verify -ne 'npm test') { $problems += "step 3's check must be 'npm test'" }
+    if (("$($whole.title)|$($whole.detail)|$($whole.verify)|$($whole.tier)|$($whole.retrySafe)") -ne ("$($baseWhole.title)|$($baseWhole.detail)|$($baseWhole.verify)|$($baseWhole.tier)|$($baseWhole.retrySafe)")) {
+        $problems += "step 3 must be the base task's whole-suite step, unchanged"
+    }
+    return $problems
+}
+
 function Invoke-HiddenOn([string]$Project, [string]$HiddenDir) {
     $target = Join-Path $Project '.bench-hidden'
     New-Item -ItemType Directory -Path $target -Force | Out-Null
@@ -68,6 +122,9 @@ try {
             }
             $last = @($task.steps) | Select-Object -Last 1
             if ($last -and $last.verify -ne 'npm test') { $problems += "the last step's check must be 'npm test', it is '$($last.verify)'" }
+            # A step kind switches on a behaviour of the test-first arm, so only the test-first tasks may use one.
+            if ($id -like '*-tf') { $problems += @(Get-TestFirstProblems $id $task $dir) }
+            elseif (@($task.steps | Where-Object { $_.PSObject.Properties.Name -contains 'kind' }).Count) { $problems += 'only a test-first task (id ends in -tf) may give a step a kind' }
         }
         foreach ($folder in 'project', 'hidden', 'solution') { if (-not (Test-Path (Join-Path $dir $folder))) { $problems += "no $folder folder" } }
         if (-not (Test-Path (Join-Path $dir 'project\package.json'))) { $problems += 'project has no package.json' }

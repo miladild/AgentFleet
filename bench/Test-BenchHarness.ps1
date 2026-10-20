@@ -248,3 +248,202 @@ finally {
         Remove-Item -LiteralPath $resolved -Recurse -Force
     }
 }
+
+# Comparison arms: the settings a benchmark backend may be started with, how they reach the backend, and what a batch records.
+. "$PSScriptRoot\BenchSettings.ps1"
+function Get-SettingRefusal([string[]]$Setting) {
+    try { $null = ConvertTo-BenchSettings $Setting } catch { return $_.Exception.Message }
+    return $null
+}
+$accepted = ConvertTo-BenchSettings @('FLEET_PLAN_TEST_FIRST=ON', 'FLEET_PLAN_FAIL_FIRST=Enforce')
+if (($accepted.Keys -join ',') -ne 'FLEET_PLAN_TEST_FIRST,FLEET_PLAN_FAIL_FIRST' -or $accepted['FLEET_PLAN_TEST_FIRST'] -cne 'on' -or $accepted['FLEET_PLAN_FAIL_FIRST'] -cne 'enforce') {
+    throw 'Accepted settings are not stored with their canonical names and lower-case values.'
+}
+$lowerName = ConvertTo-BenchSettings @('fleet_plan_fail_first=warn')
+if (($lowerName.Keys -join ',') -ne 'FLEET_PLAN_FAIL_FIRST' -or $lowerName['FLEET_PLAN_FAIL_FIRST'] -cne 'warn') { throw 'A setting name in another case was not stored under its canonical name.' }
+$emptyFromNull = ConvertTo-BenchSettings $null
+if ($emptyFromNull -isnot [System.Collections.IDictionary] -or $emptyFromNull.Count -ne 0) { throw 'No settings must give an empty dictionary.' }
+$refusals = @(
+    @{ Setting = @('FLEET_OTHER=on'); Expect = 'Unknown setting' },
+    @{ Setting = @('FLEET_PLAN_TEST_FIRST=maybe'); Expect = 'not accepted for FLEET_PLAN_TEST_FIRST' },
+    @{ Setting = @('FLEET_PLAN_FAIL_FIRST='); Expect = 'not accepted for FLEET_PLAN_FAIL_FIRST' },
+    @{ Setting = @('FLEET_PLAN_TEST_FIRST=on=off'); Expect = 'not accepted for FLEET_PLAN_TEST_FIRST' },
+    @{ Setting = @('FLEET_PLAN_TEST_FIRST'); Expect = 'is not NAME=value' },
+    @{ Setting = @(''); Expect = 'is not NAME=value' },
+    @{ Setting = @(' FLEET_PLAN_TEST_FIRST=on'); Expect = 'Unknown setting' },
+    @{ Setting = @('FLEET_PLAN_TEST_FIRST=on', 'FLEET_PLAN_TEST_FIRST=off'); Expect = 'given more than once' },
+    @{ Setting = @('FLEET_PLAN_TEST_FIRST=on', 'fleet_plan_test_first=on'); Expect = 'given more than once' }
+)
+foreach ($case in $refusals) {
+    $message = Get-SettingRefusal ([string[]]$case.Setting)
+    if (-not $message -or $message -notlike "*$($case.Expect)*" -or $message -notlike '*FLEET_PLAN_TEST_FIRST = off | on*' -or $message -notlike '*FLEET_PLAN_FAIL_FIRST = off | warn | enforce*') {
+        throw "A refused setting did not get the expected message: $($case.Setting -join ' ')"
+    }
+}
+Write-Host 'PASS: only the two test-first settings are accepted, and every other entry is refused with the accepted list.' -ForegroundColor Green
+
+# The backend reads its settings from its environment when it starts. The shell's own values must come back afterwards.
+$settingNames = 'FLEET_PLAN_TEST_FIRST', 'FLEET_PLAN_FAIL_FIRST'
+$savedSettingEnv = @{}
+foreach ($name in $settingNames) { $savedSettingEnv[$name] = [Environment]::GetEnvironmentVariable($name) }
+try {
+    [Environment]::SetEnvironmentVariable('FLEET_PLAN_FAIL_FIRST', 'warn')
+    Remove-Item -LiteralPath 'Env:FLEET_PLAN_TEST_FIRST' -ErrorAction SilentlyContinue
+    $previousSettingEnv = Set-BenchSettingEnvironment (ConvertTo-BenchSettings @('FLEET_PLAN_FAIL_FIRST=enforce', 'FLEET_PLAN_TEST_FIRST=on'))
+    if ([Environment]::GetEnvironmentVariable('FLEET_PLAN_FAIL_FIRST') -ne 'enforce' -or [Environment]::GetEnvironmentVariable('FLEET_PLAN_TEST_FIRST') -ne 'on') {
+        throw 'The settings were not set in the process environment.'
+    }
+    Restore-BenchSettingEnvironment $previousSettingEnv
+    if ([Environment]::GetEnvironmentVariable('FLEET_PLAN_FAIL_FIRST') -ne 'warn' -or $null -ne [Environment]::GetEnvironmentVariable('FLEET_PLAN_TEST_FIRST')) {
+        throw 'The settings were not put back: a value the shell had must come back, and a name that held nothing must be removed.'
+    }
+}
+finally {
+    foreach ($name in $settingNames) {
+        if ($null -eq $savedSettingEnv[$name]) { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }
+        else { [Environment]::SetEnvironmentVariable($name, $savedSettingEnv[$name]) }
+    }
+}
+Write-Host 'PASS: settings are set for the backend and the shell values are put back.' -ForegroundColor Green
+
+# A value the launching shell already holds must not reach the backend unless the setting is given: a name not given is absent
+# while the backend starts, and the shell's own value (or absence) is back afterwards. Both setting names, every case.
+function Get-SettingEnvSnapshot {
+    $snapshot = @{}
+    foreach ($name in 'FLEET_PLAN_TEST_FIRST', 'FLEET_PLAN_FAIL_FIRST') { $snapshot[$name] = [Environment]::GetEnvironmentVariable($name) }
+    return $snapshot
+}
+function Set-SettingEnvSnapshot([hashtable]$Values) {
+    foreach ($name in 'FLEET_PLAN_TEST_FIRST', 'FLEET_PLAN_FAIL_FIRST') {
+        if ($null -eq $Values[$name]) { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }
+        else { [Environment]::SetEnvironmentVariable($name, [string]$Values[$name]) }
+    }
+}
+$envCases = @(
+    @{ Name = 'test-first in the shell, nothing given'; Shell = @{ FLEET_PLAN_TEST_FIRST = 'on'; FLEET_PLAN_FAIL_FIRST = $null }; Given = @(); During = @{ FLEET_PLAN_TEST_FIRST = $null; FLEET_PLAN_FAIL_FIRST = $null }; After = @{ FLEET_PLAN_TEST_FIRST = 'on'; FLEET_PLAN_FAIL_FIRST = $null } },
+    @{ Name = 'test-first in the shell, off given'; Shell = @{ FLEET_PLAN_TEST_FIRST = 'on'; FLEET_PLAN_FAIL_FIRST = $null }; Given = @('FLEET_PLAN_TEST_FIRST=off'); During = @{ FLEET_PLAN_TEST_FIRST = 'off'; FLEET_PLAN_FAIL_FIRST = $null }; After = @{ FLEET_PLAN_TEST_FIRST = 'on'; FLEET_PLAN_FAIL_FIRST = $null } },
+    @{ Name = 'neither in the shell, nothing given'; Shell = @{ FLEET_PLAN_TEST_FIRST = $null; FLEET_PLAN_FAIL_FIRST = $null }; Given = @(); During = @{ FLEET_PLAN_TEST_FIRST = $null; FLEET_PLAN_FAIL_FIRST = $null }; After = @{ FLEET_PLAN_TEST_FIRST = $null; FLEET_PLAN_FAIL_FIRST = $null } },
+    @{ Name = 'neither in the shell, test-first on given'; Shell = @{ FLEET_PLAN_TEST_FIRST = $null; FLEET_PLAN_FAIL_FIRST = $null }; Given = @('FLEET_PLAN_TEST_FIRST=on'); During = @{ FLEET_PLAN_TEST_FIRST = 'on'; FLEET_PLAN_FAIL_FIRST = $null }; After = @{ FLEET_PLAN_TEST_FIRST = $null; FLEET_PLAN_FAIL_FIRST = $null } },
+    @{ Name = 'fail-first in the shell, nothing given'; Shell = @{ FLEET_PLAN_TEST_FIRST = $null; FLEET_PLAN_FAIL_FIRST = 'warn' }; Given = @(); During = @{ FLEET_PLAN_TEST_FIRST = $null; FLEET_PLAN_FAIL_FIRST = $null }; After = @{ FLEET_PLAN_TEST_FIRST = $null; FLEET_PLAN_FAIL_FIRST = 'warn' } },
+    @{ Name = 'fail-first in the shell, enforce given'; Shell = @{ FLEET_PLAN_TEST_FIRST = $null; FLEET_PLAN_FAIL_FIRST = 'warn' }; Given = @('FLEET_PLAN_FAIL_FIRST=enforce'); During = @{ FLEET_PLAN_TEST_FIRST = $null; FLEET_PLAN_FAIL_FIRST = 'enforce' }; After = @{ FLEET_PLAN_TEST_FIRST = $null; FLEET_PLAN_FAIL_FIRST = 'warn' } },
+    @{ Name = 'both in the shell, fail-first off given'; Shell = @{ FLEET_PLAN_TEST_FIRST = 'on'; FLEET_PLAN_FAIL_FIRST = 'warn' }; Given = @('FLEET_PLAN_FAIL_FIRST=off'); During = @{ FLEET_PLAN_TEST_FIRST = $null; FLEET_PLAN_FAIL_FIRST = 'off' }; After = @{ FLEET_PLAN_TEST_FIRST = 'on'; FLEET_PLAN_FAIL_FIRST = 'warn' } },
+    @{ Name = 'fail-first in the shell, test-first on given'; Shell = @{ FLEET_PLAN_TEST_FIRST = $null; FLEET_PLAN_FAIL_FIRST = 'warn' }; Given = @('FLEET_PLAN_TEST_FIRST=on'); During = @{ FLEET_PLAN_TEST_FIRST = 'on'; FLEET_PLAN_FAIL_FIRST = $null }; After = @{ FLEET_PLAN_TEST_FIRST = $null; FLEET_PLAN_FAIL_FIRST = 'warn' } }
+)
+$savedAllSettingEnv = Get-SettingEnvSnapshot
+try {
+    foreach ($case in $envCases) {
+        Set-SettingEnvSnapshot $case.Shell
+        try {
+            $previousCase = Set-BenchSettingEnvironment (ConvertTo-BenchSettings ([string[]]$case.Given))
+            $duringStart = Get-SettingEnvSnapshot
+            Restore-BenchSettingEnvironment $previousCase
+            $afterStart = Get-SettingEnvSnapshot
+        }
+        finally { Set-SettingEnvSnapshot $savedAllSettingEnv }
+        foreach ($name in 'FLEET_PLAN_TEST_FIRST', 'FLEET_PLAN_FAIL_FIRST') {
+            if ($duringStart[$name] -ne $case.During[$name]) { throw "During the start $name must be '$($case.During[$name])' ($($case.Name)), was '$($duringStart[$name])'." }
+            if ($afterStart[$name] -ne $case.After[$name]) { throw "After the start $name must be '$($case.After[$name])' ($($case.Name)), was '$($afterStart[$name])'." }
+        }
+    }
+}
+finally { Set-SettingEnvSnapshot $savedAllSettingEnv }
+Write-Host 'PASS: a setting not given is absent while the backend starts, and the shell values are back afterwards (both names, eight cases).' -ForegroundColor Green
+
+# Start-BenchBackend.ps1: the settings are checked before anything is stopped, set just before the process starts, and put back
+# in the finally block. Checked on the parsed script; the script is not run.
+$startPath = Join-Path $PSScriptRoot 'Start-BenchBackend.ps1'
+$startErrors = $null
+$startAst = [Management.Automation.Language.Parser]::ParseFile($startPath, [ref]$null, [ref]$startErrors)
+if ($startErrors.Count) { throw 'Start-BenchBackend.ps1 has syntax errors.' }
+$settingParam = $startAst.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Setting' }
+if (-not $settingParam -or $settingParam.StaticType -ne [string[]]) { throw 'Start-BenchBackend.ps1 must take -Setting as a string array.' }
+function Get-FirstCall([Management.Automation.Language.Ast]$Tree, [string]$Name) {
+    return @($Tree.FindAll({ param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq $Name }, $true) | Sort-Object { $_.Extent.StartOffset }) | Select-Object -First 1
+}
+$validateCall = Get-FirstCall $startAst 'ConvertTo-BenchSettings'
+$stopCall = Get-FirstCall $startAst 'Stop-BenchBackend'
+$setCall = Get-FirstCall $startAst 'Set-BenchSettingEnvironment'
+$restoreCall = Get-FirstCall $startAst 'Restore-BenchSettingEnvironment'
+$launchCall = Get-FirstCall $startAst 'Start-Process'
+if (-not $validateCall -or -not $stopCall -or -not $setCall -or -not $restoreCall -or -not $launchCall) { throw 'A settings call is missing from Start-BenchBackend.ps1.' }
+if ($validateCall.Extent.StartOffset -ge $stopCall.Extent.StartOffset) { throw 'The settings are not checked before the running backend is stopped.' }
+if (-not ($setCall.Extent.StartOffset -lt $launchCall.Extent.StartOffset -and $launchCall.Extent.StartOffset -lt $restoreCall.Extent.StartOffset)) { throw 'The settings must be set before the backend process starts.' }
+$tryBlocks = @($startAst.FindAll({ param($node) $node -is [Management.Automation.Language.TryStatementAst] -and $node.Finally }, $true))
+$restoreInFinally = @($tryBlocks | Where-Object { $restoreCall.Extent.StartOffset -ge $_.Finally.Extent.StartOffset -and $restoreCall.Extent.EndOffset -le $_.Finally.Extent.EndOffset })
+$setInTry = @($tryBlocks | Where-Object { $setCall.Extent.StartOffset -ge $_.Body.Extent.StartOffset -and $setCall.Extent.EndOffset -le $_.Body.Extent.EndOffset })
+if (-not $restoreInFinally.Count -or -not $setInTry.Count) { throw 'The settings must be set inside the try block and put back in its finally block.' }
+if ($startAst.Extent.Text -notmatch 'backend\.settings\.json' -or $startAst.Extent.Text -notmatch 'Benchmark backend up on port \$Port \(pid \$\(\$process\.Id\)\)\$settingText') { throw 'Start-BenchBackend.ps1 does not write the settings file or name the settings in its final line.' }
+if ($startAst.Extent.Text -notmatch 'port = \$Port; startedAtUtc = \$startedAtUtc; settings = \$settings') { throw 'The settings file must record the port and the start time as well as the settings.' }
+$stopBranch = $startAst.Find({ param($node) $node -is [Management.Automation.Language.IfStatementAst] -and $node.Clauses[0].Item1.Extent.Text -eq '$Stop' }, $true)
+if (-not $stopBranch -or $stopBranch.Clauses[0].Item2.Extent.Text -notmatch 'Remove-Item[^\n]*backend\.settings\.json') { throw '-Stop must remove the settings file of the backend it stops.' }
+Write-Host 'PASS: Start-BenchBackend.ps1 checks the settings first, sets them around the process start and puts them back; the settings file records the port, and -Stop removes it.' -ForegroundColor Green
+
+# Invoke-Bench.ps1: the label and the file's parameters, and the settings and arm reach run.json and summary.md.
+$armParam = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Arm' }
+$settingsFileParam = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'BackendSettingsFile' }
+if (-not $armParam -or -not $settingsFileParam) { throw 'Invoke-Bench.ps1 must take -Arm and -BackendSettingsFile.' }
+$armPattern = $armParam.Attributes | Where-Object { $_.TypeName.Name -eq 'ValidatePattern' } | ForEach-Object { $_.PositionalArguments[0].Value } | Select-Object -First 1
+if (-not $armPattern) { throw '-Arm must be checked with ValidatePattern.' }
+foreach ($good in 'test-first-on', 'Arm_1', ('a' * 40)) { if ($good -notmatch $armPattern) { throw "-Arm refused a valid label: $good" } }
+foreach ($bad in '', 'a b', ('a' * 41), 'arm.1', 'arm/1') { if ($bad -match $armPattern) { throw "-Arm accepted an invalid label: '$bad'" } }
+foreach ($pattern in 'Read-BackendSettings \$BackendSettingsFile \(\[Uri\]\$BaseUrl\)\.Port', 'Write-RunRecord \$batchStarted \$taskIds \$backendSettings', 'Settings: arm ') {
+    if ($ast.Extent.Text -notmatch $pattern) { throw "Invoke-Bench.ps1 is missing: $pattern" }
+}
+$readFunction = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Read-BackendSettings' }, $true)
+if (-not $readFunction) { throw 'Read-BackendSettings was not found.' }
+$script:warnings = @()
+function Write-Warn([string]$text) { $script:warnings += $text }
+Invoke-Expression $readFunction.Extent.Text
+$settingsScratch = Join-Path ([IO.Path]::GetTempPath()) ('agent-fleet-bench-settings-' + [Guid]::NewGuid().ToString('N'))
+try {
+    New-Item -ItemType Directory -Path $settingsScratch -Force | Out-Null
+    $none = Read-BackendSettings (Join-Path $settingsScratch 'missing.json') 8010
+    if ($null -ne $none -or $script:warnings.Count -ne 1) { throw 'A missing settings file must give null and one warning.' }
+    $script:warnings = @()
+    $emptyFile = Join-Path $settingsScratch 'empty.json'
+    '{ "port": 8010, "startedAtUtc": "2026-10-14T09:00:00.0000000Z", "settings": {} }' | Set-Content -LiteralPath $emptyFile -Encoding utf8
+    $empty = Read-BackendSettings $emptyFile 8010
+    if ($empty -isnot [System.Collections.IDictionary] -or $empty.Count -ne 0 -or $script:warnings.Count) { throw 'An empty settings object must give an empty dictionary without a warning.' }
+    $onFile = Join-Path $settingsScratch 'on.json'
+    '{ "port": 8010, "startedAtUtc": "2026-10-14T09:00:00.0000000Z", "settings": { "FLEET_PLAN_TEST_FIRST": "on" } }' | Set-Content -LiteralPath $onFile -Encoding utf8
+    $on = Read-BackendSettings $onFile 8010
+    if ($on['FLEET_PLAN_TEST_FIRST'] -ne 'on' -or $script:warnings.Count) { throw 'A recorded setting was not read back for the port the batch uses.' }
+    # A file for another port, a file with no port, an unknown name and malformed JSON are each refused: null and one warning.
+    foreach ($broken in '{ "port": 8010, "settings": { "FLEET_OTHER": "on" } }', '{ "port": 8010, "settings": ', '{ "port": 8011, "settings": { "FLEET_PLAN_TEST_FIRST": "on" } }', '{ "settings": { "FLEET_PLAN_TEST_FIRST": "on" } }') {
+        $script:warnings = @()
+        $brokenFile = Join-Path $settingsScratch ('broken-' + [Guid]::NewGuid().ToString('N') + '.json')
+        $broken | Set-Content -LiteralPath $brokenFile -Encoding utf8
+        if ($null -ne (Read-BackendSettings $brokenFile 8010) -or $script:warnings.Count -ne 1) { throw "A settings file that cannot be trusted must give null and one warning: $broken" }
+    }
+    # The reason is checked too: a file with no port and a file for another port are both refused, but for different reasons.
+    $script:warnings = @()
+    '{ "settings": {} }' | Set-Content -LiteralPath (Join-Path $settingsScratch 'no-port.json') -Encoding utf8
+    if ($null -ne (Read-BackendSettings (Join-Path $settingsScratch 'no-port.json') 8010) -or $script:warnings[0] -notlike '*does not say which port*') { throw 'A settings file with no port must be refused for that reason.' }
+    $script:warnings = @()
+    '{ "port": 8011, "settings": {} }' | Set-Content -LiteralPath (Join-Path $settingsScratch 'other-port.json') -Encoding utf8
+    if ($null -ne (Read-BackendSettings (Join-Path $settingsScratch 'other-port.json') 8010) -or $script:warnings[0] -notlike '*describes port 8011*') { throw 'A settings file for another port must be refused for that reason.' }
+    Write-Host 'PASS: the settings file is used only for the port the batch uses; another port, no port, an unknown name and malformed JSON give null and one warning.' -ForegroundColor Green
+
+    # run.json carries the arm and the settings; a batch with no label and no settings file records nulls.
+    $OutDir = Join-Path $settingsScratch 'run-on'
+    New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+    $script:fleetConfig = $null
+    $Arm = 'test-first-on'
+    Write-RunRecord ([datetime]::SpecifyKind([datetime]'2026-10-14T09:00:00', [DateTimeKind]::Utc)) @('lru-cache-tf') $on
+    $recorded = Get-Content -LiteralPath (Join-Path $OutDir 'run.json') -Raw | ConvertFrom-Json
+    if ($recorded.arm -ne 'test-first-on' -or $recorded.settings.FLEET_PLAN_TEST_FIRST -ne 'on') { throw 'run.json does not carry the arm and the backend settings.' }
+    $OutDir = Join-Path $settingsScratch 'run-null'
+    New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+    $Arm = $null
+    Write-RunRecord ([datetime]::SpecifyKind([datetime]'2026-10-14T09:00:00', [DateTimeKind]::Utc)) @('lru-cache-tf') $null
+    $unlabelled = Get-Content -LiteralPath (Join-Path $OutDir 'run.json') -Raw | ConvertFrom-Json
+    if ($null -ne $unlabelled.arm -or $null -ne $unlabelled.settings) { throw 'run.json must hold null for an arm and settings that were not given.' }
+    Write-Host 'PASS: the arm and the backend settings are read, and written to run.json (null when not given).' -ForegroundColor Green
+}
+finally {
+    if (Test-Path -LiteralPath $settingsScratch) {
+        $resolved = (Resolve-Path -LiteralPath $settingsScratch).Path
+        if ($resolved -ne $settingsScratch -or -not $resolved.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()), [StringComparison]::OrdinalIgnoreCase)) { throw 'Refusing cleanup outside the temporary folder.' }
+        Remove-Item -LiteralPath $resolved -Recurse -Force
+    }
+}

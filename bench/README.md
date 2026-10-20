@@ -45,6 +45,45 @@ one machine's batch at a time and leave the other machine alone while it runs:
 Use the same explicit task list and settings for before/after comparisons. A partial run does not provide a completion
 rate for tasks it never reached. Forcing standard tasks to `light` measures a harder workload than these small repairs.
 
+## Comparing a setting
+
+Two arms of the same tasks differ in one backend setting. Start-BenchBackend.ps1 gives the setting to the side backend when it
+starts, and each batch records it, so the arms can be told apart afterwards. Only FLEET_PLAN_TEST_FIRST (off or on) and
+FLEET_PLAN_FAIL_FIRST (off, warn or enforce) are accepted. A value the launching shell already holds for either name is not passed on: a name that is not given is removed from the backend's environment while it starts, and the shell gets its own value back afterwards.
+
+Test-first, the setting off against on:
+
+```powershell
+# arm 1: test-first off, on the original tasks
+.\bench\Start-BenchBackend.ps1 -Setting FLEET_PLAN_TEST_FIRST=off
+.\bench\Invoke-Bench.ps1 -Tasks lru-cache,slugify,semver-compare -Repeat 3 -Arm test-first-off
+
+# arm 2: test-first on, on the test-first copies of the same tasks
+.\bench\Start-BenchBackend.ps1 -Setting FLEET_PLAN_TEST_FIRST=on
+.\bench\Invoke-Bench.ps1 -Tasks lru-cache-tf,slugify-tf,semver-compare-tf -Repeat 3 -Arm test-first-on
+```
+
+The test-first copies (`lru-cache-tf`, `slugify-tf`, `semver-compare-tf`) start with a tests step, which runs only when
+FLEET_PLAN_TEST_FIRST is on. With the setting off that step can never pass, so run these tasks only in the "on" arm.
+
+Fail-first, the setting off against enforce, on the same tasks:
+
+```powershell
+.\bench\Start-BenchBackend.ps1 -Setting FLEET_PLAN_FAIL_FIRST=off
+.\bench\Invoke-Bench.ps1 -Tasks lru-cache,slugify,semver-compare -Repeat 3 -Arm fail-first-off
+
+.\bench\Start-BenchBackend.ps1 -Setting FLEET_PLAN_FAIL_FIRST=enforce
+.\bench\Invoke-Bench.ps1 -Tasks lru-cache,slugify,semver-compare -Repeat 3 -Arm fail-first-enforce
+```
+
+Keep these equal between the arms: the machines and models (the same fleet configuration), the tasks, `-Repeat`, and the other
+options (`-Tier`, `-Review`, `-AutoRetries`, `-TimeoutMinutes`). For a worker-only comparison, start both arms with `-NoHubModel`
+and run both with `-WorkerOnly`, as described above.
+
+Where the arm shows: `run.json` in the batch folder holds `arm` (the `-Arm` label, or null) and `settings` (what the backend was started with, or null when that is unknown). The settings come from `backend.settings.json` in the work folder, which records the port the backend started on and when it started. A batch uses that file only when its port is the one in `-BaseUrl`; otherwise it warns and records `settings` as null. `-Stop` removes the file, because the backend it describes is gone. `summary.md` has a "Settings" line near the top. The rows in `results.jsonl` do not carry the arm, and the fleet's import does not store it, so keep each arm's batch folder and import them one at a time.
+
+Each arm keeps the machines busy for about three hours. Run only one arm at a time on a machine: two arms on the same machine
+share its model and distort both. Starting an arm stops the backend of the previous one and replaces its settings file.
 ## Trying a candidate model
 
 `scripts\Test-CandidateModel.ps1` runs the benchmark tasks with one model on one worker, without changing your fleet:

@@ -8,7 +8,8 @@
     the plan is done or blocked, then runs the task's HIDDEN acceptance tests on what the fleet produced. A run is judged by
     those tests, not by the plan's own status. Results are written to -OutDir as results.jsonl, results.json and summary.md.
     run.json is written first: the batch's options and the machines and models it ran on (no addresses or paths), so the
-    results can be grouped by model when they are imported.
+    results can be grouped by model when they are imported. It also records the settings the backend was started with
+    (see Start-BenchBackend.ps1 -Setting) and the -Arm label, so that the arms of a comparison can be told apart.
 
     It needs a backend with ready machines. Use .\bench\Start-BenchBackend.ps1 for a separate one on port 8010.
 
@@ -28,11 +29,14 @@ param(
     [ValidateSet('auto', 'off')][string]$Review = 'auto',
     [switch]$WorkerOnly,
     [int]$AutoRetries = -1,
-    [ValidateSet('as-written', 'light', 'standard', 'heavy')][string]$Tier = 'as-written'
+    [ValidateSet('as-written', 'light', 'standard', 'heavy')][string]$Tier = 'as-written',
+    [string]$BackendSettingsFile,
+    [ValidatePattern('^[A-Za-z0-9_-]{1,40}$')][string]$Arm
 )
 
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\..\scripts\FleetCommon.ps1"
+. "$PSScriptRoot\BenchSettings.ps1"
 $tasksRoot = Join-Path $PSScriptRoot 'tasks'
 if (-not $OutDir) { $OutDir = Join-Path $PSScriptRoot ('results\' + (Get-Date -Format 'yyyyMMdd-HHmmss')) }
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
@@ -119,6 +123,34 @@ function Invoke-Hidden([string]$Project, [string]$HiddenDir, [string]$EvidenceDi
     return [pscustomobject]@{ Ok = ($ok -and $passed -gt 0); Passed = $passed; Failed = $failed; TimedOut = $timedOut; Summary = $summary }
 }
 
+# The settings the benchmark backend was started with (written by Start-BenchBackend.ps1). Returns an ordered dictionary, empty
+# when the backend had none, or $null when the file is missing, unreadable, or describes another port than this batch uses:
+# the batch then says so instead of guessing.
+function Read-BackendSettings([string]$Path, [int]$Port) {
+    if (-not (Test-Path -LiteralPath $Path)) {
+        Write-Warn 'The settings of the benchmark backend are unknown: its settings file was not found. run.json records them as null.'
+        return $null
+    }
+    try {
+        $document = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (-not ($document.PSObject.Properties.Name -contains 'port')) {
+            Write-Warn 'The settings of the benchmark backend are unknown: its settings file does not say which port the backend ran on. run.json records them as null.'
+            return $null
+        }
+        if ([int]$document.port -ne $Port) {
+            Write-Warn "The settings of the benchmark backend are unknown: its settings file describes port $($document.port), and this batch uses port $Port. run.json records them as null."
+            return $null
+        }
+        $pairs = @()
+        if ($document.settings) { foreach ($property in $document.settings.PSObject.Properties) { $pairs += "$($property.Name)=$($property.Value)" } }
+        return ConvertTo-BenchSettings $pairs
+    }
+    catch {
+        Write-Warn 'The settings of the benchmark backend are unknown: its settings file cannot be read. run.json records them as null.'
+        return $null
+    }
+}
+
 function Get-RunNodes {
     # Names and models only: the backend's address for a machine is never written to run.json. A failed call gives an
     # empty list instead of stopping the batch.
@@ -129,9 +161,11 @@ function Get-RunNodes {
     catch { return @() }
 }
 
-function Write-RunRecord([datetime]$Started, [string[]]$TaskIds) {
+function Write-RunRecord([datetime]$Started, [string[]]$TaskIds, $BackendSettings) {
     $record = [ordered]@{
         startedAtUtc = $Started.ToUniversalTime().ToString('o')
+        arm = $(if ($Arm) { $Arm } else { $null })
+        settings = $BackendSettings
         options = [ordered]@{
             tier = $Tier; repeat = $Repeat; workerOnly = [bool]$WorkerOnly; review = $Review
             autoRetries = $(if ($AutoRetries -ge 0) { $AutoRetries } else { $null })
@@ -263,7 +297,9 @@ $batchStarted = Get-Date
 $stopReason = ''
 $results = @()
 $taskIds = @(Get-TaskIds)
-Write-RunRecord $batchStarted $taskIds
+if (-not $BackendSettingsFile) { $BackendSettingsFile = Join-Path (Join-Path ([IO.Path]::GetTempPath()) 'agent-fleet-bench') 'backend.settings.json' }
+$backendSettings = Read-BackendSettings $BackendSettingsFile ([Uri]$BaseUrl).Port
+Write-RunRecord $batchStarted $taskIds $backendSettings
 Write-Host ("Run caps: task timeout {0} min; no-progress stop {1}." -f $TimeoutMinutes, $(if ($NoProgressMinutes -gt 0) { "$NoProgressMinutes min" } else { 'off' }))
 foreach ($id in $taskIds) {
     for ($run = 1; $run -le $Repeat; $run++) {
@@ -295,6 +331,8 @@ $lines = @()
 $lines += "# Benchmark results ($n runs, $(Get-Date -Format 'yyyy-MM-dd HH:mm'))"
 $lines += ''
 $lines += "Backend $BaseUrl; steps $(if ($Tier -eq 'as-written') { 'at the tiers specified by each task' } else { "all at the $Tier tier" }); second opinion $Review; $(if ($WorkerOnly) { 'worker only' } else { 'hub rescue allowed' }); automatic retries $(if ($AutoRetries -ge 0) { $AutoRetries } else { 'default' }); task timeout $TimeoutMinutes min; no-progress stop $(if ($NoProgressMinutes -gt 0) { "$NoProgressMinutes min" } else { 'off' })."
+$settingsText = if ($null -eq $backendSettings) { 'unknown' } elseif ($backendSettings.Count) { (@($backendSettings.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', ') } else { 'none set' }
+$lines += "Settings: arm $(if ($Arm) { $Arm } else { 'not given' }); backend $settingsText."
 $lines += ''
 $lines += '| task | run | plan | hidden tests | minutes | minutes per round | asleep minutes | rounds | stalled | rung | retries | reviews failed | parked causes | models |'
 $lines += '|---|---|---|---|---:|---:|---:|---:|---|---:|---:|---:|---|---|'
