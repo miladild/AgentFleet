@@ -69,6 +69,7 @@ internal static class HubFileSystemTools
 
     public static async Task<string> WriteFileAsync(string path, string content, CancellationToken cancellationToken)
     {
+        if (HubFrozenTestScope.Current?.Refusal(path) is { } frozenRefusal) return frozenRefusal;
         string resolved = ResolvePath(path);
         if (File.Exists(resolved) && await File.ReadAllTextAsync(resolved, cancellationToken) == content)
         {
@@ -95,6 +96,7 @@ internal static class HubFileSystemTools
         bool? replaceAll,
         CancellationToken cancellationToken)
     {
+        if (HubFrozenTestScope.Current?.Refusal(path) is { } frozenRefusal) return frozenRefusal;
         string resolved = ResolvePath(path);
         if (!File.Exists(resolved))
         {

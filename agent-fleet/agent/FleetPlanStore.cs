@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -168,6 +169,50 @@ internal sealed partial class FleetPlanStore
             return null;
         }
     }
+
+    // The accepted bytes of a frozen test file, named by their SHA-256 (upper case hex), so a restore never depends on the hub copy.
+    internal string SaveFrozenContent(string planId, byte[] bytes)
+    {
+        if (!IsValidId(planId)) throw new ArgumentException("Invalid plan id.", nameof(planId));
+        string hash = Convert.ToHexString(SHA256.HashData(bytes));
+        string folder = FrozenContentDirectory(planId);
+        string path = Path.Combine(folder, hash);
+        string temporary = path + ".tmp";
+        lock (_lock)
+        {
+            Directory.CreateDirectory(folder);
+            File.WriteAllBytes(temporary, bytes);
+            File.Move(temporary, path, overwrite: true);
+        }
+
+        return hash;
+    }
+
+    // A stored copy is trusted only when its bytes still hash to its name; anything else is treated as absent.
+    internal byte[]? ReadFrozenContent(string planId, string sha256)
+    {
+        if (!IsValidId(planId) || sha256.Length != 64 || !sha256.All(character => character is >= '0' and <= '9' or >= 'A' and <= 'F'))
+        {
+            return null;
+        }
+
+        string path = Path.Combine(FrozenContentDirectory(planId), sha256);
+        lock (_lock)
+        {
+            try
+            {
+                if (!File.Exists(path)) return null;
+                byte[] bytes = File.ReadAllBytes(path);
+                return Convert.ToHexString(SHA256.HashData(bytes)) == sha256 ? bytes : null;
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                return null;
+            }
+        }
+    }
+
+    private string FrozenContentDirectory(string planId) => Path.Combine(_directory, planId + ".frozen");
 
     internal void SaveWorkerBaseline(string planId, int stepId, int attempt, string machine, IReadOnlyDictionary<string, string> hashes)
     {

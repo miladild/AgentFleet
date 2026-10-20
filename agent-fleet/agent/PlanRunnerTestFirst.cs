@@ -115,7 +115,8 @@ internal sealed partial class PlanRunner
             }
 
             string local = Path.Combine(plan.WorkingDirectory!, relative.Replace('/', Path.DirectorySeparatorChar));
-            if (File.Exists(local)) entries.Add(new PlanFrozenTestFile(relative, Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(local)))));
+            // The accepted bytes are kept before the set is recorded, so a set never names content that is not stored.
+            if (File.Exists(local)) entries.Add(new PlanFrozenTestFile(relative, _store.SaveFrozenContent(plan.Id, File.ReadAllBytes(local))));
         }
 
         if (entries.Count == 0 || string.IsNullOrWhiteSpace(step.Verify)) return;
@@ -130,6 +131,77 @@ internal sealed partial class PlanRunner
     {
         if (_testFirstMode != TestFirstMode.On || plan.FrozenTests is not { Count: > 0 }) return;
         restoredNow.AddRange(await workspace.RestoreFrozenTestsAsync(cancellationToken));
+    }
+
+    // A step that ran on the hub has no worker copy to restore: its frozen files are checked in the project folder itself. A file
+    // that differs is rewritten from the stored accepted bytes, and a file with no verified copy fails the round.
+    private void RestoreHubFrozenTests(PlanRecord plan, List<string> restoredNow)
+    {
+        foreach ((PlanFrozenTestFile frozen, string full) in HubFrozenFiles(plan))
+        {
+            if (FrozenFileMatches(full, frozen.Sha256)) continue;
+            byte[]? accepted = _store.ReadFrozenContent(plan.Id, frozen.Sha256);
+            if (accepted is null)
+            {
+                throw new FrozenTestsUnrestorableException($"The fixed test file {frozen.Path} was changed and could not be put back: " +
+                    "no verified accepted copy is kept for it. Change the code, not the test.");
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+            File.WriteAllBytes(full, accepted);
+            restoredNow.Add(frozen.Path);
+        }
+    }
+
+    // The hub copy of each frozen file is put back from the accepted bytes before a worker is staged, so the worker copies the
+    // accepted test. A file with no verified copy is left as it is: the worker restore still refuses a copy that does not match.
+    private void HealFrozenHubCopies(PlanRecord plan)
+    {
+        foreach ((PlanFrozenTestFile frozen, string full) in HubFrozenFiles(plan))
+        {
+            if (FrozenFileMatches(full, frozen.Sha256)) continue;
+            byte[]? accepted = _store.ReadFrozenContent(plan.Id, frozen.Sha256);
+            if (accepted is null) continue;
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+                File.WriteAllBytes(full, accepted);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                _logger.LogWarning(exception, "Could not put the accepted copy of frozen test {Path} back in the plan folder.", frozen.Path);
+            }
+        }
+    }
+
+    // The frozen files of the plan as it is in the store now, each with its full path in the project folder.
+    private IEnumerable<(PlanFrozenTestFile Frozen, string Full)> HubFrozenFiles(PlanRecord plan)
+    {
+        PlanRecord current = _store.Get(plan.Id) ?? plan;
+        if (_testFirstMode != TestFirstMode.On || current.FrozenTests is not { Count: > 0 } || string.IsNullOrWhiteSpace(current.WorkingDirectory))
+        {
+            return [];
+        }
+
+        string root = Path.GetFullPath(current.WorkingDirectory);
+        return current.FrozenTests.SelectMany(set => set.Files)
+            .Select(frozen => (frozen, Path.GetFullPath(Path.Combine(root, frozen.Path.Replace('/', Path.DirectorySeparatorChar)))))
+            .ToArray();
+    }
+
+    private static bool FrozenFileMatches(string full, string sha256) =>
+        File.Exists(full) && Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(full))) == sha256;
+
+    // The hub's file tools refuse to change the frozen files of a plan step that runs on the hub, as the worker's tools do.
+    private IDisposable? HubFrozenScopeFor(PlanRecord plan)
+    {
+        PlanRecord current = _store.Get(plan.Id) ?? plan;
+        if (_testFirstMode != TestFirstMode.On || current.FrozenTests is not { Count: > 0 } || string.IsNullOrWhiteSpace(current.WorkingDirectory))
+        {
+            return null;
+        }
+
+        return HubFrozenTestScope.Push(current.WorkingDirectory, WorkerWorkspaceManager.FrozenFilesOf(current));
     }
 
     // The implementation step is accepted only when every frozen command runs, finds tests and passes in the step's workspace. Each

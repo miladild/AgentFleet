@@ -408,20 +408,31 @@ each acceptance decision as a `test-first` event with its outcome and counts. Ac
 rest of the plan, as described below.
 
 Freezing. When a tests step is accepted, the test files it changed are recorded with their SHA-256 hashes, together
-with that step's check command. From then on, in every later step, the worker's file tools refuse to write, edit,
-move or delete those files, and the refusal says to change the code, not the test. Before each check, the runner
-compares the frozen files in the worker workspace with the accepted hashes and puts back from the hub copy any file
-that a command changed or deleted. The model is told in its next round which files were put back, and the run log
-records one `frozen-tests` event per round that froze or restored something. The sync from the worker to the hub copy never
-carries a frozen file, so the hub copy stays the accepted one. When a plan is staged again, a frozen file that differs
-from the hub copy is replaced by it, even when no sync record exists.
+with that step's check command. From then on, in every later step, the file tools refuse to write, edit,
+move or delete those files, and the refusal says to change the code, not the test. This holds on the worker, and on
+the hub when the step runs there (a plan run on the hub alone, or a step the hub takes over after its worker failed).
+Before each check, the runner compares the frozen files in the worker workspace (or in the project folder, for a step
+that runs on the hub) with the accepted hashes and puts back any file that a command changed or deleted. The model is
+told in its next round which files were put back, and the run log records one `frozen-tests` event per round that
+froze or restored something. The sync from the worker to the hub copy never carries a frozen file, so the hub copy stays
+the accepted one. When a plan is staged again, a frozen file whose hub copy differs from the accepted hash is put back
+from the stored copy first, even when no sync record exists.
+
+The accepted bytes are kept in the plan's storage: a folder next to the plan file, named after the plan id with the
+suffix `.frozen`, holding one file per accepted content, named by its SHA-256. A stored copy is trusted only while its
+bytes still hash to its name. A plan frozen before this was added has no stored copy: the worker restore then checks the
+hub copy against the hash as before, and on the hub a changed frozen file fails the round, because nothing is left to put
+back. Commands run on the hub (run_command, run_git_command) cannot be refused; a change they make to a frozen file is
+detected and put back before the check and before the implementation step's frozen run.
+Moving a whole folder that holds a frozen file is not refused on the worker or on the hub (the tools refuse exact file paths): the file
+is then missing from its place before the check, so it is put back, and the moved copy stays where it went.
 
 Implementation rule. The first ordinary step after a tests step that names a non-test code file is that set's
 implementation step. After its own check passes, the frozen command runs in the worker workspace, and the step is
 accepted only when that command finds tests and exits successfully. Otherwise the step is sent back with the output
 and the message that the fixed tests still fail, or did not run. Other steps keep only their own checks. With the
 setting off, nothing is frozen and no frozen command runs. When several tests steps name the same implementation step, every one of their commands must pass; a
-command that appears more than once runs once. A step that runs without a worker workspace, such as a plan run on the hub alone or a step handed to the hub after its worker could not finish it, gets no refusal and no restore.
+command that appears more than once runs once. A step that runs without a worker workspace, such as a plan run on the hub alone or a step handed to the hub after its worker could not finish it, gets the same refusal, restore and frozen run in the project folder.
 
 ### Disputing a frozen test
 

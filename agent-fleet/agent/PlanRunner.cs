@@ -1172,6 +1172,7 @@ internal sealed partial class PlanRunner
                     using Activity? checkActivity = FleetTelemetry.StartPlanCheck(plan.Id, step.Id, attempt, round, rung,
                         model.Machine, model.ModelNode);
                     if (model.Workspace is not null) await RestoreFrozenTestsAsync(plan, model.Workspace, restoredNow, cancellationToken);
+                    else RestoreHubFrozenTests(plan, restoredNow);
                     CheckRun run = model.Workspace is null
                         ? await RunCheckWithRepairsAsync(plan, step, attempt, tier, rung, round, model, cancellationToken)
                         : await RunWithReconnectsAsync(
@@ -1192,6 +1193,7 @@ internal sealed partial class PlanRunner
                     if (result.Done && ImplementationSetsFor(plan, step) is { Count: > 0 } frozenSets)
                     {
                         if (model.Workspace is not null) await RestoreFrozenTestsAsync(plan, model.Workspace, restoredNow, cancellationToken);
+                        else RestoreHubFrozenTests(plan, restoredNow);
                         if (await FrozenTestsRefusalAsync(plan, frozenSets, cancellationToken) is { } frozenRefusal)
                             result = new StepCompletion(false, frozenRefusal, frozenRefusal, result.Restored);
                     }
@@ -1274,6 +1276,12 @@ internal sealed partial class PlanRunner
                         failure = $"Worker workspace unavailable: verification or sync failed on {model.Machine}: {exception.Message}";
                     }
                     result = new StepCompletion(false, failure, failure);
+                }
+                catch (FrozenTestsUnrestorableException exception) when (model.Workspace is null)
+                {
+                    // A hub round whose fixed test cannot be put back fails at once: the check would otherwise judge the wrong test.
+                    _logger.LogWarning("Plan {PlanId} step {StepId}: {Message}", plan.Id, step.Id, exception.Message);
+                    result = new StepCompletion(false, exception.Message, exception.Message);
                 }
                 finally
                 {
@@ -2953,6 +2961,7 @@ internal sealed partial class PlanRunner
                 }
 
                 stagingWorkerWorkspace = true;
+                HealFrozenHubCopies(plan);
                 worker = await _workerWorkspaces.StageAsync(plan, step, machine, attemptCancellation.Token);
                 stagingWorkerWorkspace = false;
                 try
@@ -2981,6 +2990,7 @@ internal sealed partial class PlanRunner
                 ? _journal.Push(new FleetRequestIdentity(contextId, runId, "plan-runner", FleetPlanContext.StepTaskId(plan.Id, step.Id)))
                 : null;
             StepAgentReply reply;
+            using IDisposable? hubScope = worker is null ? HubFrozenScopeFor(plan) : null;
             using (IDisposable? workerScope = worker?.Enter())
             {
                 bool addStepGuidance = conversation.RepairMessage is null &&

@@ -169,7 +169,8 @@ internal sealed partial class PlanRunner
         var diff = new StringBuilder();
         foreach (var write in writes)
         {
-            string after = Convert.ToHexString(SHA256.HashData(write.Bytes));
+            // The corrected bytes are kept before the hash that names them is recorded.
+            string after = _store.SaveFrozenContent(plan.Id, write.Bytes);
             _store.AmendFrozenFile(plan.Id, write.StepId, write.Path, after);
             amended.Add(new { path = write.Path, before = write.Before, after });
             diff.Append(write.Path).Append('\n');
