@@ -12,7 +12,7 @@ namespace AgentFleet.Tests;
 /// </summary>
 public sealed class FrozenTestFilesTests : PlanTestBase
 {
-    private const string FixedMessage = "This test file is fixed for this plan; change the code, not the test. If you believe the test is wrong, say so in your reply.";
+    private const string FixedMessage = "This test file is fixed for this plan; change the code, not the test. If you believe the test is wrong, call dispute_test with the test and the reason.";
     private const string HubCopy = "hub copy\n";
 
     private sealed class MemoryFiles : IWorkerWorkspaceFileAccess

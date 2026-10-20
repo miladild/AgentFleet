@@ -39,7 +39,8 @@ internal static class FleetHarness
                 PlanRunnerToolPolicy.Offers(
                     toolName,
                     fromRunner: options?.AdditionalProperties?.ContainsKey(FleetRoutingChatClient.RunnerTierKey) == true,
-                    role: FleetRoutingChatClient.RunnerRole(options)) &&
+                    role: FleetRoutingChatClient.RunnerRole(options),
+                    disputeOffered: FleetRoutingChatClient.DisputeOffered(options)) &&
                 ContextTools.ShouldOffer(
                     toolName,
                     hasContext: journal.Current is not null,

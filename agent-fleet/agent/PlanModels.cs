@@ -169,7 +169,7 @@ internal static class PlanAutoRetry
 
     // The causes a pass from the best state may fix: the ladder was spent, nothing changed, the step ran out of time. An
     // environment, a broken check or an unknown failure is not made better by trying again.
-    public static bool Retryable(string cause) => cause is "check-kept-failing" or "no-change" or "working-time" or "review";
+    public static bool Retryable(string cause) => cause is "check-kept-failing" or "no-change" or "working-time" or "review" or "test-suspect";
 }
 
 internal sealed record PlanStep(
@@ -243,6 +243,8 @@ internal static class RunEventKind
     public const string StepRetried = "step-retried";
     public const string PlanNeedsAttention = "plan-needs-attention";
     public const string FrozenTests = "frozen-tests";
+    public const string TestDisputed = "test-disputed";
+    public const string TestRuling = "test-ruling";
 }
 
 /// <summary>

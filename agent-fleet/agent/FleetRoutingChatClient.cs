@@ -32,6 +32,9 @@ internal sealed class FleetRoutingChatClient : IChatClient
     /// <summary>Set on a plan runner request that is not carrying out a step (see IStepAgent.OpenSession(role)).</summary>
     public const string RunnerRoleKey = "fleet.runner.role";
 
+    /// <summary>Set on a plan runner request whose step may dispute a frozen test (the dispute_test tool is offered only then).</summary>
+    public const string RunnerDisputeKey = "fleet.runner.dispute";
+
     private readonly IChatClient _triageClient;
     private readonly IReadOnlyList<FleetRouteTarget> _targets;
     private readonly IReadOnlyList<FleetRouteTarget> _textTargets;
@@ -482,12 +485,17 @@ internal sealed class FleetRoutingChatClient : IChatClient
             ? role
             : null;
 
+    internal static bool DisputeOffered(ChatOptions? options) =>
+        options?.AdditionalProperties is { } properties &&
+        properties.TryGetValue(RunnerDisputeKey, out object? value) &&
+        value is true;
+
     // The key is for this class only; do not pass it on to the model's API.
     private static ChatOptions? StripRunnerKey(ChatOptions? options)
     {
         if (options?.AdditionalProperties is null ||
             (!options.AdditionalProperties.ContainsKey(RunnerTierKey) && !options.AdditionalProperties.ContainsKey(RunnerMachineKey) &&
-             !options.AdditionalProperties.ContainsKey(RunnerRoleKey)))
+             !options.AdditionalProperties.ContainsKey(RunnerRoleKey) && !options.AdditionalProperties.ContainsKey(RunnerDisputeKey)))
         {
             return options;
         }
@@ -496,6 +504,7 @@ internal sealed class FleetRoutingChatClient : IChatClient
         cleaned.AdditionalProperties!.Remove(RunnerTierKey);
         cleaned.AdditionalProperties.Remove(RunnerMachineKey);
         cleaned.AdditionalProperties.Remove(RunnerRoleKey);
+        cleaned.AdditionalProperties.Remove(RunnerDisputeKey);
         return cleaned;
     }
 

@@ -63,6 +63,11 @@ internal static class RepairLadder
                 rung = to;
                 inRung = 0;
             }
+            else if (runEvent.Kind == RunEventKind.TestRuling && runEvent.FailureClass == nameof(TestRulingKind.TestWrong))
+            {
+                // A frozen test was corrected on the record: the rounds spent against it were not the code's fault.
+                inRung = 0;
+            }
             else if (IsVerdictRound(runEvent))
             {
                 total++;

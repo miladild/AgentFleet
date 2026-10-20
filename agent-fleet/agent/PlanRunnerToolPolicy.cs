@@ -9,7 +9,7 @@ internal static partial class PlanRunnerToolPolicy
     {
         "read_file", "write_file", "edit_file", "list_directory", "find_files", "search_files",
         "project_overview", "move_file", "delete_file", "run_command", "run_git_command",
-        "get_plan", "search_context", "report_blocker"
+        "get_plan", "search_context", "report_blocker", TestDispute.Tool
     };
 
     /// <summary>The role of a model asked whether a step's check is broken.</summary>
@@ -26,7 +26,10 @@ internal static partial class PlanRunnerToolPolicy
     /// <summary>The role of a model that did not write a step's code and is asked whether the step's requirements are met.</summary>
     public const string StepReviewRole = "step-review";
 
-    // The reviewer reads. It cannot run a command, write a file or call anything else.
+    /// <summary>The role of a model that did not write a disputed frozen test or the code under it, and rules on it.</summary>
+    public const string TestRulingRole = "test-ruling";
+
+    // The reviewer and the ruler read. They cannot run a command, write a file or call anything else.
     private static readonly HashSet<string> ReviewTools = new(StringComparer.Ordinal)
     {
         "read_file", "list_directory", "find_files", "search_files", "project_overview"
@@ -35,18 +38,25 @@ internal static partial class PlanRunnerToolPolicy
     /// <summary>
     /// Whether a tool is offered on a plan runner request. report_blocker is for a model carrying out a step and
     /// propose_check for the auditor; neither is offered in chat, and the auditor gets nothing that changes anything.
+    /// dispute_test is offered only to a model carrying out an ordinary step, and only when the caller says a frozen
+    /// test is in play (disputeOffered), so with the setting off the list is the same as before.
     /// </summary>
-    public static bool Offers(string toolName, bool fromRunner, string? role)
+    public static bool Offers(string toolName, bool fromRunner, string? role, bool disputeOffered = false)
     {
-        if (toolName is "report_blocker" or "propose_check")
+        if (fromRunner && role is StepReviewRole or TestRulingRole)
         {
-            // The reviewer is offered neither: it answers in words.
-            return fromRunner && role != StepReviewRole && (role == CheckAuditRole ? toolName == "propose_check" : toolName == "report_blocker");
+            // The reviewer and the ruler are offered the read-only tools and nothing that answers for the step.
+            return ReviewTools.Contains(toolName);
         }
 
-        if (fromRunner && role == StepReviewRole)
+        if (toolName == TestDispute.Tool)
         {
-            return ReviewTools.Contains(toolName);
+            return fromRunner && role is null && disputeOffered;
+        }
+
+        if (toolName is "report_blocker" or "propose_check")
+        {
+            return fromRunner && (role == CheckAuditRole ? toolName == "propose_check" : toolName == "report_blocker");
         }
 
         // A model carrying out a step is shown the tools it may call and no others. It used to be shown all nineteen (web search,
@@ -99,6 +109,13 @@ internal static partial class PlanRunnerToolPolicy
             return ReviewTools.Contains(toolName)
                 ? null
                 : $"Blocked: `{toolName}` is not available while a step is being reviewed. You can read files and answer in words.";
+        }
+
+        if (role == TestRulingRole)
+        {
+            return ReviewTools.Contains(toolName)
+                ? null
+                : $"Blocked: `{toolName}` is not available while a disputed test is being ruled on. You can read files and answer in words.";
         }
 
         if (role == CheckAuditRole)

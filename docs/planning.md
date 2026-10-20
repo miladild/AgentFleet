@@ -423,6 +423,42 @@ and the message that the fixed tests still fail, or did not run. Other steps kee
 setting off, nothing is frozen and no frozen command runs. When several tests steps name the same implementation step, every one of their commands must pass; a
 command that appears more than once runs once. A step that runs without a worker workspace, such as a plan run on the hub alone or a step handed to the hub after its worker could not finish it, gets no refusal and no restore.
 
+### Disputing a frozen test
+
+A frozen test can be wrong: a test that builds the wrong value, for example. With `FLEET_PLAN_TEST_FIRST=on`, the
+model carrying out an ordinary step can say so with the `dispute_test` tool, naming the test and the specific
+assertion or value that is wrong and what the task says instead. The tool is offered only on ordinary steps while
+frozen tests exist. A refused file write now says to call `dispute_test` rather than to say so in the reply.
+
+When the check then fails and every failing name is a test in a frozen file, a second model that did not write
+either side rules on it. The ruling is read-only and has a time limit. A build or compiler error is never disputed,
+and neither is a failure in a test the step added itself. The ruler answers one of two ways:
+
+- `TEST-WRONG`, with the complete corrected file or files. A correction is written to the hub copy only when the
+  guard accepts it: each corrected file must be a frozen file that holds a failing test, must not be empty or more
+  than twice its old size plus 4000 characters, must keep every test name the old file had, except the names
+  the failure names, and must not remove more lines than the larger of 10 and 30 percent of the old file's lines
+  (a changed line counts as one removed line). A file over 4000 lines is too large to compare and is refused. The
+  new hash replaces the old one in the plan, and the step continues against the corrected tests. Its repair rung
+  gets its rounds back once.
+- `CODE-WRONG`, with a paragraph saying what the code must do to satisfy the test. The paragraph goes into the next
+  round's feedback. The test stands, and the step gets no second ruling.
+
+A ruler that cannot be reached, a ruling that times out, a reply with no clear verdict, and a correction the guard
+refuses all change nothing, and the repair ladder goes on as usual. Every ruling is recorded in the run log as a
+`test-ruling` event with its verdict, the ruler's machine and, for a correction, the old and new SHA-256 hash of each
+file. The event also holds the changed lines of each corrected file: each removed line prefixed `- ` and each added
+line prefixed `+ `, cut at 3000 characters after the hashes. A ruling is a model's judgement, so a corrected test is
+worth a look by a person, and the event shows what changed.
+
+A step may ask the ruler at most twice without a usable answer: a reply with no clear verdict, or a correction the
+guard refuses. Each such call is logged, and a third dispute on the step is not ruled on (reason `too-many-asks`).
+An unreachable ruler does not count.
+
+If the step still fails after a dispute about frozen tests that was not corrected, it is parked with cause
+`test-suspect` and the note "The model says the fixed test <names> is wrong, and the fixed tests still fail: look at
+the test." That cause is retried automatically, as `check-kept-failing` is. Every other park cause is unchanged.
+
 ### Requirements and coverage
 
 The planner also lists the requirements the task states in `requirements`: one per must or should clause, named

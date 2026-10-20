@@ -47,6 +47,9 @@ internal interface IStepSession
 
     void ConfigurePrompt(PlanStepPromptData? data) { }
 
+    /// <summary>Whether the next message may offer dispute_test (an ordinary step while frozen tests are in play). Off by default.</summary>
+    void OfferDispute(bool offered) { }
+
     Task<StepAgentReply> SendAsync(string message, string tier, string? machine, CancellationToken cancellationToken);
 }
 
@@ -82,8 +85,11 @@ internal sealed class FleetStepSession(AIAgent agent, string? role = null) : ISt
         new PlanEnvironmentContextProvider(), new PlanFilesContextProvider(), new PlanContinuationContextProvider()).Build();
     private AgentSession? _session;
     private PlanStepPromptData? _promptData;
+    private bool _offerDispute;
 
     public void ConfigurePrompt(PlanStepPromptData? data) => _promptData = data;
+
+    public void OfferDispute(bool offered) => _offerDispute = offered;
 
     public bool HasHistory { get; private set; }
 
@@ -101,6 +107,11 @@ internal sealed class FleetStepSession(AIAgent agent, string? role = null) : ISt
         if (!string.IsNullOrWhiteSpace(role))
         {
             properties[FleetRoutingChatClient.RunnerRoleKey] = role;
+        }
+
+        if (_offerDispute && string.IsNullOrWhiteSpace(role))
+        {
+            properties[FleetRoutingChatClient.RunnerDisputeKey] = true;
         }
 
         var options = new ChatClientAgentRunOptions(new ChatOptions
@@ -922,6 +933,7 @@ internal sealed partial class PlanRunner
         IStepSession? session = continuingSession;
         string? conversationWorkspace = null;
         RoundOutcome? lastRound = null;
+        string? lastCheckOutput = null;
         string? lastUnverified = null;
         bool lastReviewFailed = false;
         string? handover = null;
@@ -994,6 +1006,8 @@ internal sealed partial class PlanRunner
                     round: new RoundContext(conversation, rung, round, repairMessage, brief), limit: LimitFor(plan, worked));
                 roundActivity?.SetTag("fleet.model_node", model.ModelNode);
                 roundActivity?.SetTag("fleet.workspace_node", model.Machine);
+                if (_testFirstMode == TestFirstMode.On && !IsTestsStep(step) && model.Dispute is { } dispute)
+                    RecordDispute(plan, step, attempt, tier, model, rung, round, dispute);
                 if ((!IsTestsStep(step) || _testFirstSnapshotAttempts.TryAdd($"{plan.Id}:{step.Id}", true)) && model.WorkBefore is { } firstSnapshot)
                     _failFirstSnapshots.TryAdd($"{plan.Id}:{step.Id}", firstSnapshot);
                 if (model.Machine is not null)
@@ -1400,6 +1414,7 @@ internal sealed partial class PlanRunner
                 }
 
                 lastRound = outcome;
+                lastCheckOutput = result.Output ?? result.Message;
                 // A round that left fewer failing names than any round before it is progress, and progress is not charged to
                 // the rung (RepairLadder.Improved): the step climbs when rounds stop paying off, not because it used three.
                 int? failingNow = outcome.Signature.Items.Count > 0 ? outcome.Signature.Items.Count : null;
@@ -1421,6 +1436,23 @@ internal sealed partial class PlanRunner
                 }
 
                 roundsTotal++;
+                // An independent model rules on a frozen test the step disputed. A corrected test gives the rung its rounds back.
+                TestRulingOutcome ruling = NoRuling;
+                if (_testFirstMode == TestFirstMode.On && model.Dispute is not null)
+                {
+                    ruling = await RuleOnDisputeAsync(plan, step, attempt, tier, model, change.Files, result.Output ?? result.Message,
+                        rung, round, cancellationToken);
+                    plan = _store.Get(plan.Id) ?? plan;
+                }
+
+                if (ruling.TestCorrected)
+                {
+                    // A checkpoint taken before the correction holds the old test, and undoing a later round would put it back.
+                    roundsInRung = 0;
+                    best = null;
+                }
+
+                if (ruling.Note is not null) lastFailure = $"{ruling.Note}\n\n{lastFailure}";
                 // A worker that ran out of time on a round is not given the step's remaining time again when the hub may take it
                 // over: the rescue starts at once (a worker-only plan keeps its worker, as before).
                 bool hubRung = HubRungAvailable(step, hub, hubAllowed, model.ModelNode);
@@ -1471,6 +1503,14 @@ internal sealed partial class PlanRunner
             ParkStep(plan, step, $"Its reviewer was not satisfied after {rounds}.{kept}", "review",
                 reason: $"Step {step.Id} ({step.Title}) passed its check but a reviewer that did not write the code still found its requirements unmet after {rounds}: " +
                         $"every rung of the repair ladder had its rounds.{kept} The reviewer's findings are in the run log. Retry it, or skip it if the reviewer is wrong.");
+            return false;
+        }
+
+        if (SuspectTestNames(plan, step, lastCheckOutput) is { } suspects)
+        {
+            string note = $"The model says the fixed test {suspects} is wrong, and the fixed tests still fail: look at the test.";
+            ParkStep(plan, step, note, "test-suspect",
+                reason: $"Step {step.Id} ({step.Title}) did not pass its check after {rounds}. {note}{kept}");
             return false;
         }
 
@@ -2952,6 +2992,7 @@ internal sealed partial class PlanRunner
 
                 // The brief is read by the prompt providers, so what a tests step adds to it has to be in the data they get.
                 string? stepBrief = IsTestsStep(step) ? PlanTestsStepPrompt.Append(conversation.Brief, plan.Requirements) : conversation.Brief;
+                conversation.Session.OfferDispute(!IsTestsStep(step) && _testFirstMode == TestFirstMode.On && plan.FrozenTests is { Count: > 0 });
                 conversation.Session.ConfigurePrompt(conversation.RepairMessage is null
                     ? new PlanStepPromptData(plan, step, attempt, lastFailure, fileContext, parallelGroup,
                         contextId is not null, retryRoute, worker is not null, machine, worker?.Platform,
@@ -2975,7 +3016,8 @@ internal sealed partial class PlanRunner
             result = new ModelAttemptResult(step.Id, summary, null, ShouldVerify: true, Workspace: worker, Machine: machine,
                 ModelNode: modelMachine ?? ViaNode(summary) ?? _journal?.ActualNode, ToolCalls: reply.ToolCalls,
                 EditToolCalled: reply.EditToolCalled, LoopGuardNotes: reply.LoopGuardNotes, WorkBefore: work,
-                Blocker: CheckAudit.BlockerFrom(reply));
+                Blocker: CheckAudit.BlockerFrom(reply),
+                Dispute: TestDispute.DisputeFrom(reply));
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -3203,7 +3245,8 @@ internal sealed partial class PlanRunner
         Exception? FailureException = null,
         IStepSession? Session = null,
         ModelBlocker? Blocker = null,
-        bool TimedOut = false);
+        bool TimedOut = false,
+        TestDisputeCall? Dispute = null);
 
     /// <summary>
     /// What is worth saying again to a model whose step failed, from the step and the failure: used by the first prompt of

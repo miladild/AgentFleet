@@ -296,6 +296,35 @@ internal sealed partial class FleetPlanStore
             FrozenTests = (current.FrozenTests ?? []).Where(existing => existing.StepId != set.StepId).Append(set).ToList()
         });
 
+    /// <summary>
+    /// Replaces the hash of one frozen test file in one step's set, after a ruling corrected it. Returns the hash it had, or null
+    /// when the plan has no such set or the set has no such file (then nothing changes).
+    /// </summary>
+    public string? AmendFrozenFile(string id, int stepId, string path, string newSha256)
+    {
+        // Looked up first, so an amendment that matches nothing leaves the saved plan (and its update time) as it is.
+        PlanFrozenTestFile? found = Get(id)?.FrozenTests?.FirstOrDefault(set => set.StepId == stepId)?.Files
+            .FirstOrDefault(file => string.Equals(file.Path, path, StringComparison.Ordinal));
+        if (found is null)
+        {
+            return null;
+        }
+
+        Update(id, current =>
+        {
+            PlanFrozenTestSet set = current.FrozenTests!.First(candidate => candidate.StepId == stepId);
+            PlanFrozenTestSet amended = set with
+            {
+                Files = set.Files.Select(file => string.Equals(file.Path, path, StringComparison.Ordinal) ? file with { Sha256 = newSha256 } : file).ToList()
+            };
+            return current with
+            {
+                FrozenTests = current.FrozenTests!.Select(candidate => candidate.StepId == stepId ? amended : candidate).ToList()
+            };
+        });
+        return found.Sha256;
+    }
+
     /// <summary>Changes the next route only while the step is waiting or has failed.</summary>
     public PlanRecord? SelectMachine(string id, int stepId, string? machine, out string? error)
     {

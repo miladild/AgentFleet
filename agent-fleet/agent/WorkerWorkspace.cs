@@ -193,7 +193,7 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
     private static readonly Regex SecretEnvironmentFile = new(@"^\.env(?:\..*)?$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     // Said to the model when a file tool is asked to change a test file that an accepted tests step fixed for the plan.
-    internal const string FrozenTestRefusal = "This test file is fixed for this plan; change the code, not the test. If you believe the test is wrong, say so in your reply.";
+    internal const string FrozenTestRefusal = "This test file is fixed for this plan; change the code, not the test. If you believe the test is wrong, call dispute_test with the test and the reason.";
 
     // Windows reserves these names, with or without an extension, trailing dots and spaces ignored.
     private static readonly Regex WindowsDeviceName = new(@"^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);

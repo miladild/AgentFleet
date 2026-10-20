@@ -283,6 +283,9 @@ Dictionary<string, string> toolDescriptions = new(StringComparer.Ordinal)
         "kind is check_cannot_pass (the check never exits, the shell cannot parse it, it names a program or file that does not exist), environment, missing_dependency or other. " +
         "evidence is the exact line of output, or the name of the file, that shows it, copied as it is. It is only a hint: the fleet reads the check's own output and decides, and never takes your word alone. " +
         "Do not call it because tests fail or the work is hard; a failing test or a compiler error is your work to fix. At most once per turn.",
+    ["dispute_test"] = "For a model carrying out a plan step whose approved check fails on a frozen test: says that a test an earlier step fixed is wrong. " +
+        "tests names the test or tests you believe are wrong, as the check printed them; reason is the specific assertion or value that is wrong and what the task says instead. " +
+        "The fleet asks another model to rule on it, and the test is corrected only if that model agrees; until then keep to the test as it stands. Do not call it for a failure in code you wrote, a compiler error, or a test you added yourself.",
     ["propose_check"] = "For the auditor of a step's check only: proposes the command that replaces a broken check. check is one line that finishes by itself; why is one sentence. " +
         "The fleet tests the proposal against its own rules and may refuse it.",
     ["search_context"] = "Searches this conversation's durable record (messages, tool calls and results, decisions, checks) for a word or phrase and returns matching entries with their event ids. Use it to recover something said or done earlier instead of guessing.",
@@ -439,6 +442,13 @@ AITool proposePlanTool = AIFunctionFactory.Create(
 
 // Offered to plan step models (report_blocker) and to the check auditor (propose_check) only, by PlanRunnerToolPolicy.Offers.
 // Neither does anything itself: the runner reads the call from the model's reply and decides.
+AITool disputeTestTool = AIFunctionFactory.Create(
+    ([Description("The frozen test or tests the model believes are wrong, as the check printed them")] string tests,
+        [Description("The specific assertion or value that is wrong, and what the task says instead")] string reason) =>
+        "Noted. The fleet asks another model to rule on the test after your turn; carry on with the step.",
+    name: "dispute_test",
+    description: toolDescriptions["dispute_test"]);
+
 AITool reportBlockerTool = AIFunctionFactory.Create(
     ([Description("check_cannot_pass, environment, missing_dependency or other")] string kind,
         [Description("The exact output line or file name that shows it, copied as it is")] string evidence) =>
@@ -487,6 +497,7 @@ AITool validateDiagramTool = AIFunctionFactory.Create(
     ("propose_plan", proposePlanTool),
     ("get_plan", getPlanTool),
     ("report_blocker", reportBlockerTool),
+    ("dispute_test", disputeTestTool),
     ("propose_check", proposeCheckTool),
     ("validate_diagram", validateDiagramTool),
     ("record_decision", recordDecisionTool),

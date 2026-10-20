@@ -118,6 +118,11 @@ internal sealed class FakeStepSession(FakeStepAgent owner, int index) : IStepSes
 
     public void ConfigurePrompt(PlanStepPromptData? data) => _promptData = data;
 
+    /// <summary>What the runner offered dispute_test in each message, oldest first.</summary>
+    public List<bool> DisputeOffers { get; } = [];
+
+    public void OfferDispute(bool offered) => DisputeOffers.Add(offered);
+
     public int Index => index;
 
     public List<FakeStepCall> Messages { get; } = [];
@@ -240,6 +245,9 @@ public sealed partial class PlanRunnerTests : PlanTestBase
     private sealed class FakeWorkerWorkspaceManager(WorkerWorkspaceRecoveryAnalysis recovery) : IWorkerWorkspaceManager
     {
         public List<string> StagedMachines { get; } = [];
+
+        /// <summary>The plan and step each staging was given, oldest first (the plan as it was when the round started).</summary>
+        public List<(PlanRecord Plan, PlanStep Step)> StagedWith { get; } = [];
         public List<FakeWorkerWorkspaceSession> Sessions { get; } = [];
         public int ResumeCalls { get; private set; }
         public bool WorkerAnswers { get; set; } = true;
@@ -282,6 +290,7 @@ public sealed partial class PlanRunnerTests : PlanTestBase
         public Task<IWorkerWorkspaceSession> StageAsync(PlanRecord plan, PlanStep step, string machine, CancellationToken cancellationToken)
         {
             StagedMachines.Add(machine);
+            StagedWith.Add((plan, step));
             Methods.Add(nameof(StageAsync));
             return Task.FromResult<IWorkerWorkspaceSession>(CreateSession(machine));
         }
