@@ -474,7 +474,8 @@ the test." That cause is retried automatically, as `check-kept-failing` is. Ever
 
 The planner also lists the requirements the task states in `requirements`: one per must or should clause, named
 edge case or example, each written so a test can check it. A plan whose goal runs to two or more sentences, or is
-over 160 characters, is refused without a list, and so is a blank or repeated requirement. The fleet numbers the
+over 160 characters, is refused without a list, and so is a blank or repeated requirement (repeats are compared without
+case, spacing or punctuation), a list of more than 40 requirements, and a requirement longer than 200 characters. The fleet numbers the
 list itself (R1, R2, ...); any ids the planner sends are ignored. Plans from a plan file or the API carry no list.
 
 The tests step is told the list and asked to start each test's name with the ids of the requirements it covers,
@@ -491,6 +492,11 @@ The limits: an id counts only in a name the fleet reads as a test name (JavaScri
 counts. A file whose names cannot be read at all is searched as plain text, comments included, and the record says
 so. Ids match as whole tokens (R3 is not R30). Coverage shows that a test is named after a requirement, not that
 the test really checks it; that judgement stays with the fail-first run and the implementation steps.
+A skipped test (JavaScript `skip` or `todo`, a C# `Skip` or `Ignore` attribute, a Python skip decorator) is read but
+covers nothing, and a file whose only tests are skipped is not searched as text. In C# only a method with a test
+attribute (Fact, Theory, Test, TestMethod, TestCase) counts, so a helper method named after an id does not; a file with
+no such attribute at all is read as before. In Python a docstring is not read as code. A Go test counts when its name
+starts with `Test` and the id follows it, as in `TestR3_rejects_zero`.
 
 ## Reading what happened overnight
 

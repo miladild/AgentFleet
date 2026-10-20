@@ -226,6 +226,52 @@ public sealed partial class PlanRunnerTests
         finally { FailFirstTests.DeleteTree(project); }
     }
 
+    // A skipped test in the last tests step runs nothing, so the requirement it names is refused as uncovered.
+    [Fact]
+    public async Task Test_first_A_skipped_test_does_not_cover_a_requirement_on_the_last_tests_step()
+    {
+        string project = NewGitProject();
+        try
+        {
+            var step = new PlanStepInput("Write limit tests", "Reject zero", ["tests/a.test.mjs"], "node --test", "standard", Kind: "tests");
+            var setup = WorkerPlan(project, step);
+            Store.Update(setup.Plan.Id, current => current with { Requirements = PlanRequirementsOf("Rejects zero") });
+            var fake = new FakeStepAgent((_, _, _) =>
+            {
+                Directory.CreateDirectory(Path.Combine(project, "tests"));
+                File.WriteAllText(Path.Combine(project, "tests", "a.test.mjs"), "test.skip(\"R1: rejects zero\", () => {});\n");
+                return Task.FromResult("Done.");
+            });
+            await TestFirstRunner(new WriterAgent(fake), new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], [])),
+                setup.Options, setup.Health, () => TestsFailOutput).RunPlanAsync(setup.Plan.Id, default).WaitAsync(TimeSpan.FromSeconds(60));
+            PlanRecord after = Store.Get(setup.Plan.Id)!;
+            Assert.NotEmpty(AcceptedOutcomes(after));
+            Assert.DoesNotContain("accepted", AcceptedOutcomes(after));
+            Assert.Empty(after.Requirements![0].CoveredBy);
+        }
+        finally { FailFirstTests.DeleteTree(project); }
+    }
+
+    // A declared test file whose name the file system refuses must not stop the decision: the other files still count.
+    [Fact]
+    public async Task Test_first_A_test_file_name_the_file_system_refuses_is_skipped_and_the_others_still_count()
+    {
+        string project = NewGitProject();
+        try
+        {
+            var step = new PlanStepInput("Write limit tests", "Reject zero", ["tests/bad<name>.cs", "tests/LimitTests.cs"], "dotnet test", "standard", Kind: "tests");
+            var setup = WorkerPlan(project, step);
+            Store.Update(setup.Plan.Id, current => current with { Requirements = PlanRequirementsOf("Rejects zero") });
+            var fake = WritesTestRounds(project, "tests/LimitTests.cs", "[Fact] public void R1_rejects_zero() { }\n");
+            await TestFirstRunner(new WriterAgent(fake), new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], [])),
+                setup.Options, setup.Health, () => TestsFailOutput).RunPlanAsync(setup.Plan.Id, default).WaitAsync(TimeSpan.FromSeconds(60));
+            PlanRecord after = Store.Get(setup.Plan.Id)!;
+            Assert.Equal(PlanStatus.Done, after.Status);
+            Assert.Equal(["R1_rejects_zero"], after.Requirements![0].CoveredBy);
+        }
+        finally { FailFirstTests.DeleteTree(project); }
+    }
+
     [Fact]
     public async Task Test_first_Off_does_not_check_requirement_coverage()
     {

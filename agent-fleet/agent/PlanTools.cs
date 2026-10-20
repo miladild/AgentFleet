@@ -996,9 +996,16 @@ internal sealed partial class PlanTools
                 break;
         }
 
-        return texts.Where(text => string.IsNullOrWhiteSpace(text) || !IsPlaceholder(text)).Select(text => text.Trim()).ToList();
+        // A requirement that is only a placeholder is dropped; one that starts with "None of" is a requirement. A line break
+        // would split the item in the markdown export and the prompt, so it becomes a space.
+        return texts.Where(text => string.IsNullOrWhiteSpace(text) || !IsWholePlaceholder(text))
+            .Select(text => text.ReplaceLineEndings(" ").Trim()).ToList();
     }
 
+    private static readonly string[] RequirementFields = ["text", "description", "requirement", "statement", "title", "name"];
+
+    // The text of one requirement: a string, or an object whose text is in a known field or else in its first string field
+    // other than an id. A model names that field in many ways, and a requirement it wrote must not be refused as empty.
     private static string RequirementText(JsonElement item)
     {
         if (item.ValueKind == JsonValueKind.String)
@@ -1006,11 +1013,24 @@ internal sealed partial class PlanTools
             return item.GetString() ?? string.Empty;
         }
 
-        foreach (string field in new[] { "text", "description" })
+        if (item.ValueKind != JsonValueKind.Object)
         {
-            if (item.ValueKind == JsonValueKind.Object && item.TryGetProperty(field, out JsonElement value) && value.ValueKind == JsonValueKind.String)
+            return string.Empty;
+        }
+
+        foreach (string field in RequirementFields)
+        {
+            if (item.TryGetProperty(field, out JsonElement value) && value.ValueKind == JsonValueKind.String)
             {
                 return value.GetString() ?? string.Empty;
+            }
+        }
+
+        foreach (JsonProperty property in item.EnumerateObject())
+        {
+            if (!string.Equals(property.Name, "id", StringComparison.OrdinalIgnoreCase) && property.Value.ValueKind == JsonValueKind.String)
+            {
+                return property.Value.GetString() ?? string.Empty;
             }
         }
 
@@ -1193,8 +1213,12 @@ internal sealed partial class PlanTools
     private static bool IsPlaceholder(string item)
     {
         string text = item.Trim().TrimEnd('.').ToLowerInvariant();
-        return text is "" or "-" or "n/a" or "na" or "no" or "nothing" or "null" || text.StartsWith("none", StringComparison.Ordinal);
+        return IsWholePlaceholder(item) || text.StartsWith("none", StringComparison.Ordinal);
     }
+
+    // The placeholders that are the whole item. "None of the inputs may be mutated" is a requirement, not a placeholder.
+    private static bool IsWholePlaceholder(string item) =>
+        item.Trim().TrimEnd('.').ToLowerInvariant() is "" or "-" or "n/a" or "na" or "no" or "nothing" or "null" or "none";
 
     /// <summary>
     /// The project folder of the plan step a conversation carries out, from the plan marker in the step's prompt.
