@@ -14,11 +14,11 @@
   <ItemGroup>
     <!-- 0.0.6 or later: 0.0.5 (pulled in by the AG-UI hosting preview) hid every server tool call in a run once the chat had
          used a web UI tool, so the chat drew no card for them. -->
-    <PackageReference Include="AGUI.Abstractions" Version="0.0.6" />
-    <PackageReference Include="AGUI.Server" Version="0.0.6" />
+    <PackageReference Include="AGUI.Abstractions" Version="1.0.1" />
+    <PackageReference Include="AGUI.Server" Version="1.0.1" />
     <PackageReference Include="HtmlAgilityPack" Version="1.11.72" />
-    <PackageReference Include="Microsoft.Agents.AI.Hosting.AGUI.AspNetCore" Version="1.19.0-preview.260822.1" />
-    <PackageReference Include="Microsoft.Agents.AI.OpenAI" Version="1.19.0" />
+    <PackageReference Include="Microsoft.Agents.AI.Hosting.AGUI.AspNetCore" Version="1.25.0-preview.261014.1" />
+    <PackageReference Include="Microsoft.Agents.AI.OpenAI" Version="1.25.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />
     <!-- Microsoft.Data.Sqlite 9.0.0 brings SQLitePCLRaw 2.1.10, whose bundled SQLite has a published advisory
          (CVE-2025-6965, fixed from 2.1.12). The direct reference raises only the native library. -->
@@ -28,7 +28,7 @@
     <PackageReference Include="OllamaSharp" Version="5.4.30" />
     <PackageReference Include="OpenTelemetry" Version="1.15.3" />
     <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.15.3" />
-    <PackageReference Include="OpenAI" Version="2.10.0" />
+    <PackageReference Include="OpenAI" Version="2.14.0" />
     <PackageReference Include="Serilog.AspNetCore" Version="9.0.0" />
     <PackageReference Include="Serilog.Sinks.File" Version="6.0.0" />
     <PackageReference Include="SSH.NET" Version="2026.0.0" />

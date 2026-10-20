@@ -1,3 +1,5 @@
+#pragma warning disable MAAI001
+
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -1060,8 +1062,9 @@ internal sealed class FleetContextStore : AgentSessionStore
         }
     }
 
-    public override async ValueTask SaveSessionAsync(AIAgent agent, string sessionStoreId, AgentSession session, CancellationToken cancellationToken = default)
+    public override async ValueTask SaveSessionAsync(AIAgent agent, AgentSessionStoreKey key, AgentSession session, CancellationToken cancellationToken = default)
     {
+        string sessionStoreId = key.SessionId;
         JsonElement serialized = await agent.SerializeSessionAsync(session, JsonOptions, cancellationToken);
         string agentName = agent.Name ?? agent.GetType().Name;
         lock (_writeLock)
@@ -1088,8 +1091,9 @@ internal sealed class FleetContextStore : AgentSessionStore
     }
 
     // Like the framework's own stores, a session that was never saved comes back as a fresh one.
-    public override async ValueTask<AgentSession> GetSessionAsync(AIAgent agent, string sessionStoreId, CancellationToken cancellationToken = default)
+    public override async ValueTask<AgentSession?> GetSessionAsync(AIAgent agent, AgentSessionStoreKey key, CancellationToken cancellationToken = default)
     {
+        string sessionStoreId = key.SessionId;
         string agentName = agent.Name ?? agent.GetType().Name;
         string? state;
         using (SqliteConnection connection = OpenConnection())
@@ -1110,7 +1114,7 @@ internal sealed class FleetContextStore : AgentSessionStore
         return await agent.DeserializeSessionAsync(document.RootElement, JsonOptions, cancellationToken);
     }
 
-    public override ValueTask DeleteSessionAsync(AIAgent agent, string sessionStoreId, CancellationToken cancellationToken = default)
+    public ValueTask DeleteSessionAsync(AIAgent agent, string sessionStoreId, CancellationToken cancellationToken = default)
     {
         string agentName = agent.Name ?? agent.GetType().Name;
         lock (_writeLock)

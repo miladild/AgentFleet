@@ -1,3 +1,5 @@
+#pragma warning disable MAAI001
+
 using System.Net;
 using System.Runtime.CompilerServices;
 using System.Text;
