@@ -593,7 +593,8 @@ public sealed partial class PlanRunnerTests
 
             PlanRecord after = Store.Get(setup.Plan.Id)!;
             Assert.Equal(1, budget.Calls);
-            Assert.Equal(changedElsewhere, File.ReadAllText(Path.Combine(project, "tests", "LimitTests.cs")));
+            // The correction was not written; the step then runs on the hub, which puts the accepted bytes back before the check.
+            Assert.DoesNotContain("CORRECTED", File.ReadAllText(Path.Combine(project, "tests", "LimitTests.cs")), StringComparison.Ordinal);
             Assert.Equal("Refused", Assert.Single(after.Events!, e => e.Kind == RunEventKind.TestRuling).FailureClass);
             Assert.Equal(Sha256Upper(WrongTest), Assert.Single(Assert.Single(after.FrozenTests!).Files).Sha256);
         }
