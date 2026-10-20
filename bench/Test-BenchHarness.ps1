@@ -447,3 +447,34 @@ finally {
         Remove-Item -LiteralPath $resolved -Recurse -Force
     }
 }
+
+# The task copy check ignores how a folder was checked out: the same text with LF or CRLF line endings is the same file, and a
+# changed byte is still seen.
+$tasksParseErrors = $null
+$tasksAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'Test-BenchTasks.ps1'), [ref]$null, [ref]$tasksParseErrors)
+if ($tasksParseErrors.Count) { throw 'Test-BenchTasks.ps1 has syntax errors.' }
+foreach ($digestFunction in 'Get-ContentDigest', 'Get-TreeDigest') {
+    $definition = $tasksAst.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $digestFunction }, $true)
+    if (-not $definition) { throw "$digestFunction was not found in Test-BenchTasks.ps1." }
+    Invoke-Expression $definition.Extent.Text
+}
+$digestScratch = Join-Path ([IO.Path]::GetTempPath()) ('bench-digest-' + [Guid]::NewGuid().ToString('N'))
+try {
+    foreach ($folder in 'lf', 'crlf', 'other') { New-Item -ItemType Directory -Path (Join-Path $digestScratch $folder) -Force | Out-Null }
+    [IO.File]::WriteAllBytes((Join-Path $digestScratch 'lf\a.js'), [Text.Encoding]::UTF8.GetBytes("one`ntwo`n"))
+    [IO.File]::WriteAllBytes((Join-Path $digestScratch 'crlf\a.js'), [Text.Encoding]::UTF8.GetBytes("one`r`ntwo`r`n"))
+    [IO.File]::WriteAllBytes((Join-Path $digestScratch 'other\a.js'), [Text.Encoding]::UTF8.GetBytes("one`ntwo!`n"))
+    $lfDigest = Get-TreeDigest (Join-Path $digestScratch 'lf')
+    $crlfDigest = Get-TreeDigest (Join-Path $digestScratch 'crlf')
+    $otherDigest = Get-TreeDigest (Join-Path $digestScratch 'other')
+    if ($lfDigest['a.js'] -ne $crlfDigest['a.js']) { throw 'The same text with LF and CRLF line endings must have the same digest.' }
+    if ($lfDigest['a.js'] -eq $otherDigest['a.js']) { throw 'Different text must have a different digest.' }
+    Write-Host 'PASS: the task copy check ignores line endings and still sees a changed byte.' -ForegroundColor Green
+}
+finally {
+    if (Test-Path -LiteralPath $digestScratch) {
+        $resolvedDigest = (Resolve-Path -LiteralPath $digestScratch).Path
+        if ($resolvedDigest -ne $digestScratch -or -not $resolvedDigest.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()), [StringComparison]::OrdinalIgnoreCase)) { throw 'Refusing cleanup outside the temporary folder.' }
+        Remove-Item -LiteralPath $resolvedDigest -Recurse -Force
+    }
+}

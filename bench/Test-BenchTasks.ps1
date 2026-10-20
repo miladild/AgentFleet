@@ -23,13 +23,27 @@ $bad = 0
 
 function Test-IsTestPath([string]$Path) { return ($Path -match '(^|/)test/' -or $Path -match '\.test\.js$') }
 
+# SHA-256 of a file's content with CRLF read as LF: how a folder was checked out (line-ending conversion) must not decide
+# whether two copies are the same.
+function Get-ContentDigest([string]$Path) {
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $stream = New-Object IO.MemoryStream
+    for ($index = 0; $index -lt $bytes.Length; $index++) {
+        if ($bytes[$index] -eq 13 -and $index + 1 -lt $bytes.Length -and $bytes[$index + 1] -eq 10) { continue }
+        $stream.WriteByte($bytes[$index])
+    }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($sha.ComputeHash($stream.ToArray())).Replace('-', '') }
+    finally { $sha.Dispose(); $stream.Dispose() }
+}
+
 # SHA-256 of every file under a folder, keyed by its path relative to that folder.
 function Get-TreeDigest([string]$Root) {
     $map = @{}
     if (-not (Test-Path -LiteralPath $Root)) { return $map }
     $base = (Resolve-Path -LiteralPath $Root).Path
     foreach ($file in Get-ChildItem -LiteralPath $base -Recurse -File -Force) {
-        $map[$file.FullName.Substring($base.Length).TrimStart('\')] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+        $map[$file.FullName.Substring($base.Length).TrimStart('\')] = Get-ContentDigest $file.FullName
     }
     return $map
 }
