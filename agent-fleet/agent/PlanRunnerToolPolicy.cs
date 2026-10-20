@@ -125,6 +125,12 @@ internal static partial class PlanRunnerToolPolicy
                 : $"Blocked: `{toolName}` is not available while a check is being audited. You can read files and call propose_check.";
         }
 
+        // dispute_test is offered to an ordinary step only (Offers); a call from any other role is refused, not run.
+        if (toolName == TestDispute.Tool && role is not null)
+        {
+            return $"Blocked: `{toolName}` is not offered in this role.";
+        }
+
         if (!AllowedTools.Contains(toolName))
         {
             return $"Blocked by unattended plan policy: `{toolName}` is outside the local project tool set. Use project file tools and local checks; external and custom tools need a separate user-approved action.";

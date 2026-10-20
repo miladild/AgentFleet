@@ -74,4 +74,10 @@ public sealed class DisputeToolPolicyTests
         Assert.NotNull(PlanRunnerToolPolicy.Refusal("write_file", null, PlanRunnerToolPolicy.TestRulingRole));
         Assert.Null(PlanRunnerToolPolicy.Refusal("read_file", null, PlanRunnerToolPolicy.TestRulingRole));
     }
+
+    [Fact]
+    public void The_test_writer_is_refused_dispute_test()
+    {
+        Assert.NotNull(PlanRunnerToolPolicy.Refusal(TestDispute.Tool, null, PlanRunnerToolPolicy.TestWriterRole));
+    }
 }

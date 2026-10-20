@@ -136,7 +136,7 @@ public sealed class TestDisputeTests : PlanTestBase
     [InlineData("LimitTests.Rejects_over_limit", "Rejects_over_limit", true)]
     [InlineData("rejects over limit", "Rejects_over_limit", true)]
     [InlineData("Accepts_at_limit", "Rejects_over_limit", false)]
-    [InlineData("Rejects_over_limit_twice", "Rejects_over_limit", true)]
+    [InlineData("Rejects_over_limit_twice", "Rejects_over_limit", false)]
     [InlineData("Anything", "--", false)]
     [InlineData("", "Rejects_over_limit", false)]
     public void An_item_matches_a_test_name_when_it_equals_or_contains_it(string item, string name, bool expected)
@@ -375,5 +375,86 @@ public sealed class TestDisputeTests : PlanTestBase
         Assert.DoesNotContain(new string('t', 12001), prompt);
         Assert.Contains(new string('t', 11000), prompt);
         Assert.DoesNotContain(new string('o', 4001), prompt);
+    }
+
+    [Fact]
+    public void A_failing_test_the_step_added_is_not_a_frozen_test_when_its_name_only_contains_one()
+    {
+        TestFileText frozen = new("tests/LimitTests.cs", "public class LimitTests\n{\n    [Fact]\n    public void Rejects_zero() { }\n}\n");
+
+        TestRulingDue due = Due(output: "Failed LimitTests.Rejects_zero_negative [5 ms]", frozen: [frozen]);
+
+        Assert.False(due.Due);
+        Assert.Equal("not-a-frozen-test", due.Reason);
+    }
+
+    [Theory]
+    [InlineData("LimitTests.Rejects_zero_negative", "Rejects_zero", false)]
+    [InlineData("Limits.rejects_zero(value: 0)", "rejects_zero", true)]
+    [InlineData("Limits.rejects_zero [1 ms]", "rejects_zero", true)]
+    [InlineData("suite > rejects zero", "rejects zero", true)]
+    [InlineData("tests/test_limit.py::test_rejects_zero - AssertionError: 1 != 0", "test_rejects_zero", true)]
+    [InlineData("Tests.Größe_prüfen [2 ms]", "Größe_prüfen", true)]
+    [InlineData("Tests.Größe_prüfen_extra", "Größe_prüfen", false)]
+    public void A_name_matches_only_as_the_last_part_of_an_item(string item, string name, bool expected)
+    {
+        Assert.Equal(expected, TestDispute.Matches(item, name));
+    }
+
+    [Fact]
+    public void A_correction_may_not_drop_a_passing_frozen_test_only_because_a_longer_failing_name_contains_it()
+    {
+        TestFileText frozen = new("tests/LimitTests.cs",
+            "public class LimitTests\n{\n    [Fact]\n    public void Accepts_at_limit() { Assert.True(false); }\n\n" +
+            "    [Fact]\n    public void Rejects_over_limit() { }\n}\n");
+        string corrected = "public class LimitTests\n{\n    [Fact]\n    public void Accepts_at_limit() { Assert.True(true); }\n}\n";
+
+        string? reason = TestRuling.Guard([frozen], [new TestFileText("tests/LimitTests.cs", corrected)],
+            ["Failed LimitTests.Accepts_at_limit [1 ms]", "Failed LimitTests.Rejects_over_limit_twice [1 ms]"]);
+
+        Assert.NotNull(reason);
+        Assert.Contains("Rejects_over_limit", reason);
+    }
+
+    [Fact]
+    public void Two_file_blocks_for_the_same_path_are_no_verdict()
+    {
+        string reply = "VERDICT: TEST-WRONG\nFILE: tests/A.cs\n```\na\n```\nFILE: tests/A.cs\n```\nb\n```";
+
+        Assert.Equal(TestRulingKind.NoVerdict, TestRuling.Parse(reply).Kind);
+    }
+
+    [Theory]
+    [InlineData("`tests/LimitTests.cs`")]
+    [InlineData("\"tests/LimitTests.cs\"")]
+    [InlineData("'tests/LimitTests.cs'")]
+    public void A_file_path_in_backticks_or_quotes_is_read_as_the_path(string pathText)
+    {
+        string reply = "VERDICT: TEST-WRONG\nFILE: " + pathText + "\n```csharp\npublic class LimitTests { }\n```";
+
+        TestRulingVerdict verdict = TestRuling.Parse(reply);
+
+        Assert.Equal(TestRulingKind.TestWrong, verdict.Kind);
+        Assert.Equal("tests/LimitTests.cs", Assert.Single(verdict.Files).Path);
+    }
+
+    [Fact]
+    public void A_correction_identical_to_the_old_file_is_refused_as_changing_nothing()
+    {
+        string? reason = TestRuling.Guard(FrozenFiles, [Limit(LimitTestsText)], [RejectsFailure]);
+
+        Assert.NotNull(reason);
+        Assert.Contains("nothing", reason);
+    }
+
+    [Fact]
+    public void A_test_file_with_a_line_of_three_backticks_keeps_its_fence_in_the_prompt()
+    {
+        PlanRecord plan = NewPlan(Step("limit"));
+        const string content = "public class LimitTests\n{\n```\n    [Fact]\n    public void Rejects_over_limit() { }\n}\n";
+
+        string prompt = TestRuling.BuildPrompt(plan, plan.Steps[0], [new TestFileText("tests/LimitTests.cs", content)], RejectsFailure, "reason", []);
+
+        Assert.Contains("FILE: tests/LimitTests.cs" + Environment.NewLine + "````" + Environment.NewLine + content.TrimEnd() + Environment.NewLine + "````", prompt);
     }
 }

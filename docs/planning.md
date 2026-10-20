@@ -443,7 +443,9 @@ frozen tests exist. A refused file write now says to call `dispute_test` rather 
 
 When the check then fails and every failing name is a test in a frozen file, a second model that did not write
 either side rules on it. The ruling is read-only and has a time limit. A build or compiler error is never disputed,
-and neither is a failure in a test the step added itself. The ruler answers one of two ways:
+and neither is a failure in a test the step added itself. A failing line names a frozen test only when the test's name
+ends it (a parameter list or a duration after the name is allowed), so a longer name that starts with a frozen name is
+not that test. The ruler answers one of two ways:
 
 - `TEST-WRONG`, with the complete corrected file or files. A correction is written to the hub copy only when the
   guard accepts it: each corrected file must be a frozen file that holds a failing test, must not be empty or more
@@ -451,7 +453,8 @@ and neither is a failure in a test the step added itself. The ruler answers one 
   the failure names, and must not remove more lines than the larger of 10 and 30 percent of the old file's lines
   (a changed line counts as one removed line). A file over 4000 lines is too large to compare and is refused. The
   new hash replaces the old one in the plan, and the step continues against the corrected tests. Its repair rung
-  gets its rounds back once.
+  gets its rounds back once. A correction that is the same as the old file is refused, and so is one written over a frozen
+  file that changed while the ruler was working.
 - `CODE-WRONG`, with a paragraph saying what the code must do to satisfy the test. The paragraph goes into the next
   round's feedback. The test stands, and the step gets no second ruling.
 

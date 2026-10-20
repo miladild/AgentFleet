@@ -2989,6 +2989,8 @@ internal sealed partial class PlanRunner
             using IDisposable? scope = _journal is not null && contextId is not null
                 ? _journal.Push(new FleetRequestIdentity(contextId, runId, "plan-runner", FleetPlanContext.StepTaskId(plan.Id, step.Id)))
                 : null;
+            // dispute_test is offered to an ordinary step while frozen tests are in play, and a dispute from any other reply is not read.
+            bool disputeOffered = !IsTestsStep(step) && _testFirstMode == TestFirstMode.On && plan.FrozenTests is { Count: > 0 };
             StepAgentReply reply;
             using IDisposable? hubScope = worker is null ? HubFrozenScopeFor(plan) : null;
             using (IDisposable? workerScope = worker?.Enter())
@@ -3002,7 +3004,7 @@ internal sealed partial class PlanRunner
 
                 // The brief is read by the prompt providers, so what a tests step adds to it has to be in the data they get.
                 string? stepBrief = IsTestsStep(step) ? PlanTestsStepPrompt.Append(conversation.Brief, plan.Requirements) : conversation.Brief;
-                conversation.Session.OfferDispute(!IsTestsStep(step) && _testFirstMode == TestFirstMode.On && plan.FrozenTests is { Count: > 0 });
+                conversation.Session.OfferDispute(disputeOffered);
                 conversation.Session.ConfigurePrompt(conversation.RepairMessage is null
                     ? new PlanStepPromptData(plan, step, attempt, lastFailure, fileContext, parallelGroup,
                         contextId is not null, retryRoute, worker is not null, machine, worker?.Platform,
@@ -3027,7 +3029,7 @@ internal sealed partial class PlanRunner
                 ModelNode: modelMachine ?? ViaNode(summary) ?? _journal?.ActualNode, ToolCalls: reply.ToolCalls,
                 EditToolCalled: reply.EditToolCalled, LoopGuardNotes: reply.LoopGuardNotes, WorkBefore: work,
                 Blocker: CheckAudit.BlockerFrom(reply),
-                Dispute: TestDispute.DisputeFrom(reply));
+                Dispute: disputeOffered ? TestDispute.DisputeFrom(reply) : null);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {

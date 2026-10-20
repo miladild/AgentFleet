@@ -550,4 +550,74 @@ public sealed partial class PlanRunnerTests
         }
         finally { FailFirstTests.DeleteTree(project); }
     }
+
+    [Fact]
+    public async Task A_ruler_that_found_the_test_right_does_not_park_the_step_as_a_suspect_test()
+    {
+        string project = NewGitProject();
+        try
+        {
+            var setup = DisputePlan(project, TestsStep(), ImplementationStep("dotnet test"));
+            var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []));
+            var budget = new RulingBudget(1, _ => new StepAgentReply(CodeWrongRuling, 0, false));
+            var fake = DisputingImplementer(project, _ => true, budget);
+            await FrozenRunner(new RulingAgent(fake), workspaces, setup.Options, setup.Health, CheckReadsTheTestFile(project, "CORRECTED"))
+                .RunPlanAsync(setup.Plan.Id, default).WaitAsync(DisputeTimeLimit);
+
+            PlanRecord after = Store.Get(setup.Plan.Id)!;
+            Assert.Equal(1, budget.Calls);
+            Assert.Equal(0, budget.Violations);
+            Assert.Contains(after.Events!, e => e.Kind == RunEventKind.StepParked && e.FailureSignature == "check-kept-failing");
+            Assert.DoesNotContain(after.Events!, e => e.Kind == RunEventKind.StepParked && e.FailureSignature == "test-suspect");
+        }
+        finally { FailFirstTests.DeleteTree(project); }
+    }
+
+    [Fact]
+    public async Task A_frozen_file_changed_while_the_ruler_was_working_is_not_overwritten_by_the_correction()
+    {
+        string project = NewGitProject();
+        const string changedElsewhere = "public class LimitTests\n{\n    [Fact]\n    public void rejects_zero() { Assert.True(false); } // CHANGED ELSEWHERE\n}\n";
+        try
+        {
+            var setup = DisputePlan(project, TestsStep(), ImplementationStep("dotnet test"));
+            var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []));
+            var budget = new RulingBudget(1, _ =>
+            {
+                File.WriteAllText(Path.Combine(project, "tests", "LimitTests.cs"), changedElsewhere);
+                return new StepAgentReply(TestWrongRuling, 0, false);
+            });
+            var fake = DisputingImplementer(project, message => message == 0, budget);
+            await FrozenRunner(new RulingAgent(fake), workspaces, setup.Options, setup.Health, CheckReadsTheTestFile(project, "CORRECTED"))
+                .RunPlanAsync(setup.Plan.Id, default).WaitAsync(DisputeTimeLimit);
+
+            PlanRecord after = Store.Get(setup.Plan.Id)!;
+            Assert.Equal(1, budget.Calls);
+            Assert.Equal(changedElsewhere, File.ReadAllText(Path.Combine(project, "tests", "LimitTests.cs")));
+            Assert.Equal("Refused", Assert.Single(after.Events!, e => e.Kind == RunEventKind.TestRuling).FailureClass);
+            Assert.Equal(Sha256Upper(WrongTest), Assert.Single(Assert.Single(after.FrozenTests!).Files).Sha256);
+        }
+        finally { FailFirstTests.DeleteTree(project); }
+    }
+
+    [Fact]
+    public async Task A_dispute_on_a_step_that_was_not_offered_it_is_neither_recorded_nor_ruled_on()
+    {
+        string project = NewGitProject();
+        try
+        {
+            var setup = DisputePlan(project, ImplementationStep("dotnet test"));
+            var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []));
+            var budget = new RulingBudget(1, _ => new StepAgentReply(TestWrongRuling, 0, false));
+            var fake = DisputingImplementer(project, _ => true, budget);
+            await FrozenRunner(new RulingAgent(fake), workspaces, setup.Options, setup.Health, CheckReadsTheTestFile(project, "CORRECTED"))
+                .RunPlanAsync(setup.Plan.Id, default).WaitAsync(DisputeTimeLimit);
+
+            PlanRecord after = Store.Get(setup.Plan.Id)!;
+            Assert.Equal(0, budget.Calls);
+            Assert.DoesNotContain(after.Events!, e => e.Kind == RunEventKind.TestDisputed);
+            Assert.DoesNotContain(after.Events!, e => e.Kind == RunEventKind.TestRuling);
+        }
+        finally { FailFirstTests.DeleteTree(project); }
+    }
 }

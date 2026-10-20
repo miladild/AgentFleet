@@ -1,3 +1,6 @@
+using System.Text;
+using System.Text.RegularExpressions;
+
 namespace AgentFleet;
 
 /// <summary>What a step's model said with dispute_test: the frozen tests it believes are wrong, and the specific reason.</summary>
@@ -11,7 +14,7 @@ internal sealed record TestRulingDue(bool Due, string Reason);
 /// is ruled on by a model that did not write either side, but only when the failure is one the frozen tests show and nothing
 /// else: a build error is the code's fault, and a failure in a test the step added is not disputed at all.
 /// </summary>
-internal static class TestDispute
+internal static partial class TestDispute
 {
     public const string Tool = "dispute_test";
 
@@ -58,13 +61,16 @@ internal static class TestDispute
     }
 
     /// <summary>
-    /// Whether a failing item names a frozen test: ignoring case, punctuation and spaces, the item equals the name or
-    /// contains it. A name that has no letters or digits never matches.
+    /// Whether a failing item names a frozen test: the name's words (ignoring case and punctuation) are the last words of the
+    /// item, once the parameters or duration at its end and any message after " - " are left out. A name that is only the
+    /// start of a longer test name does not match, and a name with no letters or digits never matches.
     /// </summary>
     internal static bool Matches(string item, string testName)
     {
-        string name = Normalize(testName);
-        return name.Length > 0 && Normalize(item).Contains(name, StringComparison.Ordinal);
+        IReadOnlyList<string> name = Words(testName);
+        if (name.Count == 0) return false;
+        IReadOnlyList<string> words = Words(Identifier(item));
+        return words.Count >= name.Count && words.Skip(words.Count - name.Count).SequenceEqual(name);
     }
 
     internal static IReadOnlyList<string> TestNamesOf(TestFileText file) => RequirementCoverage.TestNames(file.Path, file.Text) ?? [];
@@ -73,5 +79,47 @@ internal static class TestDispute
     internal static IReadOnlyList<TestFileText> Holding(IReadOnlyList<TestFileText> files, IReadOnlyList<string> items) =>
         files.Where(file => TestNamesOf(file).Any(name => items.Any(item => Matches(item, name)))).ToArray();
 
-    private static string Normalize(string text) => new string(text.Where(char.IsLetterOrDigit).ToArray()).ToLowerInvariant();
+    // A failing item may end with a parameter list ("(value: 0)") or a duration ("[1 ms]"), or with the runner's message after " - ".
+    private static string Identifier(string item)
+    {
+        string text = TrimTrailingGroups(item.Trim());
+        int message = text.IndexOf(" - ", StringComparison.Ordinal);
+        return TrimTrailingGroups(message > 0 ? text[..message] : text);
+    }
+
+    private static string TrimTrailingGroups(string text)
+    {
+        string previous;
+        do
+        {
+            previous = text;
+            text = TrailingGroup().Replace(text, string.Empty).TrimEnd();
+        } while (text != previous);
+
+        return text;
+    }
+
+    private static IReadOnlyList<string> Words(string text)
+    {
+        var words = new List<string>();
+        var word = new StringBuilder();
+        foreach (char character in text)
+        {
+            if (char.IsLetterOrDigit(character))
+            {
+                word.Append(char.ToLowerInvariant(character));
+            }
+            else if (word.Length > 0)
+            {
+                words.Add(word.ToString());
+                word.Clear();
+            }
+        }
+
+        if (word.Length > 0) words.Add(word.ToString());
+        return words;
+    }
+
+    [GeneratedRegex(@"\s*(?:\([^()]*\)|\[[^\[\]]*\])$")]
+    private static partial Regex TrailingGroup();
 }

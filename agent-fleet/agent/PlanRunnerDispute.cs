@@ -134,6 +134,15 @@ internal sealed partial class PlanRunner
             }
 
             string existing = File.Exists(full) ? File.ReadAllText(full) : string.Empty;
+            // The ruler read the file when the ruling began; a file changed since then is not the one the correction was made for.
+            if (frozen.FirstOrDefault(snapshot => string.Equals(snapshot.Path, file.Path, StringComparison.Ordinal)) is { } snapshot &&
+                snapshot.Text != existing)
+            {
+                RecordRuling(plan, step, attempt, tier, model, rung, round, "Refused",
+                    $"The frozen test {file.Path} changed while the ruler was working, so the correction was not written and nothing changed.", ruler);
+                return NoRuling;
+            }
+
             string lineEnd = existing.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
             string text = file.Text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace("\n", lineEnd, StringComparison.Ordinal);
             byte[]? original = File.Exists(full) ? File.ReadAllBytes(full) : null;
@@ -233,13 +242,13 @@ internal sealed partial class PlanRunner
     }
 
     // The names of the failing frozen tests when a step ended without a passing check, its model disputed a frozen test, no
-    // correction was applied for the step, and the failures are all frozen tests; otherwise null. Same evaluation as a ruling,
-    // without the setting and the ruling count, which are the caller's concern.
+    // correction was applied for the step, no ruler found the test right, and the failures are all frozen tests; otherwise
+    // null. Same evaluation as a ruling, without the setting and the ruling count, which are the caller's concern.
     private string? SuspectTestNames(PlanRecord plan, PlanStep step, string? lastCheckOutput)
     {
         PlanRunEvent[] earlier = StepEventsSinceRetry(plan.Id, step.Id);
         if (!earlier.Any(runEvent => runEvent.Kind == RunEventKind.TestDisputed) ||
-            earlier.Any(runEvent => runEvent.Kind == RunEventKind.TestRuling && runEvent.FailureClass == TestWrongClass))
+            earlier.Any(runEvent => runEvent.Kind == RunEventKind.TestRuling && runEvent.FailureClass is TestWrongClass or CodeWrongClass))
         {
             return null;
         }
