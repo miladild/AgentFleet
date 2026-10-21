@@ -2402,21 +2402,24 @@ internal sealed partial class PlanRunner
             throw new InvalidOperationException("Worker workspace unavailable: worker health is not configured.");
         }
 
-        FleetNodeDefinition[] candidates = _fleetOptions.Nodes
-            .Where(node => !node.Vision && !string.Equals(node.Name, "hub", StringComparison.OrdinalIgnoreCase) &&
-                node.Workspace is not null && string.Equals(node.Tier, tier, StringComparison.OrdinalIgnoreCase))
-            .OrderByDescending(node => node.Fallback)
-            .ThenBy(node => node.Name, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        foreach (FleetNodeDefinition candidate in candidates)
+        FleetNodeDefinition[] candidates = WorkspaceCandidates(tier);
+        // A tier with no worker workspace at all (the hub never has one) borrows the nearest tier that has one. A tier
+        // whose workers exist but are not ready is still refused, so the step waits for its own machine as before.
+        string[] tiers = candidates.Length == 0 ? [tier, .. NearestTiersFirst(tier)] : [tier];
+        foreach (string candidateTier in tiers)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            if ((await _healthMonitor.GetNodeAsync(candidate.Name, cancellationToken, forceProbe: true)).Ready)
+            foreach (FleetNodeDefinition candidate in candidateTier == tier ? candidates : WorkspaceCandidates(candidateTier))
             {
-                _store.AddEvent(plan.Id, step.Id, null, RunEventKind.MachineSelected, tier,
-                    null, $"Selected {candidate.Name}: its worker workspace is configured and ready; task tier remains {tier}.",
-                    modelNode: null, workspaceNode: candidate.Name);
-                return candidate.Name;
+                cancellationToken.ThrowIfCancellationRequested();
+                if ((await _healthMonitor.GetNodeAsync(candidate.Name, cancellationToken, forceProbe: true)).Ready)
+                {
+                    string detail = candidateTier == tier
+                        ? $"Selected {candidate.Name}: its worker workspace is configured and ready; task tier remains {tier}."
+                        : $"Selected {candidate.Name}: no {tier} worker has a configured workspace, so the nearest tier ({candidateTier}) is used; task tier remains {tier}.";
+                    _store.AddEvent(plan.Id, step.Id, null, RunEventKind.MachineSelected, tier,
+                        null, detail, modelNode: null, workspaceNode: candidate.Name);
+                    return candidate.Name;
+                }
             }
         }
 
@@ -2424,6 +2427,23 @@ internal sealed partial class PlanRunner
             ? $"no worker has a configured workspace for the {tier} tier"
             : $"no configured {tier} worker is ready";
         throw new InvalidOperationException($"Worker workspace unavailable: {reason} for step {step.Id} ({step.Title}).");
+    }
+
+    private FleetNodeDefinition[] WorkspaceCandidates(string tier) =>
+        _fleetOptions!.Nodes
+            .Where(node => !node.Vision && !string.Equals(node.Name, "hub", StringComparison.OrdinalIgnoreCase) &&
+                node.Workspace is not null && string.Equals(node.Tier, tier, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(node => node.Fallback)
+            .ThenBy(node => node.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    // The tiers above the requested one, nearest first, then the tiers below it, nearest first.
+    private static string[] NearestTiersFirst(string tier)
+    {
+        string[] ascending = [FleetTiers.Light, FleetTiers.Standard, FleetTiers.Heavy];
+        int index = Array.FindIndex(ascending, candidate => string.Equals(candidate, tier, StringComparison.OrdinalIgnoreCase));
+        if (index < 0) return [];
+        return [.. ascending.Skip(index + 1), .. ascending.Take(index).Reverse()];
     }
 
     private void ParkForEnvironment(

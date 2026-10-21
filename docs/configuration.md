@@ -109,6 +109,8 @@ Set it in **Config > Machines**, or by hand:
 
 A workspace with any of these missing or invalid is rejected when the configuration is saved or loaded.
 
+A plan step whose tier has no worker with a workspace uses the nearest tier that has one: the tier above first, then the tier below. The run log says which machine was used and why, and the step's tier is unchanged. The hub never holds a workspace, so a step asked for the heavy tier on a fleet whose only heavy machine is the hub runs on a standard or light worker that has one.
+
 ### `tools`
 
 `"tools": { "run_command": { "enabled": false } }`. A tool that is not listed is on. See
