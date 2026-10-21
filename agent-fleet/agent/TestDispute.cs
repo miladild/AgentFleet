@@ -37,7 +37,7 @@ internal static partial class TestDispute
         // A ruler that gives no usable answer, or a correction the guard refuses, costs a call each time: two are enough.
         if (unresolvedAsks >= MaxUnresolvedAsks) return new TestRulingDue(false, "too-many-asks");
 
-        IReadOnlyList<string> items = PlanFailure.FailureSignature(checkOutput).Items;
+        IReadOnlyList<string> items = FailingItems(checkOutput);
         if (items.Count == 0) return new TestRulingDue(false, "no-failing-items");
         if (items.Any(PlanFailure.IsBuildErrorCode)) return new TestRulingDue(false, "build-error");
 
@@ -58,6 +58,84 @@ internal static partial class TestDispute
         call.Arguments.TryGetValue("tests", out string? tests);
         call.Arguments.TryGetValue("reason", out string? reason);
         return new TestDisputeCall(tests?.Trim() ?? string.Empty, reason?.Trim() ?? string.Empty);
+    }
+
+    /// <summary>
+    /// Every failing item of a check, with no limit, for the dispute rules. The shared reading of the failing lines is used on
+    /// the output without the spec reporter's suite summaries and failing-tests header, which name no test. The dispute path
+    /// adds the jest failure headings and the TAP "not ok" test lines, which the shared reading does not read. Only the dispute
+    /// path does this, so the stored repair signatures do not change.
+    /// </summary>
+    internal static IReadOnlyList<string> FailingItems(string? checkOutput)
+    {
+        string output = AnsiEscape().Replace(checkOutput ?? string.Empty, string.Empty);
+        string[] lines = output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+        var items = new SortedSet<string>(PlanFailure.FailingItems(WithoutRunnerSummaries(lines)), StringComparer.OrdinalIgnoreCase);
+        foreach (string line in lines)
+        {
+            if (JestFailureHeading().Match(line) is { Success: true } heading)
+            {
+                items.Add(heading.Groups["name"].Value.Trim());
+            }
+        }
+
+        foreach (string name in TapFailedTests(lines))
+        {
+            items.Add(name);
+        }
+
+        return items.ToArray();
+    }
+
+    // The spec reporter prints a suite as "▶ name" with its tests under it, and repeats a failing suite as "✖ name (time)" at the
+    // start of the line. That line and the "✖ failing tests:" header name no test, so they are left out of the reading. Jest's
+    // "FAIL ./file" header names no test either; its "● suite › test" headings carry the failures. A file that did not load keeps
+    // its line (vitest prints it with a bracketed name), since the step's own test file may be the one that did not load.
+    private static string WithoutRunnerSummaries(string[] lines)
+    {
+        var suites = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string line in lines)
+        {
+            if (SpecSuiteHeading().Match(line) is { Success: true } suite)
+            {
+                suites.Add(suite.Groups["name"].Value.Trim());
+            }
+        }
+
+        var kept = new List<string>(lines.Length);
+        foreach (string line in lines)
+        {
+            if (SpecFailingHeader().IsMatch(line) || JestFileHeader().IsMatch(line)) continue;
+            if (SpecSuiteSummary().Match(line) is { Success: true } summary && suites.Contains(summary.Groups["name"].Value.Trim())) continue;
+            kept.Add(line);
+        }
+
+        return string.Join('\n', kept);
+    }
+
+    // A TAP test is a "not ok N - name" line, indented under its suite. A suite's own line, and a file-level line that names a
+    // test file, name no test; the suite's diagnostic block says it is a suite.
+    private static IEnumerable<string> TapFailedTests(string[] lines)
+    {
+        for (int index = 0; index < lines.Length; index++)
+        {
+            if (TapNotOk().Match(lines[index]) is not { Success: true } failed) continue;
+            string name = failed.Groups["name"].Value.Trim();
+            if (BareTestFile().IsMatch(name) || IsTapSuite(lines, index)) continue;
+            yield return name;
+        }
+    }
+
+    private static bool IsTapSuite(string[] lines, int index)
+    {
+        for (int next = index + 1; next < lines.Length; next++)
+        {
+            if (lines[next].Trim() == "...") return false;
+            if (TapNotOk().IsMatch(lines[next]) || TapOk().IsMatch(lines[next])) return false;
+            if (lines[next].Trim() == "type: 'suite'") return true;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -84,7 +162,9 @@ internal static partial class TestDispute
     {
         string text = TrimTrailingGroups(item.Trim());
         int message = text.IndexOf(" - ", StringComparison.Ordinal);
-        return TrimTrailingGroups(message > 0 ? text[..message] : text);
+        text = TrimTrailingGroups(message > 0 ? text[..message] : text);
+        // A vitest tree line ("× name 6ms") reads as "name <time>" once its timing is normalised.
+        return TrailingTime().Replace(text, string.Empty).TrimEnd();
     }
 
     private static string TrimTrailingGroups(string text)
@@ -122,4 +202,34 @@ internal static partial class TestDispute
 
     [GeneratedRegex(@"\s*(?:\([^()]*\)|\[[^\[\]]*\])$")]
     private static partial Regex TrailingGroup();
+
+    [GeneratedRegex(@"\s+<time>$")]
+    private static partial Regex TrailingTime();
+
+    [GeneratedRegex(@"\x1B\[[0-?]*[ -/]*[@-~]")]
+    private static partial Regex AnsiEscape();
+
+    [GeneratedRegex(@"^\s*●\s+(?<name>.+?)\s*$")]
+    private static partial Regex JestFailureHeading();
+
+    [GeneratedRegex(@"^▶\s+(?<name>.+?)\s*$")]
+    private static partial Regex SpecSuiteHeading();
+
+    [GeneratedRegex(@"^✖ failing tests:\s*$")]
+    private static partial Regex SpecFailingHeader();
+
+    [GeneratedRegex(@"^\s*FAIL\s+\./\S+\s*$")]
+    private static partial Regex JestFileHeader();
+
+    [GeneratedRegex(@"^✖ (?<name>.+?)\s*(?:\(\s*\d+(?:\.\d+)?\s*(?:ms|s)\s*\))?\s*$")]
+    private static partial Regex SpecSuiteSummary();
+
+    [GeneratedRegex(@"^\s*not ok \d+(?:\s*-\s*|\s+)(?<name>.+?)\s*$")]
+    private static partial Regex TapNotOk();
+
+    [GeneratedRegex(@"^\s*ok \d+\b")]
+    private static partial Regex TapOk();
+
+    [GeneratedRegex(@"(?i)(?:^|[/\\])\S+\.(?:[cm]?[jt]sx?|py|cs)(?::\d+)?$")]
+    private static partial Regex BareTestFile();
 }

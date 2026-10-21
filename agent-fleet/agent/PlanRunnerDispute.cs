@@ -70,7 +70,7 @@ internal sealed partial class PlanRunner
             return NoRuling;
         }
 
-        IReadOnlyList<string> items = PlanFailure.FailureSignature(checkOutput).Items;
+        IReadOnlyList<string> items = TestDispute.FailingItems(checkOutput);
         IReadOnlyList<TestFileText> changed = ReadFilesToReview(latest, step, changedFiles).Select(file => new TestFileText(file.Path, file.Content)).ToArray();
         string prompt = TestRuling.BuildPrompt(latest, step, TestDispute.Holding(frozen, items), checkOutput, dispute.Reason, changed);
         IStepSession session = _agent.OpenSession(PlanRunnerToolPolicy.TestRulingRole);
@@ -261,7 +261,7 @@ internal sealed partial class PlanRunner
             return null;
         }
 
-        return string.Join(", ", PlanFailure.FailureSignature(lastCheckOutput).Items.Take(5));
+        return string.Join(", ", TestDispute.FailingItems(lastCheckOutput).Take(5));
     }
 
     private static string Cut(string text, int limit) => text.Length <= limit ? text : text[..limit];

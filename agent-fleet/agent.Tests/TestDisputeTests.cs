@@ -1,3 +1,5 @@
+using System.Text;
+
 namespace AgentFleet.Tests;
 
 // The pure rules of a dispute: when a ruling is due, how a ruler's reply is read, and what a correction may change.
@@ -456,5 +458,306 @@ public sealed class TestDisputeTests : PlanTestBase
         string prompt = TestRuling.BuildPrompt(plan, plan.Steps[0], [new TestFileText("tests/LimitTests.cs", content)], RejectsFailure, "reason", []);
 
         Assert.Contains("FILE: tests/LimitTests.cs" + Environment.NewLine + "````" + Environment.NewLine + content.TrimEnd() + Environment.NewLine + "````", prompt);
+    }
+
+    private static TestFileText BigFrozenFile()
+    {
+        var text = new StringBuilder("public class BigTests\n{\n");
+        for (int index = 0; index < 40; index++)
+        {
+            text.Append($"    [Fact]\n    public void Frozen_case_{index:00}() {{ }}\n\n");
+        }
+
+        text.Append("}\n");
+        return new TestFileText("tests/BigTests.cs", text.ToString());
+    }
+
+    // The shared signature keeps 40 names in sorted order, so the five names of the step's own work sort after the frozen ones
+    // and would be cut off there; the dispute must still see them.
+    [Fact]
+    public void Forty_failing_frozen_tests_and_five_of_the_steps_own_are_not_ruled_on()
+    {
+        string output = string.Concat(Enumerable.Range(0, 40).Select(index => $"Failed BigTests.Frozen_case_{index:00} [1 ms]\n")) +
+            string.Concat(Enumerable.Range(1, 5).Select(index => $"Failed OwnTests.Own_failure_{index} [1 ms]\n"));
+
+        TestRulingDue due = Due(output: output, frozen: [BigFrozenFile()]);
+
+        Assert.False(due.Due);
+        Assert.Equal("not-a-frozen-test", due.Reason);
+    }
+
+    [Fact]
+    public void Forty_failing_frozen_tests_alone_are_ruled_on()
+    {
+        string output = string.Concat(Enumerable.Range(0, 40).Select(index => $"Failed BigTests.Frozen_case_{index:00} [1 ms]\n"));
+
+        Assert.True(Due(output: output, frozen: [BigFrozenFile()]).Due);
+    }
+
+    // The summary lines of the real pytest run, with the message after " - " that a name-at-the-end rule would miss.
+    private static readonly TestFileText PytestFrozen = new("tests/test_fail.py",
+        "def test_adds():\n    assert add(1, 2) == 3\n\ndef test_subtracts():\n    assert add(1, 2) == -1\n\n" +
+        "@pytest.mark.parametrize(\"a,b,r\", [(1,1,2),(2,2,5)])\ndef test_table(a, b, r):\n    assert add(a, b) == r\n");
+
+    [Fact]
+    public void A_pytest_summary_line_with_its_message_still_names_the_frozen_test()
+    {
+        const string pytestOutput =
+            "FAILED test_fail.py::test_subtracts - assert 3 == -1\n" +
+            "FAILED test_fail.py::test_table[2-2-5] - assert 4 == 5\n" +
+            "=================== 2 failed, 2 passed, 1 skipped in 0.08s ===================\n";
+
+        Assert.Equal(2, TestDispute.FailingItems(pytestOutput).Count);
+        Assert.True(Due(output: pytestOutput, frozen: [PytestFrozen]).Due);
+    }
+
+    // A jest failure is headed "● suite › test" in the default reporter, which the shared reading does not read.
+    private static readonly TestFileText JestFrozen = new("tests/missing.test.js", "test('mul', () => { expect(multiply(2, 3)).toBe(6); });\n");
+
+    [Fact]
+    public void A_jest_failure_heading_names_the_frozen_test()
+    {
+        const string jestOutput =
+            "FAIL ./missing.test.js\n" +
+            "  ● mul\n\n" +
+            "    TypeError: multiply is not a function\n\n" +
+            "Test Suites: 1 failed, 1 total\n" +
+            "Tests:       1 failed, 1 total\n";
+
+        Assert.Equal(["mul"], TestDispute.FailingItems(jestOutput));
+        Assert.True(Due(output: jestOutput, frozen: [JestFrozen]).Due);
+    }
+
+    // The real jest run also prints a test.each row as "table 2 2", while the frozen name is the template "table %i %i".
+    // That row is not matched to its template, so no ruling is due: refusing is the safe side.
+    [Fact]
+    public void A_jest_test_each_row_is_not_matched_to_its_template_so_no_ruling_is_due()
+    {
+        const string jestOutput =
+            "FAIL ./fail.test.js\n" +
+            "  ● math › subtracts\n\n" +
+            "  ● math › table 2 2\n\n" +
+            "Tests:       2 failed, 1 skipped, 2 passed, 5 total\n";
+        var frozen = new TestFileText("tests/fail.test.js",
+            "describe('math', () => {\n  test('subtracts', () => { expect(add(1, 2)).toBe(-1); });\n" +
+            "  test.each([[1,1,2],[2,2,5]])('table %i %i', (a, b, r) => { expect(add(a, b)).toBe(r); });\n});\n");
+
+        Assert.Contains("math › subtracts", TestDispute.FailingItems(jestOutput));
+        TestRulingDue due = Due(output: jestOutput, frozen: [frozen]);
+
+        Assert.False(due.Due);
+        Assert.Equal("not-a-frozen-test", due.Reason);
+    }
+
+    // The real vitest run: the FAIL line names the test, and the tree line "× subtracts 6ms" reads as "subtracts <time>".
+    private static readonly TestFileText VitestFrozen = new("tests/vfail.test.mjs",
+        "describe('math', () => {\n  test('adds', () => { expect(add(1, 2)).toBe(3); });\n" +
+        "  test('subtracts', () => { expect(add(1, 2)).toBe(-1); });\n  test.skip('later', () => { expect(1).toBe(2); });\n});\n");
+
+    [Fact]
+    public void A_vitest_failure_names_the_frozen_test_on_its_fail_line_and_its_tree_line()
+    {
+        const string vitestOutput =
+            " ❯ vfail.test.mjs (3 tests | 1 failed | 1 skipped) 9ms\n" +
+            "   ❯ math (3)\n" +
+            "     × subtracts 6ms\n\n" +
+            " FAIL  vfail.test.mjs > math > subtracts\n" +
+            "AssertionError: expected 3 to be -1 // Object.is equality\n\n" +
+            " Test Files  1 failed (1)\n" +
+            "      Tests  1 failed | 1 passed | 1 skipped (3)\n";
+
+        Assert.Contains("subtracts <time>", TestDispute.FailingItems(vitestOutput));
+        Assert.True(Due(output: vitestOutput, frozen: [VitestFrozen]).Due);
+    }
+
+    [Fact]
+    public void A_vitest_file_that_fails_to_load_names_no_frozen_test()
+    {
+        const string vitestOutput =
+            " FAIL  vmissing.test.mjs [ vmissing.test.mjs ]\n" +
+            "Error: Cannot find module './nothing.js' imported from /work/project/vmissing.test.mjs\n";
+
+        TestRulingDue due = Due(output: vitestOutput, frozen: [VitestFrozen]);
+
+        Assert.False(due.Due);
+        Assert.Equal("not-a-frozen-test", due.Reason);
+    }
+
+    [Theory]
+    [InlineData("test_fail.py::test_subtracts - assert 3 == -1", "test_subtracts", true)]
+    [InlineData("test_fail.py::test_table[2-2-5] - assert 4 == 5", "test_table", true)]
+    [InlineData("subtracts <time>", "subtracts", true)]
+    [InlineData("vfail.test.mjs > math > subtracts", "subtracts", true)]
+    [InlineData("math › subtracts", "subtracts", true)]
+    [InlineData("test_fail.py::test_subtracts - assert 3 == -1", "test_adds", false)]
+    public void The_failing_line_shapes_of_each_runner_match_their_test_name(string item, string name, bool expected)
+    {
+        Assert.Equal(expected, TestDispute.Matches(item, name));
+    }
+
+    // The spec reporter's output for a suite with a passing, a failing and a skipped test, copied from a real run of node's test
+    // runner. The failing-tests header and the suite's own failure line name no test, so only the failing test is an item.
+    private const string NodeSpecOutput =
+            "▶ math\n" +
+            "  ✔ adds (0.7338ms)\n" +
+            "  ✖ subtracts (0.843ms)\n" +
+            "  ﹣ later (0.1145ms) # SKIP\n" +
+            "✖ math (3.854ms)\n" +
+            "ℹ tests 3\n" +
+            "ℹ suites 1\n" +
+            "ℹ pass 1\n" +
+            "ℹ fail 1\n" +
+            "ℹ cancelled 0\n" +
+            "ℹ skipped 1\n" +
+            "ℹ todo 0\n" +
+            "ℹ duration_ms 121.3053\n" +
+            "\n" +
+            "✖ failing tests:\n" +
+            "\n" +
+            "test at fail.test.mjs:6:3\n" +
+            "✖ subtracts (0.843ms)\n" +
+            "  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n" +
+            "  \n" +
+            "  3 !== -1\n" +
+            "  \n" +
+            "      at TestContext.<anonymous> (file:///work/project/fail.test.mjs:6:36)\n" +
+            "      at Test.runInAsyncScope (node:async_hooks:227:14)\n" +
+            "      at Test.run (node:internal/test_runner/test:1382:25)\n" +
+            "      at Suite.processPendingSubtests (node:internal/test_runner/test:960:18)\n" +
+            "      at Test.postRun (node:internal/test_runner/test:1522:19)\n" +
+            "      at Test.run (node:internal/test_runner/test:1447:12)\n" +
+            "      at async Promise.all (index 0)\n" +
+            "      at async Suite.run (node:internal/test_runner/test:1869:7)\n" +
+            "      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {\n" +
+            "    generatedMessage: true,\n" +
+            "    code: 'ERR_ASSERTION',\n" +
+            "    actual: 3,\n" +
+            "    expected: -1,\n" +
+            "    operator: 'strictEqual',\n" +
+            "    diff: 'simple'\n" +
+            "  }\n" +
+            "";
+
+    // The same run with the TAP reporter: the failing test is an indented "not ok" line, and the suite's own "not ok" line
+    // (type suite in its diagnostic block) names no test.
+    private const string NodeTapOutput =
+            "TAP version 13\n" +
+            "# Subtest: math\n" +
+            "    # Subtest: adds\n" +
+            "    ok 1 - adds\n" +
+            "      ---\n" +
+            "      duration_ms: 0.6586\n" +
+            "      type: 'test'\n" +
+            "      ...\n" +
+            "    # Subtest: subtracts\n" +
+            "    not ok 2 - subtracts\n" +
+            "      ---\n" +
+            "      duration_ms: 0.8398\n" +
+            "      type: 'test'\n" +
+            "      location: '/work/project/fail.test.mjs:6:3'\n" +
+            "      failureType: 'testCodeFailure'\n" +
+            "      error: |-\n" +
+            "        Expected values to be strictly equal:\n" +
+            "        \n" +
+            "        3 !== -1\n" +
+            "        \n" +
+            "      code: 'ERR_ASSERTION'\n" +
+            "      name: 'AssertionError'\n" +
+            "      expected: -1\n" +
+            "      actual: 3\n" +
+            "      operator: 'strictEqual'\n" +
+            "      stack: |-\n" +
+            "        TestContext.<anonymous> (file:///work/project/fail.test.mjs:6:36)\n" +
+            "        Test.runInAsyncScope (node:async_hooks:227:14)\n" +
+            "        Test.run (node:internal/test_runner/test:1382:25)\n" +
+            "        Suite.processPendingSubtests (node:internal/test_runner/test:960:18)\n" +
+            "        Test.postRun (node:internal/test_runner/test:1522:19)\n" +
+            "        Test.run (node:internal/test_runner/test:1447:12)\n" +
+            "        async Promise.all (index 0)\n" +
+            "        async Suite.run (node:internal/test_runner/test:1869:7)\n" +
+            "        async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3)\n" +
+            "      ...\n" +
+            "    # Subtest: later\n" +
+            "    ok 3 - later # SKIP\n" +
+            "      ---\n" +
+            "      duration_ms: 0.1121\n" +
+            "      type: 'test'\n" +
+            "      ...\n" +
+            "    1..3\n" +
+            "not ok 1 - math\n" +
+            "  ---\n" +
+            "  duration_ms: 3.323\n" +
+            "  type: 'suite'\n" +
+            "  location: '/work/project/fail.test.mjs:4:1'\n" +
+            "  failureType: 'subtestsFailed'\n" +
+            "  error: '1 subtest failed'\n" +
+            "  code: 'ERR_TEST_FAILURE'\n" +
+            "  ...\n" +
+            "1..1\n" +
+            "# tests 3\n" +
+            "# suites 1\n" +
+            "# pass 1\n" +
+            "# fail 1\n" +
+            "# cancelled 0\n" +
+            "# skipped 1\n" +
+            "# todo 0\n" +
+            "# duration_ms 234.8584\n" +
+            "";
+
+    private static readonly TestFileText NodeFrozen = new("tests/fail.test.mjs",
+        "describe('math', () => {\n  test('adds', () => { expect(add(1, 2)).toBe(3); });\n" +
+        "  test('subtracts', () => { expect(add(1, 2)).toBe(-1); });\n  test.skip('later', () => { expect(1).toBe(2); });\n});\n");
+
+    [Fact]
+    public void The_spec_reporter_failing_test_is_the_only_item_and_its_summary_lines_do_not_block_a_ruling()
+    {
+        Assert.Equal(["subtracts"], TestDispute.FailingItems(NodeSpecOutput));
+        // The shared reading still takes the header as an item; the dispute path leaves it out.
+        Assert.Contains("failing tests:", PlanFailure.FailingItems(NodeSpecOutput));
+        Assert.True(Due(output: NodeSpecOutput, frozen: [NodeFrozen]).Due);
+    }
+
+    [Fact]
+    public void The_tap_reporter_nested_failing_test_is_matched_and_its_suite_line_is_not_an_item()
+    {
+        Assert.Equal(["subtracts"], TestDispute.FailingItems(NodeTapOutput));
+        Assert.True(Due(output: NodeTapOutput, frozen: [NodeFrozen]).Due);
+    }
+
+    [Fact]
+    public void A_tap_line_that_names_a_test_file_is_not_an_item()
+    {
+        const string tapOutput =
+            "TAP version 13\n" +
+            "not ok 1 - tests/a.test.mjs\n" +
+            "  ---\n" +
+            "  type: 'test'\n" +
+            "  ...\n" +
+            "1..1\n";
+
+        Assert.Empty(TestDispute.FailingItems(tapOutput));
+        Assert.Equal("no-failing-items", Due(output: tapOutput, frozen: [NodeFrozen]).Reason);
+    }
+
+    // The jest heading of a suite that fails to run is taken from the real jest sample. The "● Console" heading is not from a
+    // real run here: it is pinned as the reading the code applies to that heading. Either heading names no frozen test, so
+    // it blocks a ruling, which is the safe side.
+    [Fact]
+    public void Jest_headings_of_a_suite_that_fails_to_run_or_a_console_block_block_a_ruling()
+    {
+        const string jestOutput =
+            "FAIL ./syntax.test.js\n" +
+            "  ● Test suite failed to run\n\n" +
+            "    Jest encountered an unexpected token\n\n" +
+            "  ● Console\n\n" +
+            "    console.log\n" +
+            "      hello\n\n" +
+            "Test Suites: 1 failed, 1 total\n";
+
+        Assert.Equal(["Console", "Test suite failed to run"], TestDispute.FailingItems(jestOutput));
+        TestRulingDue due = Due(output: jestOutput, frozen: [NodeFrozen]);
+
+        Assert.False(due.Due);
+        Assert.Equal("not-a-frozen-test", due.Reason);
     }
 }

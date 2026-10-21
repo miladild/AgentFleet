@@ -64,9 +64,15 @@ internal static partial class PlanFailure
     [GeneratedRegex(@"(?:command not found|is not recognized as an internal or external command|file not found|cannot find the file|the system cannot find the path)", RegexOptions.IgnoreCase)]
     private static partial Regex MissingCheckInput();
 
-    public static FailureFingerprint FailureSignature(string? checkOutput)
+    /// <summary>
+    /// Every failing item the check printed, sorted, with no limit. FailureSignature keeps only the first 40 of them for the
+    /// repair ladder; a rule that must see every failure (a dispute) reads this list instead.
+    /// </summary>
+    public static IReadOnlyList<string> FailingItems(string? checkOutput) =>
+        FailingItemsIn(AnsiEscape().Replace(checkOutput ?? string.Empty, string.Empty));
+
+    private static string[] FailingItemsIn(string output)
     {
-        string output = AnsiEscape().Replace(checkOutput ?? string.Empty, string.Empty);
         var items = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (string line in output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
         {
@@ -84,9 +90,16 @@ internal static partial class PlanFailure
             }
         }
 
-        if (items.Count > 0)
+        return items.ToArray();
+    }
+
+    public static FailureFingerprint FailureSignature(string? checkOutput)
+    {
+        string output = AnsiEscape().Replace(checkOutput ?? string.Empty, string.Empty);
+        string[] found = FailingItemsIn(output);
+        if (found.Length > 0)
         {
-            string[] names = items.Take(40).ToArray();
+            string[] names = found.Take(40).ToArray();
             return new FailureFingerprint(string.Join('\n', names), names.Length, names);
         }
 

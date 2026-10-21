@@ -72,4 +72,17 @@ public sealed class PlanFailureTests
         Assert.Equal(FailureClass.NoOp, PlanFailure.Classify(null,
             "Failed Sample.Tests.OpenSession [42 ms]", []));
     }
+
+    [Fact]
+    public void A_signature_keeps_the_first_40_items_while_the_full_list_keeps_all_45()
+    {
+        string output = string.Concat(Enumerable.Range(0, 45).Select(index => $"Failed Suite.Test_{index:00}\n"));
+        IReadOnlyList<string> all = PlanFailure.FailingItems(output);
+        FailureFingerprint signature = PlanFailure.FailureSignature(output);
+
+        Assert.Equal(45, all.Count);
+        Assert.Equal(40, signature.Size);
+        Assert.Equal(string.Join('\n', Enumerable.Range(0, 40).Select(index => $"Suite.Test_{index:00}")), signature.Value);
+        Assert.Equal(all.Take(40), signature.Items);
+    }
 }
