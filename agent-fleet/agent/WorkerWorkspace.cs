@@ -583,6 +583,22 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
         return hubHash is null ? ExistingWorkerFile.Remove : ExistingWorkerFile.Replace;
     }
 
+    // The remote files a sync compares with the hub. A frozen test file is never one of them, under any spelling the platform
+    // reads as the same name, so the hub copy stays the accepted one.
+    internal static IReadOnlyList<string> FilesToCompareOnSync(IEnumerable<string> relatives, IReadOnlyList<PlanFrozenTestFile> frozen, string platform) =>
+        relatives.Where(relative => AllowedRelative(relative) && !IsFrozenFile(relative, frozen, platform)).ToArray();
+
+    // The staged files a sync may propagate as deleted: gone from the worker, named by the step, and not a frozen test file.
+    internal static IReadOnlyList<string> DeletionCandidates(IEnumerable<string> staged, IReadOnlySet<string> remaining,
+        IReadOnlyList<PlanFrozenTestFile> frozen, string platform, Func<string, bool> namedByStep) =>
+        staged.Where(path => !remaining.Contains(path) && !IsFrozenFile(path, frozen, platform) && namedByStep(path)).ToArray();
+
+    // The one rule for what a frozen test file is: the project-relative path, compared as the worker's platform names it.
+    internal static bool IsFrozenFile(string relative, IReadOnlyList<PlanFrozenTestFile> frozen, string platform) =>
+        FrozenTestFiles.Contains(frozen, relative, IsWindowsPlatform(platform));
+
+    private static bool IsWindowsPlatform(string platform) => string.Equals(platform, "windows", StringComparison.OrdinalIgnoreCase);
+
     public IDisposable Enter() => WorkerWorkspaceContext.Push(this);
 
     public async Task SyncToHubAsync(CancellationToken cancellationToken)
@@ -599,13 +615,11 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
             var remoteHashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var pendingDeletes = new List<string>();
             var conflicts = new List<string>();
-            foreach (string path in remoteFiles)
+            // A frozen test file is never carried to the hub, so the hub copy stays the accepted one (no write, no conflict).
+            foreach (string relative in FilesToCompareOnSync(remoteFiles.Select(file => RelativeRemote(RemoteRoot, file)), _frozenFiles, _config.Platform))
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                string relative = RelativeRemote(RemoteRoot, path);
-                // A frozen test file is never carried to the hub, so the hub copy stays the accepted one (no write, no conflict).
-                if (IsFrozen(relative)) continue;
-                if (!AllowedRelative(relative)) continue;
+                string path = JoinRemote(RemoteRoot, relative);
                 if (_sftp.GetAttributes(path).Size > 20 * 1024 * 1024)
                     throw new IOException($"Worker sync refused an output larger than 20 MiB: {relative}.");
                 string local = SafeHubPath(relative);
@@ -647,7 +661,7 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
 
             // Propagate intentional workspace deletions, but only for files this manager staged and only inside
             // the original project. If SFTP could not enumerate the workspace, the guard above prevents deletion.
-            foreach (string relative in _stagedFiles.Where(path => !remaining.Contains(path) && !IsFrozen(path) && IsNamedByStep(path)))
+            foreach (string relative in DeletionCandidates(_stagedFiles, remaining, _frozenFiles, _config.Platform, IsNamedByStep))
             {
                 string local = SafeHubPath(relative);
                 string? baseline = _baselineHashes.GetValueOrDefault(relative);
@@ -849,7 +863,7 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
 
     public async Task<string> WriteFileAsync(string path, string content, CancellationToken cancellationToken)
     {
-        if (FrozenRefusal(path) is { } frozenRefusal) return frozenRefusal;
+        if (FrozenRefusal(covering: false, path) is { } frozenRefusal) return frozenRefusal;
         string remote = ResolveRemotePath(path); Audit("write_file", path);
         await _gate.WaitAsync(cancellationToken);
         try
@@ -865,7 +879,7 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
 
     public async Task<string> EditFileAsync(string path, string oldText, string newText, bool? replaceAll, CancellationToken cancellationToken)
     {
-        if (FrozenRefusal(path) is { } frozenRefusal) return frozenRefusal;
+        if (FrozenRefusal(covering: false, path) is { } frozenRefusal) return frozenRefusal;
         if (string.IsNullOrEmpty(oldText)) return "Error: oldText must not be empty.";
         string current = await ReadFileAsync(path, null, null, cancellationToken);
         if (current.StartsWith("Error:", StringComparison.Ordinal)) return current;
@@ -961,7 +975,7 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
 
     public string MoveFile(string source, string destination, bool? overwrite)
     {
-        if (FrozenRefusal(source, destination) is { } frozenRefusal) return frozenRefusal;
+        if (FrozenRefusal(covering: true, source, destination) is { } frozenRefusal) return frozenRefusal;
         string from = ResolveRemotePath(source), to = ResolveRemotePath(destination); Audit("move_file", $"{source} -> {destination}");
         lock (_sftp!)
         {
@@ -976,7 +990,7 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
 
     public string DeleteFile(string path)
     {
-        if (FrozenRefusal(path) is { } frozenRefusal) return frozenRefusal;
+        if (FrozenRefusal(covering: true, path) is { } frozenRefusal) return frozenRefusal;
         string remote = ResolveRemotePath(path); Audit("delete_file", path);
         lock (_sftp!)
         {
@@ -1064,18 +1078,15 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
         }
     }
 
-    // The one rule for what a frozen test file is: the project-relative path, compared without case only on a Windows worker,
-    // where names do not depend on it.
-    private bool IsFrozen(string relative)
-    {
-        return FrozenTestFiles.Contains(_frozenFiles, relative, string.Equals(_config.Platform, "windows", StringComparison.OrdinalIgnoreCase));
-    }
+    private bool IsFrozen(string relative) => IsFrozenFile(relative, _frozenFiles, _config.Platform);
 
     // A frozen test file is fixed for the rest of the plan, so a file tool refuses to change it under any of the paths given.
-    // Paths are compared in project-relative form; the comparison ignores case only on a Windows worker, where names do not depend on it.
-    private string? FrozenRefusal(params string[] paths)
+    // Paths are compared in project-relative form. A move or a delete also refuses a path that holds a frozen file, since it would
+    // carry that file away or replace it. On a Windows worker a short (8.3) name is refused too: it cannot be matched by name.
+    private string? FrozenRefusal(bool covering, params string[] paths)
     {
         if (_frozenFiles.Count == 0) return null;
+        bool windowsNames = IsWindowsPlatform(_config.Platform);
         foreach (string path in paths)
         {
             string relative;
@@ -1089,7 +1100,9 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
                 continue;
             }
 
-            if (IsFrozen(relative)) return FrozenTestRefusal;
+            if (windowsNames && FrozenTestFiles.HasShortName(relative)) return FrozenTestFiles.ShortNameRefusal;
+            bool hit = covering ? FrozenTestFiles.Covers(_frozenFiles, relative, windowsNames) : FrozenTestFiles.Contains(_frozenFiles, relative, windowsNames);
+            if (hit) return FrozenTestRefusal;
         }
 
         return null;

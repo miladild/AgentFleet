@@ -313,4 +313,77 @@ public sealed class FrozenTestFilesTests : PlanTestBase
         }
         finally { Directory.Delete(hub, recursive: true); }
     }
+
+    [Fact]
+    public async Task A_folder_move_or_delete_that_would_carry_or_replace_a_frozen_file_is_refused()
+    {
+        var files = new MemoryFiles();
+        using WorkerWorkspaceSession session = FrozenSession(files, Path.GetTempPath(), frozen: Frozen);
+
+        Assert.Equal(FixedMessage, session.MoveFile("tests", "old_tests", null));
+        Assert.Equal(FixedMessage, session.MoveFile("src/Limit.cs", "tests", true));
+        Assert.Equal(FixedMessage, session.DeleteFile("tests"));
+        Assert.Empty(files.Writes);
+    }
+
+    [Theory]
+    [InlineData("tests/LimitTests.cs.")]
+    [InlineData("tests/LimitTests.cs ")]
+    [InlineData("tests/LimitTests.cs::$DATA")]
+    [InlineData("tests/LimitTests.cs:hidden")]
+    public async Task A_windows_worker_refuses_a_frozen_file_named_with_a_trailing_dot_or_space_or_a_stream(string path)
+    {
+        var files = new MemoryFiles();
+        using WorkerWorkspaceSession session = FrozenSession(files, Path.GetTempPath(), "windows", Frozen);
+
+        Assert.Equal(FixedMessage, await session.WriteFileAsync(path, "changed\n", default));
+        Assert.Empty(files.Writes);
+    }
+
+    [Theory]
+    [InlineData("tests/LimitTests.cs.")]
+    [InlineData("tests/LimitTests.cs::$DATA")]
+    public async Task A_linux_worker_treats_a_trailing_dot_or_a_stream_name_as_another_file(string path)
+    {
+        var files = new MemoryFiles();
+        using WorkerWorkspaceSession session = FrozenSession(files, Path.GetTempPath(), "linux", Frozen);
+
+        Assert.NotEqual(FixedMessage, await session.WriteFileAsync(path, "other\n", default));
+        Assert.Single(files.Writes);
+    }
+
+    [Fact]
+    public async Task A_windows_worker_refuses_a_frozen_file_written_under_its_8_3_short_name()
+    {
+        var files = new MemoryFiles();
+        using WorkerWorkspaceSession session = FrozenSession(files, Path.GetTempPath(), "windows", Frozen);
+
+        string result = await session.WriteFileAsync("TESTS~1/LIMITT~1.CS", "changed\n", default);
+
+        Assert.Contains("short (8.3)", result);
+        Assert.Empty(files.Writes);
+    }
+
+    [Theory]
+    [InlineData("tests", true)]
+    [InlineData("tests/LimitTests.cs", true)]
+    [InlineData("", true)]
+    [InlineData("tests/LimitTests", false)]
+    [InlineData("tests/Other", false)]
+    [InlineData("src", false)]
+    public void A_path_covers_a_frozen_file_when_it_is_that_file_or_a_folder_holding_it(string path, bool covered) =>
+        Assert.Equal(covered, FrozenTestFiles.Covers([Frozen], path, windowsNames: false));
+
+    [Fact]
+    public void A_frozen_file_an_earlier_tests_step_froze_keeps_the_content_that_step_accepted()
+    {
+        PlanRecord plan = NewPlan(Step("first tests"), Step("second tests"));
+        Store.AddFrozenTests(plan.Id, new PlanFrozenTestSet(1, "dotnet test", [new PlanFrozenTestFile("tests/A.cs", "1")]));
+        Store.AddFrozenTests(plan.Id, new PlanFrozenTestSet(2, "dotnet test",
+            [new PlanFrozenTestFile("tests/A.cs", "2"), new PlanFrozenTestFile("tests/B.cs", "3")]));
+
+        var frozen = WorkerWorkspaceManager.FrozenFilesOf(Store.Get(plan.Id)!).Select(file => (file.Path, file.Sha256)).ToArray();
+
+        Assert.Equal([("tests/A.cs", "1"), ("tests/B.cs", "3")], frozen);
+    }
 }

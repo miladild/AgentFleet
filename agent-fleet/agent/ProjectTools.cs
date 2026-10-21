@@ -219,7 +219,7 @@ internal static partial class ProjectTools
 
     public static string MoveFile(string source, string destination, bool? overwrite)
     {
-        if (HubFrozenTestScope.Current?.Refusal(source, destination) is { } frozenRefusal) return frozenRefusal;
+        if (HubFrozenTestScope.Current?.CoveringRefusal(source, destination) is { } frozenRefusal) return frozenRefusal;
         string from = HubFileSystemTools.Resolve(source);
         string to = HubFileSystemTools.Resolve(destination);
         bool isFile = File.Exists(from);
@@ -261,7 +261,7 @@ internal static partial class ProjectTools
     /// <summary>Deletes one file, or an empty folder. A folder with contents is refused: that is a bigger decision.</summary>
     public static string DeleteFile(string path)
     {
-        if (HubFrozenTestScope.Current?.Refusal(path) is { } frozenRefusal) return frozenRefusal;
+        if (HubFrozenTestScope.Current?.CoveringRefusal(path) is { } frozenRefusal) return frozenRefusal;
         string target = HubFileSystemTools.Resolve(path);
         try
         {

@@ -425,8 +425,10 @@ bytes still hash to its name. A plan frozen before this was added has no stored 
 hub copy against the hash as before, and on the hub a changed frozen file fails the round, because nothing is left to put
 back. Commands run on the hub (run_command, run_git_command) cannot be refused; a change they make to a frozen file is
 detected and put back before the check and before the implementation step's frozen run.
-Moving a whole folder that holds a frozen file is not refused on the worker or on the hub (the tools refuse exact file paths): the file
-is then missing from its place before the check, so it is put back, and the moved copy stays where it went.
+A move or a delete of a folder that holds a frozen file is refused, on the worker and on the hub, and so is a move whose destination
+is a folder that holds one (the move would replace that file). Other moves and deletes are unaffected. On a Windows worker or hub a
+name that Windows reads as a frozen file (a trailing dot, or a stream name such as `::$DATA`) is refused too, and so is a path in the
+short (8.3) form while tests are frozen, because that form cannot be matched by name.
 
 Implementation rule. The first ordinary step after a tests step that names a non-test code file is that set's
 implementation step. After its own check passes, the frozen command runs in the worker workspace, and the step is

@@ -305,6 +305,92 @@ public sealed partial class PlanRunnerTests
         finally { FailFirstTests.DeleteTree(project); }
     }
 
+    [Fact]
+    public async Task On_the_hub_a_folder_where_a_frozen_test_belongs_fails_the_round_plainly()
+    {
+        string project = NewGitProject();
+        try
+        {
+            string test = Path.Combine(project, "tests", "LimitTests.cs");
+            Directory.CreateDirectory(test);
+            var setup = HubPlan(project, ImplementationStep());
+            Store.SaveFrozenContent(setup.Id, Encoding.UTF8.GetBytes(AcceptedTestText));
+            Store.AddFrozenTests(setup.Id, new PlanFrozenTestSet(0, "dotnet test", [new PlanFrozenTestFile("tests/LimitTests.cs", Sha256Hex(AcceptedTestText))]));
+            int buildRuns = 0;
+            var fake = CappedAgent(_ => Task.FromResult("Done."));
+            await HubFrozenRunner(new WriterAgent(fake), command => { buildRuns++; return BuildPassOutput; })
+                .RunPlanAsync(setup.Id, default).WaitAsync(HubFrozenTimeLimit);
+
+            PlanRecord after = Store.Get(setup.Id)!;
+            Assert.NotEqual(PlanStatus.Done, after.Status);
+            Assert.Equal(0, buildRuns);
+            Assert.Contains(fake.Calls, call => call.Prompt.Contains("tests/LimitTests.cs was changed and could not be put back", StringComparison.Ordinal));
+            Assert.True(Directory.Exists(test));
+        }
+        finally { FailFirstTests.DeleteTree(project); }
+    }
+
+    [Fact]
+    public async Task On_the_hub_a_frozen_path_that_leaves_the_project_is_never_written()
+    {
+        string project = NewGitProject();
+        string folder = "fleet-outside-" + Guid.NewGuid().ToString("N");
+        string outside = Path.Combine(Path.GetDirectoryName(project)!, folder, "LimitTests.cs");
+        try
+        {
+            var setup = HubPlan(project, ImplementationStep());
+            Store.SaveFrozenContent(setup.Id, Encoding.UTF8.GetBytes(AcceptedTestText));
+            Store.AddFrozenTests(setup.Id, new PlanFrozenTestSet(0, "dotnet test", [new PlanFrozenTestFile($"../{folder}/LimitTests.cs", Sha256Hex(AcceptedTestText))]));
+            var fake = CappedAgent(_ => Task.FromResult("Done."));
+            await HubFrozenRunner(new WriterAgent(fake), command => BuildPassOutput)
+                .RunPlanAsync(setup.Id, default).WaitAsync(HubFrozenTimeLimit);
+
+            Assert.False(File.Exists(outside));
+        }
+        finally
+        {
+            FailFirstTests.DeleteTree(project);
+            if (Directory.Exists(Path.GetDirectoryName(outside))) Directory.Delete(Path.GetDirectoryName(outside)!, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task On_the_hub_a_frozen_test_behind_a_link_is_not_written_through_it()
+    {
+        string project = NewGitProject();
+        string target = Path.Combine(Path.GetDirectoryName(project)!, "fleet-link-target-" + Guid.NewGuid().ToString("N") + ".cs");
+        try
+        {
+            File.WriteAllText(target, ChangedTestText);
+            string test = Path.Combine(project, "tests", "LimitTests.cs");
+            Directory.CreateDirectory(Path.GetDirectoryName(test)!);
+            try
+            {
+                File.CreateSymbolicLink(test, target);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+            {
+                // Creating a link needs a permission this machine does not give; there is no link to test then.
+                return;
+            }
+
+            var setup = HubPlan(project, ImplementationStep());
+            Store.SaveFrozenContent(setup.Id, Encoding.UTF8.GetBytes(AcceptedTestText));
+            Store.AddFrozenTests(setup.Id, new PlanFrozenTestSet(0, "dotnet test", [new PlanFrozenTestFile("tests/LimitTests.cs", Sha256Hex(AcceptedTestText))]));
+            var fake = CappedAgent(_ => Task.FromResult("Done."));
+            await HubFrozenRunner(new WriterAgent(fake), command => BuildPassOutput)
+                .RunPlanAsync(setup.Id, default).WaitAsync(HubFrozenTimeLimit);
+
+            Assert.Equal(ChangedTestText, File.ReadAllText(target));
+            Assert.NotEqual(PlanStatus.Done, Store.Get(setup.Id)!.Status);
+        }
+        finally
+        {
+            if (File.Exists(target)) File.Delete(target);
+            FailFirstTests.DeleteTree(project);
+        }
+    }
+
     [Theory]
     [InlineData(true, AcceptedTestText)]
     [InlineData(false, ChangedTestText)]

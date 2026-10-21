@@ -147,8 +147,23 @@ internal sealed partial class PlanRunner
                     "no verified accepted copy is kept for it. Change the code, not the test.");
             }
 
-            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
-            File.WriteAllBytes(full, accepted);
+            // A link at the test's path would take the write to a file outside the project, so the round fails instead.
+            if (HasLinkedPathComponent(Path.GetFullPath(plan.WorkingDirectory!), full))
+                throw new FrozenTestsUnrestorableException($"The fixed test file {frozen.Path} was changed and could not be put back, " +
+                    "because the project holds a link at its path. Change the code, not the test.");
+
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+                File.WriteAllBytes(full, accepted);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                // Something the file system will not replace (a folder, a locked or read-only file) stands where the test belongs.
+                throw new FrozenTestsUnrestorableException($"The fixed test file {frozen.Path} was changed and could not be put back, " +
+                    "because the project holds something else at its path. Change the code, not the test.");
+            }
+
             restoredNow.Add(frozen.Path);
         }
     }
@@ -161,7 +176,7 @@ internal sealed partial class PlanRunner
         {
             if (FrozenFileMatches(full, frozen.Sha256)) continue;
             byte[]? accepted = _store.ReadFrozenContent(plan.Id, frozen.Sha256);
-            if (accepted is null) continue;
+            if (accepted is null || HasLinkedPathComponent(Path.GetFullPath(plan.WorkingDirectory!), full)) continue;
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(full)!);
@@ -184,8 +199,12 @@ internal sealed partial class PlanRunner
         }
 
         string root = Path.GetFullPath(current.WorkingDirectory);
+        string prefix = root.EndsWith(Path.DirectorySeparatorChar) ? root : root + Path.DirectorySeparatorChar;
+        StringComparison comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        // A stored path that leads out of the project folder is never read or written: a frozen file is inside the project by construction.
         return current.FrozenTests.SelectMany(set => set.Files)
             .Select(frozen => (frozen, Path.GetFullPath(Path.Combine(root, frozen.Path.Replace('/', Path.DirectorySeparatorChar)))))
+            .Where(item => item.Item2.StartsWith(prefix, comparison))
             .ToArray();
     }
 

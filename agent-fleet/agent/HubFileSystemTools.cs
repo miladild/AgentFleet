@@ -30,6 +30,9 @@ internal static class HubFileSystemTools
     /// <summary>A path as every hub tool reads it: absolute as given, relative to FLEET_FILES_ROOT or the working folder.</summary>
     internal static string Resolve(string path) => Path.GetFullPath(ResolvePath(path));
 
+    /// <summary>A path as given, relative to FLEET_FILES_ROOT or the working folder, for a name that GetFullPath cannot resolve.</summary>
+    internal static string ResolveAsGiven(string path) => ResolvePath(path);
+
     public static async Task<string> ReadFileAsync(
         string path,
         int? startLine,

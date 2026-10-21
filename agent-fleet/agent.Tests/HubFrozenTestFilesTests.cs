@@ -157,6 +157,65 @@ public sealed class HubFrozenTestRefusalTests : IDisposable
     }
 
     [Fact]
+    public void Moving_a_folder_that_holds_a_frozen_file_is_refused_while_the_scope_is_set()
+    {
+        string folder = Path.Combine(_project, "tests");
+        string moved = Path.Combine(_project, "old_tests");
+        using IDisposable _ = Scope("tests/LimitTests.cs");
+
+        string result = WorkspaceTools.MoveFile(folder, moved, null);
+
+        Assert.Equal(FrozenTestFiles.RefusalMessage, result);
+        Assert.Equal(Accepted, File.ReadAllText(Frozen));
+        Assert.True(Directory.Exists(folder));
+        Assert.False(Directory.Exists(moved));
+    }
+
+    [Fact]
+    public void A_file_moved_into_a_folder_that_holds_a_frozen_file_cannot_replace_that_file()
+    {
+        string source = Path.Combine(_project, "src", "LimitTests.cs");
+        Directory.CreateDirectory(Path.GetDirectoryName(source)!);
+        File.WriteAllText(source, "other\n");
+        using IDisposable _ = Scope("tests/LimitTests.cs");
+
+        string result = WorkspaceTools.MoveFile(source, Path.Combine(_project, "tests"), true);
+
+        Assert.Equal(FrozenTestFiles.RefusalMessage, result);
+        Assert.Equal(Accepted, File.ReadAllText(Frozen));
+        Assert.True(File.Exists(source));
+    }
+
+    [Fact]
+    public void Deleting_a_folder_that_holds_a_frozen_file_is_refused_while_the_scope_is_set()
+    {
+        using IDisposable _ = Scope("tests/LimitTests.cs");
+
+        string result = WorkspaceTools.DeleteFile(Path.Combine(_project, "tests"));
+
+        Assert.Equal(FrozenTestFiles.RefusalMessage, result);
+        Assert.Equal(Accepted, File.ReadAllText(Frozen));
+    }
+
+    [Theory]
+    [InlineData("{root}/tests/LimitTests.cs.")]
+    [InlineData("{root}/tests/LimitTests.cs ")]
+    [InlineData("{root}/tests/LimitTests.cs::$DATA")]
+    [InlineData("{root}/tests/LimitTests.cs:hidden")]
+    [InlineData("{root}/TESTS~1/LIMITT~1.CS")]
+    public async Task On_windows_a_frozen_file_named_another_way_is_refused(string spelling)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        string path = spelling.Replace("{root}", _project, StringComparison.Ordinal);
+        using IDisposable _ = Scope("tests/LimitTests.cs");
+
+        string result = await WorkspaceTools.WriteFileAsync(path, "changed\n", default);
+
+        Assert.True(result == FrozenTestFiles.RefusalMessage || result.Contains("short (8.3)", StringComparison.Ordinal), result);
+        Assert.Equal(Accepted, File.ReadAllText(Frozen));
+    }
+
+    [Fact]
     public async Task Writes_are_allowed_without_the_scope()
     {
         string result = await WorkspaceTools.WriteFileAsync(Frozen, "changed\n", default);

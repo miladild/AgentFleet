@@ -334,11 +334,18 @@ internal sealed partial class FleetPlanStore
         }
     }
 
-    /// <summary>Records the test files an accepted tests step froze. A set for the same step replaces the earlier one.</summary>
+    /// <summary>
+    /// Records the test files an accepted tests step froze. A set for the same step replaces the earlier one. A file an earlier set
+    /// already froze keeps the content that set accepted: two sets could demand different content for one file, and no restore
+    /// could satisfy both.
+    /// </summary>
     public PlanRecord? AddFrozenTests(string id, PlanFrozenTestSet set) =>
-        Update(id, current => current with
+        Update(id, current =>
         {
-            FrozenTests = (current.FrozenTests ?? []).Where(existing => existing.StepId != set.StepId).Append(set).ToList()
+            List<PlanFrozenTestSet> others = (current.FrozenTests ?? []).Where(existing => existing.StepId != set.StepId).ToList();
+            HashSet<string> frozenBefore = others.SelectMany(existing => existing.Files.Select(file => file.Path)).ToHashSet(StringComparer.Ordinal);
+            PlanFrozenTestSet kept = set with { Files = set.Files.Where(file => !frozenBefore.Contains(file.Path)).ToList() };
+            return current with { FrozenTests = others.Append(kept).ToList() };
         });
 
     /// <summary>
