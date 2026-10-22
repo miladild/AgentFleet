@@ -134,7 +134,7 @@ internal static partial class TestFirst
                 earlierTests = true;
             }
             else if (!earlierTests && (step.Files ?? []).Any(path => !PlanRunner.IsTestPath(path) && CodeExtensions.Contains(Path.GetExtension(path))) && !IsSkeleton(step))
-                yield return $"{label} changes behaviour and needs an earlier tests step.";
+                yield return $"{label} changes behaviour and needs an earlier tests step: add a step before it whose \"kind\" field is the string \"tests\", whose files are only test files, and whose verify command runs just those tests.";
         }
     }
 

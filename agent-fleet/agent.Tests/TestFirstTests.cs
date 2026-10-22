@@ -106,10 +106,10 @@ public sealed class TestFirstTests
         Assert.Equal(PlanGate.PlanningInstructions(null), off);
         // Both calls above run the same code, so what the off text must not contain is checked on its own.
         Assert.DoesNotContain(PlanTestsStepPrompt.PlanningRules, off);
-        Assert.DoesNotContain("kind `tests`", off);
+        Assert.DoesNotContain("\"kind\" field is the string \"tests\"", off);
         string rules = PlanGate.PlanningInstructions(null, testFirst: TestFirstMode.On);
         Assert.StartsWith(off, rules);
-        Assert.Contains("kind `tests`", rules);
+        Assert.Contains("\"kind\" field is the string \"tests\"", rules);
         Assert.Contains("skeleton", rules);
         Assert.Contains("last step", rules);
     }
@@ -146,6 +146,7 @@ public sealed class TestFirstTests
         Assert.Contains(Problems(Step(["tests/LimitsTests.cs"], "tests", null), Step([])), p => p.Contains("verify command"));
         Assert.Contains(Problems(Step(["tests/LimitsTests.cs"], "tests")), p => p.Contains("last step"));
         Assert.Contains(Problems(Step(["src/limits.cs"])), p => p.Contains("earlier tests step"));
+        Assert.Contains(Problems(Step(["src/limits.cs"])), p => p.Contains("\"kind\" field is the string \"tests\""));
     }
 
     [Fact]

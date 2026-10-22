@@ -8,7 +8,7 @@ internal static class PlanTestsStepPrompt
         Tests first overrides the instruction to write a piece of code and its test in the same step.
         For each piece of new behaviour, first create a skeleton if the code under test does not exist:
         an ordinary step with names, signatures and bodies that throw "not implemented", checked by a build or syntax check.
-        Then use a step with kind `tests`, only test files, and a verify command that runs just those tests.
+        Then use a step whose "kind" field is the string "tests" (an extra field on the step object, beside title and files), only test files, and a verify command that runs just those tests.
         Those tests must FAIL until the behaviour exists. Follow it with an ordinary implementation step whose verify
         command runs those tests. The last step still runs the whole project's checks and is never a tests step.
         Also pass the task's requirements to propose_plan as requirements: one per must or should clause, named edge case
