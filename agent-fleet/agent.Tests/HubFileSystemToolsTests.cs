@@ -71,6 +71,62 @@ public sealed class HubFileSystemToolsTests : IDisposable
     }
 
     [Fact]
+    public async Task EditFile_applies_a_unique_match_that_differs_only_in_trailing_whitespace()
+    {
+        string file = Write("trail.txt", "one  \ntwo\nthree\n");
+
+        string result = await HubFileSystemTools.EditFileAsync(file, "one\ntwo", "1\n2", null, default);
+
+        Assert.Equal("1\n2\nthree\n", File.ReadAllText(file));
+        Assert.Equal($"Edited {file}: replaced 1 occurrence at line 1, matched after ignoring trailing whitespace.", result);
+    }
+
+    [Fact]
+    public async Task EditFile_keeps_CRLF_line_breaks_when_the_trailing_whitespace_match_applies()
+    {
+        string file = Write("trail-crlf.txt", "first  \r\nsecond\r\nthird\r\n");
+
+        await HubFileSystemTools.EditFileAsync(file, "first\nsecond", "1\n2", null, default);
+
+        Assert.Equal("1\r\n2\r\nthird\r\n", File.ReadAllText(file));
+    }
+
+    [Fact]
+    public async Task EditFile_does_not_ignore_indentation_and_says_where_the_closest_text_is()
+    {
+        string file = Write("indent.py", "def f():\n    return 1\n");
+
+        string result = await HubFileSystemTools.EditFileAsync(file, "def f():\n  return 1", "def f():\n  return 2", null, default);
+
+        Assert.StartsWith($"Error: oldText was not found in {file}. The closest text starts at line 1:", result);
+        Assert.Contains("\n2:     return 1 (differs from your line 2)\n", result);
+        Assert.Equal("def f():\n    return 1\n", File.ReadAllText(file));
+    }
+
+    [Fact]
+    public async Task EditFile_refuses_a_trailing_whitespace_match_that_is_not_unique()
+    {
+        string file = Write("ambiguous.txt", "a \nb\na \nb\n");
+
+        string result = await HubFileSystemTools.EditFileAsync(file, "a\nb", "x", null, default);
+
+        Assert.Equal($"Error: oldText matches 2 places in {file} once trailing whitespace is ignored. Include more surrounding lines so it is unique.", result);
+        Assert.Equal("a \nb\na \nb\n", File.ReadAllText(file));
+    }
+
+    [Fact]
+    public async Task EditFile_not_found_reply_is_the_same_wording_as_the_worker_reply()
+    {
+        string file = Write("wording.txt", "alpha\nbeta\ngamma\n");
+
+        string result = await HubFileSystemTools.EditFileAsync(file, "beta\nGAMMA", "x", null, default);
+
+        Assert.StartsWith($"Error: oldText was not found in {file}. The closest text starts at line 2:\n", result);
+        Assert.EndsWith("Copy the exact lines from here, or read_file the region.", result);
+        Assert.Equal("alpha\nbeta\ngamma\n", File.ReadAllText(file));
+    }
+
+    [Fact]
     public async Task WriteFile_with_the_same_content_reports_unchanged_without_touching_the_file()
     {
         string file = Write("same.txt", "same content\n");

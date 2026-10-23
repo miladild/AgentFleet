@@ -21,6 +21,11 @@ internal static partial class ToolLoopGuard
     public const int StopAt = 5;
     private const int SuccessfulWindowSize = 10;
 
+    /// <summary>The miss in a row from which an edit reply carries the closest region of the file again.</summary>
+    public const int EditMissRegionAt = 3;
+    private const string EditToolName = "edit_file";
+    private const string EditNotFoundStart = "Error: oldText was not found in ";
+
     /// <summary>Starts every note the guard adds to a result, so the same failure still counts as the same after one was added.</summary>
     internal const string Marker = "[Fleet loop guard]";
 
@@ -136,7 +141,10 @@ internal static partial class ToolLoopGuard
     /// Looks at the call that just finished. Repeated no-progress results use the turn-wide rule; repeated successful results
     /// use the recent-call window. Returns the result to give back to the model.
     /// </summary>
-    public static object? Apply(FunctionInvocationContext context, object? result, ILogger? logger = null)
+    public static object? Apply(FunctionInvocationContext context, object? result, ILogger? logger = null) =>
+        WithEditMissRegion(context, ApplyRepeats(context, result, logger));
+
+    private static object? ApplyRepeats(FunctionInvocationContext context, object? result, ILogger? logger)
     {
         if (result?.ToString() is not { } text || context.CallContent is not { } call)
         {
@@ -234,6 +242,22 @@ internal static partial class ToolLoopGuard
     /// <summary>Counts matching successful calls among the last ten calls in this turn, including the current call.</summary>
     public static int SuccessfulWindowRepeats(IEnumerable<ChatMessage> messages, FunctionCallContent call, string result)
     {
+        var calls = AnsweredCalls(messages);
+
+        // The invocation framework may include the current, still-unanswered call in Messages.
+        int current = calls.FindLastIndex(item => item.Result is null && string.Equals(item.Call.CallId, call.CallId, StringComparison.Ordinal));
+        if (current >= 0) calls.RemoveAt(current);
+
+        string key = KeyOf(call);
+        string normalized = Normalise(result);
+        return calls.TakeLast(SuccessfulWindowSize - 1).Count(item => item.Result is { } previous &&
+            string.Equals(KeyOf(item.Call), key, StringComparison.Ordinal) &&
+            string.Equals(Normalise(previous), normalized, StringComparison.Ordinal)) + 1;
+    }
+
+    // Every call of this turn in order, with the text it got back; the result is null while the call is still waiting for its answer.
+    private static List<(FunctionCallContent Call, string? Result)> AnsweredCalls(IEnumerable<ChatMessage> messages)
+    {
         ChatMessage[] list = messages.ToArray();
         int start = Array.FindLastIndex(list, message => message.Role == ChatRole.User) + 1;
         var calls = new List<(FunctionCallContent Call, string? Result)>();
@@ -259,15 +283,64 @@ internal static partial class ToolLoopGuard
             }
         }
 
-        // The invocation framework may include the current, still-unanswered call in Messages.
-        int current = calls.FindLastIndex(item => item.Result is null && string.Equals(item.Call.CallId, call.CallId, StringComparison.Ordinal));
-        if (current >= 0) calls.RemoveAt(current);
+        return calls;
+    }
 
-        string key = KeyOf(call);
-        string normalized = Normalise(result);
-        return calls.TakeLast(SuccessfulWindowSize - 1).Count(item => item.Result is { } previous &&
-            string.Equals(KeyOf(item.Call), key, StringComparison.Ordinal) &&
-            string.Equals(Normalise(previous), normalized, StringComparison.Ordinal)) + 1;
+    /// <summary>
+    /// The third failed edit in a row on one file, in this turn, gets the closest region of the file again, up to forty lines: a
+    /// model that keeps retyping oldText with small changes is shown more of the file each time it misses. Only a not-found
+    /// reply gets it; a successful edit of the file starts the count again.
+    /// </summary>
+    private static object? WithEditMissRegion(FunctionInvocationContext context, object? result)
+    {
+        if (result?.ToString() is not { } text || context.CallContent is not { } call || call.Name != EditToolName)
+        {
+            return result;
+        }
+
+        if (!text.StartsWith(EditNotFoundStart, StringComparison.Ordinal) || ArgumentText(call, "path") is not { } path)
+        {
+            return result;
+        }
+
+        int misses = ConsecutiveEditErrors(context.Messages, path) + 1;
+        if (misses < EditMissRegionAt || EditMatching.LastMissRegion(path) is not { } region)
+        {
+            return result;
+        }
+
+        int last = region.FirstLine + region.Lines.Count - 1;
+        return text + $"\n\n{Marker} {misses} edits to this file in a row failed. The closest text, lines {region.FirstLine}-{last}:\n" +
+               string.Join("\n", region.Lines) + "\nCopy the exact lines from here, or read_file the region.";
+    }
+
+    // Failed edit_file calls on this path since the last successful one, counted over the calls already answered in this turn.
+    private static int ConsecutiveEditErrors(IEnumerable<ChatMessage> messages, string path)
+    {
+        int misses = 0;
+        foreach ((FunctionCallContent call, string? answer) in AnsweredCalls(messages))
+        {
+            if (answer is null || call.Name != EditToolName || ArgumentText(call, "path") != path)
+            {
+                continue;
+            }
+
+            misses = IsError(answer) ? misses + 1 : 0;
+        }
+
+        return misses;
+    }
+
+    private static string? ArgumentText(FunctionCallContent call, string name)
+    {
+        if (call.Arguments is null || !call.Arguments.TryGetValue(name, out object? value))
+        {
+            return null;
+        }
+
+        return value is JsonElement element
+            ? element.ValueKind == JsonValueKind.String ? element.GetString() : element.ToString()
+            : value?.ToString();
     }
 
     // The tool and its arguments, in a form that does not depend on key order or on how long a written file was.

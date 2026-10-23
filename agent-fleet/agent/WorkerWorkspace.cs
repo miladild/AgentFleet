@@ -881,15 +881,37 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
     {
         if (FrozenRefusal(covering: false, path) is { } frozenRefusal) return frozenRefusal;
         if (string.IsNullOrEmpty(oldText)) return "Error: oldText must not be empty.";
-        string current = await ReadFileAsync(path, null, null, cancellationToken);
-        if (current.StartsWith("Error:", StringComparison.Ordinal)) return current;
+        // The whole file: the read tool's text is cut at 50,000 characters, and an edit written back from that text lost the rest.
         string target = ResolveRemotePath(path);
+        string current;
+        Audit("read_file", path);
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            if (!RemoteFileExists(target)) return $"Error: file not found in worker workspace: {path}";
+            current = await ReadRemoteFileAsync(target, cancellationToken);
+        }
+        finally { _gate.Release(); }
+
         bool crlf = current.Contains("\r\n", StringComparison.Ordinal);
         string source = crlf ? NormalizeLines(current) : current;
         if (crlf) { oldText = NormalizeLines(oldText); newText = NormalizeLines(newText); }
         int count = CountOccurrences(source, oldText);
-        if (count == 0) return $"Error: oldText was not found in {path}; read the file and copy the exact text.";
-        string updated = source.Replace(oldText, newText, StringComparison.Ordinal);
+        string note = string.Empty;
+        string updated;
+        if (count == 0)
+        {
+            (int lenient, int start, int end) = EditMatching.FindLenient(source, oldText);
+            if (lenient == 0) return EditMatching.NotFoundReply(path, path, source, oldText);
+            if (lenient > 1) return EditMatching.AmbiguousReply(path, lenient);
+            count = 1;
+            updated = string.Concat(source.AsSpan(0, start), newText, source.AsSpan(end));
+            note = ", " + EditMatching.LenientNote;
+        }
+        else
+        {
+            updated = source.Replace(oldText, newText, StringComparison.Ordinal);
+        }
         if (updated == source)
             return $"Unchanged: this edit changes nothing in {path} (oldText and newText are the same, or the file already contains the new text). The file is as it was. Run the tests with run_command to see what actually fails, or read the file and change something else.";
         if (count > 1 && replaceAll != true) return $"Error: oldText matches {count} places in {path}; include more surrounding lines or set replaceAll to true.";
@@ -899,7 +921,7 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
         try
         {
             await WriteRemoteFileAsync(target, updated, cancellationToken);
-            return $"Edited {path}: replaced {(replaceAll == true ? count : 1)} occurrence(s) in worker workspace {Machine}.";
+            return $"Edited {path}: replaced {(replaceAll == true ? count : 1)} occurrence(s) in worker workspace {Machine}{note}.";
         }
         finally { _gate.Release(); }
     }

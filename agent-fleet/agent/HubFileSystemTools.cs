@@ -136,18 +136,37 @@ internal static class HubFileSystemTools
         }
 
         int count = CountOccurrences(content, oldText);
+        string note = string.Empty;
+        int firstIndex;
+        string updated;
         if (count == 0)
         {
-            return $"Error: oldText was not found in {resolved}. It must match exactly, including indentation and " +
-                "line breaks. Use read_file (with startLine and endLine) to copy the current text.";
+            // Only when the exact text is absent: a lenient match applies if it is the one place, and otherwise says where the text is.
+            (int lenient, int start, int end) = EditMatching.FindLenient(content, oldText);
+            if (lenient == 0)
+            {
+                return EditMatching.NotFoundReply(resolved, path, content, oldText);
+            }
+
+            if (lenient > 1)
+            {
+                return EditMatching.AmbiguousReply(resolved, lenient);
+            }
+
+            count = 1;
+            firstIndex = start;
+            updated = string.Concat(content.AsSpan(0, start), newText, content.AsSpan(end));
+            note = ", " + EditMatching.LenientNote;
+        }
+        else
+        {
+            firstIndex = content.IndexOf(oldText, StringComparison.Ordinal);
+            updated = replaceAll == true
+                ? content.Replace(oldText, newText, StringComparison.Ordinal)
+                : string.Concat(content.AsSpan(0, firstIndex), newText, content.AsSpan(firstIndex + oldText.Length));
         }
 
-        int firstIndex = content.IndexOf(oldText, StringComparison.Ordinal);
         int firstLine = content.AsSpan(0, firstIndex).Count('\n') + 1;
-
-        string updated = replaceAll == true
-            ? content.Replace(oldText, newText, StringComparison.Ordinal)
-            : string.Concat(content.AsSpan(0, firstIndex), newText, content.AsSpan(firstIndex + oldText.Length));
 
         if (updated == content)
         {
@@ -162,7 +181,7 @@ internal static class HubFileSystemTools
 
         await File.WriteAllTextAsync(resolved, updated, encoding, cancellationToken);
         return count == 1
-            ? $"Edited {resolved}: replaced 1 occurrence at line {firstLine}."
+            ? $"Edited {resolved}: replaced 1 occurrence at line {firstLine}{note}."
             : $"Edited {resolved}: replaced {count} occurrences, the first at line {firstLine}.";
     }
 

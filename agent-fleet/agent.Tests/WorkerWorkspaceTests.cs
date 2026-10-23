@@ -59,6 +59,77 @@ public sealed class WorkerWorkspaceTests : PlanTestBase
         Assert.Equal("const answer = 42;\n", files.Files[remote]);
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task A_long_file_round_trips_byte_for_byte_through_an_edit_of_one_line(bool crlf, bool bom)
+    {
+        // Longer than the read tool's 50,000 characters: the edit must work on the whole file, not on the cut-off text.
+        string lineBreak = crlf ? "\r\n" : "\n";
+        var lines = Enumerable.Range(0, 1000).Select(i => $"line {i:D4} " + new string('x', 52)).ToList();
+        string original = (bom ? "\uFEFF" : string.Empty) + string.Join(lineBreak, lines) + lineBreak;
+        lines[500] = "line 0500 changed";
+        string expected = (bom ? "\uFEFF" : string.Empty) + string.Join(lineBreak, lines) + lineBreak;
+        Assert.True(original.Length > 50_000);
+
+        var files = new FakeFileAccess();
+        using WorkerWorkspaceSession session = FakeSession(files);
+        string remote = session.RemoteRoot + "/src/long.txt";
+        files.Files[remote] = original;
+
+        string result = await session.EditFileAsync("src/long.txt", "line 0500 " + new string('x', 52), "line 0500 changed", null, default);
+
+        Assert.Equal("Edited src/long.txt: replaced 1 occurrence(s) in worker workspace worker-test.", result);
+        Assert.Equal(expected, files.Files[remote]);
+    }
+
+    [Fact]
+    public async Task Worker_edit_reports_the_closest_text_when_oldText_is_not_found()
+    {
+        var files = new FakeFileAccess();
+        using WorkerWorkspaceSession session = FakeSession(files);
+        string remote = session.RemoteRoot + "/src/app.js";
+        files.Files[remote] = "alpha\nbeta\ngamma\n";
+
+        string result = await session.EditFileAsync("src/app.js", "beta\nGAMMA", "x", null, default);
+
+        Assert.StartsWith("Error: oldText was not found in src/app.js. The closest text starts at line 2:\n", result);
+        Assert.Contains("\n3: gamma (differs from your line 2)\n", result);
+        Assert.EndsWith("Copy the exact lines from here, or read_file the region.", result);
+        Assert.Equal(0, files.Writes);
+    }
+
+    [Fact]
+    public async Task Worker_edit_applies_a_unique_match_that_differs_only_in_trailing_whitespace()
+    {
+        var files = new FakeFileAccess();
+        using WorkerWorkspaceSession session = FakeSession(files);
+        string remote = session.RemoteRoot + "/src/app.js";
+        files.Files[remote] = "const a = 1;  \nconst b = 2;\n";
+
+        string result = await session.EditFileAsync("src/app.js", "const a = 1;\nconst b = 2;", "const a = 3;\nconst b = 2;", null, default);
+
+        Assert.Equal("Edited src/app.js: replaced 1 occurrence(s) in worker workspace worker-test, matched after ignoring trailing whitespace.", result);
+        Assert.Equal("const a = 3;\nconst b = 2;\n", files.Files[remote]);
+    }
+
+    [Fact]
+    public async Task Worker_edit_refuses_a_trailing_whitespace_match_that_is_not_unique_and_leaves_the_file_alone()
+    {
+        var files = new FakeFileAccess();
+        using WorkerWorkspaceSession session = FakeSession(files);
+        string remote = session.RemoteRoot + "/src/app.js";
+        const string original = "a \nb\na\t\nb\n";
+        files.Files[remote] = original;
+
+        string result = await session.EditFileAsync("src/app.js", "a\nb", "x", null, default);
+
+        Assert.StartsWith("Error: oldText matches 2 places in src/app.js once trailing whitespace is ignored.", result);
+        Assert.Equal(0, files.Writes);
+        Assert.Equal(original, files.Files[remote]);
+    }
+
     [Fact]
     public async Task Connect_configures_sftp_timeout_and_keep_alives_before_connecting()
     {
