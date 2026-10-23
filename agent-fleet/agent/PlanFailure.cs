@@ -52,6 +52,21 @@ internal static partial class PlanFailure
     [GeneratedRegex(@"(?:\bSyntaxError\b|\bIndentationError\b|\bParserError\b|\berror\s+(?:CS|TS)\d+|\bBuild FAILED\b|could not compile|compilation (?:failed|error))", RegexOptions.IgnoreCase)]
     private static partial Regex BuildBrokenOutput();
 
+    // esbuild (tsx, vite) prints "Transform failed with N error(s):" and then the file position of each error; swc prints "Failed to parse source".
+    [GeneratedRegex(@"Transform failed with \d+ errors?:\s*[\r\n]+[^\r\n]*:\d+:\d+: ERROR:|name:\s*'TransformError'|Failed to parse source", RegexOptions.IgnoreCase)]
+    private static partial Regex TransformFailure();
+
+    // A parser's "Unexpected token" that names the source file and line it is in, on the same line.
+    [GeneratedRegex(@"Unexpected token[^\r\n]*\.(?:[cm]?[jt]sx?|py|cs):\d+|\.(?:[cm]?[jt]sx?|py|cs):\d+[^\r\n]*Unexpected token", RegexOptions.IgnoreCase)]
+    private static partial Regex UnexpectedTokenInSource();
+
+    // A project source file named with its line, or as Python names it ("x.py", line 3): where a syntax error came from.
+    [GeneratedRegex(@"\.(?:[cm]?[jt]sx?|py|cs)(?::\d+|""|',\s*line\s+\d+|\(\d+)", RegexOptions.IgnoreCase)]
+    private static partial Regex SourceFileLocation();
+
+    [GeneratedRegex(@"^\s*ℹ tests (?<count>\d+)\s*$")]
+    private static partial Regex NodeTestCount();
+
     [GeneratedRegex(@"^(?:CS|TS|MSB|NETSDK)\d+$", RegexOptions.IgnoreCase)]
     private static partial Regex BuildErrorCode();
 
@@ -71,7 +86,9 @@ internal static partial class PlanFailure
     public static IReadOnlyList<string> FailingItems(string? checkOutput) =>
         FailingItemsIn(AnsiEscape().Replace(checkOutput ?? string.Empty, string.Empty));
 
-    private static string[] FailingItemsIn(string output)
+    // namesOnly leaves out the runner's "failing tests:" header and the file-level lines that name a test file: they name no test.
+    // The dispute reader keeps the file-level lines, because a file that did not load may be the step's own test file.
+    private static string[] FailingItemsIn(string output, bool namesOnly = false)
     {
         var items = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (string line in output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
@@ -83,9 +100,10 @@ internal static partial class PlanFailure
 
             Match failed = FailedTestLine().Match(line);
             if (!failed.Success) failed = XunitFailedLine().Match(line);
-            if (failed.Success)
+            if (failed.Success && !(namesOnly && TestDispute.SpecFailingHeader().IsMatch(line)))
             {
                 string name = NormalizeLine(failed.Groups["name"].Value);
+                if (namesOnly && TestDispute.BareTestFile().IsMatch(failed.Groups["name"].Value.Trim())) continue;
                 if (name.Length > 0) items.Add(name);
             }
         }
@@ -96,7 +114,7 @@ internal static partial class PlanFailure
     public static FailureFingerprint FailureSignature(string? checkOutput)
     {
         string output = AnsiEscape().Replace(checkOutput ?? string.Empty, string.Empty);
-        string[] found = FailingItemsIn(output);
+        string[] found = FailingItemsIn(output, namesOnly: true);
         if (found.Length > 0)
         {
             string[] names = found.Take(40).ToArray();
@@ -137,7 +155,8 @@ internal static partial class PlanFailure
             return exception is UnauthorizedAccessException ? FailureClass.Environment : FailureClass.Unknown;
         }
 
-        if (CheckSyntaxError().IsMatch(evidence)) return FailureClass.CheckDefect;
+        // A syntax error in a project source file is the code's fault, not the check's; the verify command's own parser errors have no such file.
+        if (CheckSyntaxError().IsMatch(evidence) && !InSourceFile(evidence)) return FailureClass.CheckDefect;
         if (MissingCheckInput().IsMatch(evidence)) return FailureClass.CheckDefect;
 
         FailureFingerprint current = FailureSignature(checkOutput);
@@ -166,8 +185,58 @@ internal static partial class PlanFailure
     }
 
     /// <summary>The check printed compile, syntax or build errors: the code does not build, so no test result is to be trusted.</summary>
-    internal static bool BuildBroken(string? checkOutput) =>
-        !string.IsNullOrEmpty(checkOutput) && BuildBrokenOutput().IsMatch(AnsiEscape().Replace(checkOutput, string.Empty));
+    internal static bool BuildBroken(string? checkOutput)
+    {
+        if (string.IsNullOrEmpty(checkOutput)) return false;
+        string output = AnsiEscape().Replace(checkOutput, string.Empty);
+        // A failing line that names a test is not a build error, whatever words the name uses; one that prints a compiler error code is.
+        string[] lines = output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+        string unnamed = string.Join('\n', lines.Where(line => !NamesATest(line)));
+        return BuildBrokenOutput().IsMatch(unnamed) || TransformFailure().IsMatch(output) ||
+               lines.Any(line => !char.IsWhiteSpace(line[0]) && !NamesATest(line) && UnexpectedTokenInSource().IsMatch(line)) ||
+               TestFileDidNotLoad(output);
+    }
+
+    private static bool NamesATest(string line) =>
+        (FailedTestLine().IsMatch(line) || XunitFailedLine().IsMatch(line)) && !CompilerErrorCode().IsMatch(line);
+
+    // A test file that did not load is printed as the one failure, and node counts it as the one test that ran: no test ran at all.
+    // A failing line that names a test, or a count of tests that differs from the file lines, means the file did load.
+    private static bool TestFileDidNotLoad(string output)
+    {
+        int files = 0;
+        int? tests = null;
+        foreach (string line in output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (NodeTestCount().Match(line) is { Success: true } count && int.TryParse(count.Groups["count"].Value, out int counted))
+            {
+                tests = counted;
+            }
+
+            Match failed = FailedTestLine().Match(line);
+            if (!failed.Success) failed = XunitFailedLine().Match(line);
+            if (!failed.Success || TestDispute.SpecFailingHeader().IsMatch(line)) continue;
+            if (!TestDispute.BareTestFile().IsMatch(failed.Groups["name"].Value.Trim())) return false;
+            files++;
+        }
+
+        return files > 0 && tests == files;
+    }
+
+    private static bool InSourceFile(string evidence)
+    {
+        string[] lines = evidence.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+        for (int index = 0; index < lines.Length; index++)
+        {
+            if (!CheckSyntaxError().IsMatch(lines[index])) continue;
+            for (int above = Math.Max(0, index - 5); above <= index; above++)
+            {
+                if (SourceFileLocation().IsMatch(lines[above])) return true;
+            }
+        }
+
+        return false;
+    }
 
     /// <summary>A failure signature item that is a compiler or build error code (CS1002, TS2322) and not a failing test.</summary>
     internal static bool IsBuildErrorCode(string item) => BuildErrorCode().IsMatch(item);

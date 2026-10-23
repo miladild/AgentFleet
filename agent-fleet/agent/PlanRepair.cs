@@ -181,11 +181,19 @@ internal readonly record struct RoundScore(bool Compiles, int Failures)
     public bool IsWorseThan(RoundScore best) =>
         (best.Compiles && !Compiles) || (Compiles == best.Compiles && Failures > best.Failures);
 
-    /// <summary>The score of a failed check, or null when its output names no failures (a hash of it cannot be counted).</summary>
-    public static RoundScore? Of(FailureFingerprint signature, string? checkOutput) =>
-        signature.Items.Count == 0
-            ? null
-            : new RoundScore(!PlanFailure.BuildBroken(checkOutput) && !signature.Items.Any(PlanFailure.IsBuildErrorCode), signature.Items.Count);
+    /// <summary>
+    /// The score of a failed check, or null when its output names no failures (a hash of it cannot be counted). Code that does not
+    /// build scores as one defect when the output names nothing, so a file that does not load is never scored as better than one that runs.
+    /// </summary>
+    public static RoundScore? Of(FailureFingerprint signature, string? checkOutput)
+    {
+        if (signature.Items.Count > 0)
+        {
+            return new RoundScore(!PlanFailure.BuildBroken(checkOutput) && !signature.Items.Any(PlanFailure.IsBuildErrorCode), signature.Items.Count);
+        }
+
+        return PlanFailure.BuildBroken(checkOutput) ? new RoundScore(false, 1) : null;
+    }
 
     public string Describe() => Compiles
         ? $"{Failures} failing"

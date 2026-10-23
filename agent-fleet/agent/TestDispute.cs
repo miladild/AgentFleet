@@ -216,7 +216,7 @@ internal static partial class TestDispute
     private static partial Regex SpecSuiteHeading();
 
     [GeneratedRegex(@"^✖ failing tests:\s*$")]
-    private static partial Regex SpecFailingHeader();
+    internal static partial Regex SpecFailingHeader();
 
     [GeneratedRegex(@"^\s*FAIL\s+\./\S+\s*$")]
     private static partial Regex JestFileHeader();
@@ -231,5 +231,5 @@ internal static partial class TestDispute
     private static partial Regex TapOk();
 
     [GeneratedRegex(@"(?i)(?:^|[/\\])\S+\.(?:[cm]?[jt]sx?|py|cs)(?::\d+)?$")]
-    private static partial Regex BareTestFile();
+    internal static partial Regex BareTestFile();
 }
