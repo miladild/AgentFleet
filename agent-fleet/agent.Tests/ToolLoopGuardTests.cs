@@ -32,6 +32,17 @@ public sealed class ToolLoopGuardTests
     }
 
     [Fact]
+    public void The_round_budget_line_does_not_make_the_same_failure_a_new_one()
+    {
+        List<ChatMessage> messages = Turn(
+            (Call("1"), "Error: no such file a.txt\n\n" + ToolLoopGuard.RoundBudgetLine(5)),
+            (Call("2"), "Error: no such file a.txt\n\n" + ToolLoopGuard.RoundBudgetLine(4)));
+
+        Assert.Equal(3, ToolLoopGuard.Repeats(messages, Call("3"), "Error: no such file a.txt\n\n" + ToolLoopGuard.RoundBudgetLine(3)));
+        Assert.Equal(3, ToolLoopGuard.Repeats(messages, Call("3"), "Error: no such file a.txt"));
+    }
+
+    [Fact]
     public void A_call_that_worked_in_between_or_a_different_turn_does_not_count()
     {
         List<ChatMessage> messages = Turn(

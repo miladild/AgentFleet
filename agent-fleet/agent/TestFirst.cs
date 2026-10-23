@@ -142,5 +142,5 @@ internal static partial class TestFirst
     private static bool IsSkeleton(PlanStepInput step) =>
         step.Detail.Contains("skeleton", StringComparison.OrdinalIgnoreCase) &&
         step.Detail.Contains("not implemented", StringComparison.OrdinalIgnoreCase) &&
-        Regex.IsMatch(step.Verify ?? string.Empty, @"^(?:dotnet build|(?:npx )?tsc --noEmit|(?:python|python3|py -3) -m py_compile\s+\S+|node --check\s+\S+)$", RegexOptions.IgnoreCase);
+        Regex.IsMatch(step.Verify ?? string.Empty, @"^(?:dotnet build|(?:npx )?tsc --noEmit|(?:python|python3|py -3) -m py_compile\s+\S+|node --check\s+\S+\.(?:js|mjs|cjs))$", RegexOptions.IgnoreCase);
 }

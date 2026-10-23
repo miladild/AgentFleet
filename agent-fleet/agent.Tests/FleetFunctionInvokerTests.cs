@@ -65,7 +65,7 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
         public void Dispose() { }
     }
 
-    private async Task<string[]> RunAsync(FleetFunctionInvoker invoker, ScriptedModel model, AITool tool, bool runner, string? role = null, string? contextId = null, CancellationToken cancellationToken = default)
+    private async Task<string[]> RunAsync(FleetFunctionInvoker invoker, ScriptedModel model, AITool tool, bool runner, string? role = null, string? contextId = null, CancellationToken cancellationToken = default, StepToolActivity? activity = null)
     {
         IChatClient client = new ChatClientBuilder(model).UseFunctionInvocation(null, o =>
         {
@@ -81,6 +81,8 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
             options.AdditionalProperties = new AdditionalPropertiesDictionary { [FleetRoutingChatClient.RunnerTierKey] = "standard" };
             if (role is not null)
                 options.AdditionalProperties[FleetRoutingChatClient.RunnerRoleKey] = role;
+            if (activity is not null)
+                options.AdditionalProperties[StepToolActivity.Key] = activity;
         }
 
         using IDisposable scope = Scope(contextId ?? NewContextId());
@@ -359,6 +361,81 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
 
         Assert.True(runs > 5, "Non-runner should not be cut by round limit (runs=" + runs + ")");
         Assert.True(model.Requests > 5, "Non-runner requests should exceed round limit");
+    }
+
+    private static string RoundBudget(int roundsLeft) =>
+        $"[Round budget: {roundsLeft} tool calls left in this round. Leave the project in a state that works, and say what you would do next.]";
+
+    [Fact]
+    public async Task A_runner_result_names_the_rounds_left_once_five_or_fewer_remain()
+    {
+        var invoker = NewInvoker(rounds: 25);
+        var tool = AIFunctionFactory.Create((string path) => "ok " + path, "list_directory", "Lists.");
+        var model = new ScriptedModel(round => new FunctionCallContent("c" + round, "list_directory", new Dictionary<string, object?> { ["path"] = "dir" + round }));
+
+        string[] results = await RunAsync(invoker, model, tool, runner: true);
+
+        Assert.True(results.Length >= 24, "Expected the results of the first 24 rounds, got " + results.Length);
+        for (int index = 0; index < 24; index++)
+        {
+            int roundsLeft = 25 - (index + 1);
+            string expected = roundsLeft <= 5 ? $"ok dir{index}\n\n{RoundBudget(roundsLeft)}" : $"ok dir{index}";
+            Assert.Equal(expected, results[index]);
+        }
+    }
+
+    [Fact]
+    public async Task A_chat_result_never_names_the_rounds_left()
+    {
+        var invoker = NewInvoker(rounds: 25);
+        var tool = AIFunctionFactory.Create((string path) => "ok " + path, "list_directory", "Lists.");
+        int callCount = 0;
+        var model = new ScriptedModel(round =>
+        {
+            callCount++;
+            return callCount <= 30
+                ? new FunctionCallContent("c" + round, "list_directory", new Dictionary<string, object?> { ["path"] = "dir" + round })
+                : null;
+        });
+
+        string[] results = await RunAsync(invoker, model, tool, runner: false);
+
+        Assert.True(results.Length > 25, "Chat should not be cut by the round limit (results=" + results.Length + ")");
+        Assert.All(results, result => Assert.DoesNotContain("[Round budget:", result));
+    }
+
+    [Fact]
+    public async Task A_runner_attempt_counts_its_tool_calls_and_whether_one_edited_a_file()
+    {
+        var invoker = NewInvoker();
+        var activity = new StepToolActivity();
+        var write = AIFunctionFactory.Create((string path) => "Wrote " + path, "write_file", "Writes.");
+        int callCount = 0;
+        var model = new ScriptedModel(round => ++callCount <= 3
+            ? new FunctionCallContent("c" + round, "write_file", new Dictionary<string, object?> { ["path"] = "f" + round })
+            : null);
+
+        await RunAsync(invoker, model, write, runner: true, activity: activity);
+
+        Assert.Equal(3, activity.ToolCalls);
+        Assert.True(activity.EditToolCalled);
+    }
+
+    [Fact]
+    public async Task A_runner_attempt_that_only_reads_is_counted_without_an_edit()
+    {
+        var invoker = NewInvoker();
+        var activity = new StepToolActivity();
+        var list = AIFunctionFactory.Create((string path) => "ok " + path, "list_directory", "Lists.");
+        int callCount = 0;
+        var model = new ScriptedModel(round => ++callCount <= 2
+            ? new FunctionCallContent("c" + round, "list_directory", new Dictionary<string, object?> { ["path"] = "dir" + round })
+            : null);
+
+        await RunAsync(invoker, model, list, runner: true, activity: activity);
+
+        Assert.Equal(2, activity.ToolCalls);
+        Assert.False(activity.EditToolCalled);
     }
 
     // Behaviour 1: Runner policy refusal returns the refusal text and ends the turn.

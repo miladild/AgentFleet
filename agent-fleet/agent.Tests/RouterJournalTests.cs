@@ -286,6 +286,52 @@ public sealed class RouterJournalTests : ContextTestBase
     }
 
     [Fact]
+    public async Task Runner_keys_are_removed_before_the_model_request_and_ordinary_options_are_kept()
+    {
+        string id = NewContextId();
+        using IDisposable scope = Scope(id, "plan-abc-step-4");
+        IConfiguration configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["FLEET_CONFIG_PATH"] = Path.Combine(Root, "runner-keys.config.json"),
+                ["FLEET_PLANS_DIR"] = Path.Combine(Root, "plans"),
+                ["HUB_OLLAMA_MODEL"] = "test-model"
+            })
+            .Build();
+        var configStore = new FleetConfigStore(configuration);
+        var modeService = new FleetModeService(configStore);
+        FleetOptions options = FleetOptions.Load(configuration, configStore);
+        FleetNodeDefinition hub = options.Nodes.Single(node => node.Fallback);
+        var hubRaw = new RecordingClient();
+        var router = new FleetRoutingChatClient(
+            new RecordingClient(),
+            [new FleetRouteTarget(hub, hubRaw)],
+            new FleetHealthMonitor(options, new Factory()),
+            modeService,
+            new FleetPlanModeService(configStore),
+            new FleetPlanStore(configuration),
+            new HashSet<string>(),
+            new FleetActivityLog(),
+            NullLogger.Instance,
+            Journal);
+        var requestOptions = new ChatOptions
+        {
+            AdditionalProperties = new AdditionalPropertiesDictionary
+            {
+                [FleetRoutingChatClient.RunnerTierKey] = FleetTiers.Light,
+                [StepToolActivity.Key] = new StepToolActivity(),
+                ["num_ctx"] = 4096
+            }
+        };
+
+        await foreach (ChatResponseUpdate _ in router.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "do the work")], requestOptions)) { }
+
+        ChatOptions sent = Assert.IsType<ChatOptions>(Assert.Single(hubRaw.Options));
+        Assert.DoesNotContain(sent.AdditionalProperties!.Keys, key => key.StartsWith("fleet.runner.", StringComparison.Ordinal));
+        Assert.Equal(4096, sent.AdditionalProperties["num_ctx"]);
+    }
+
+    [Fact]
     public async Task A_partial_stream_failure_is_recorded_and_given_to_the_next_call()
     {
         string id = NewContextId();

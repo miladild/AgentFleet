@@ -156,7 +156,7 @@ public sealed partial class PlanRunnerTests : PlanTestBase
         Assert.Equal("worker-b", PlanRunner.ModelMachineFor(FleetMode.Aggressive, "worker-b", "worker-a", "primary"));
     }
 
-    private PlanRunner Runner(FakeStepAgent agent, Func<string, string> verify, TimeSpan? timeout = null, ISleepGuard? sleepGuard = null,
+    private PlanRunner Runner(IStepAgent agent, Func<string, string> verify, TimeSpan? timeout = null, ISleepGuard? sleepGuard = null,
         Func<int, TimeSpan>? transientDelay = null, Func<TimeSpan, CancellationToken, Task>? delayAsync = null,
         IWorkerWorkspaceManager? workerWorkspaces = null, Func<DateTimeOffset>? utcNow = null, IPlanNotifier? notifier = null,
         FleetOptions? fleetOptions = null, FleetHealthMonitor? healthMonitor = null) =>

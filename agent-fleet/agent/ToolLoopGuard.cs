@@ -24,6 +24,21 @@ internal static partial class ToolLoopGuard
     /// <summary>Starts every note the guard adds to a result, so the same failure still counts as the same after one was added.</summary>
     internal const string Marker = "[Fleet loop guard]";
 
+    /// <summary>A plan step's tool result carries the rounds left once this many or fewer remain before the round cap.</summary>
+    public const int RoundBudgetWarnAt = 5;
+
+    internal const string RoundBudgetPrefix = "[Round budget:";
+
+    public static string RoundBudgetLine(int roundsLeft) =>
+        $"{RoundBudgetPrefix} {roundsLeft} tool calls left in this round. Leave the project in a state that works, and say what you would do next.]";
+
+    /// <summary>Adds the round budget line to a tool result. The line is left out of the repeat check, so the countdown is not a change.</summary>
+    public static string WithRoundBudget(object? result, int roundsLeft)
+    {
+        string text = result?.ToString() ?? string.Empty;
+        return text.Length == 0 ? RoundBudgetLine(roundsLeft) : text + "\n\n" + RoundBudgetLine(roundsLeft);
+    }
+
     [GeneratedRegex(@"\b\d+(?:[.,]\d+)?\s*(?:ms|msec|milliseconds?|s|secs?|seconds?)\b|\b\d{4}-\d\d-\d\d[T ][\d:.]+Z?\b", RegexOptions.IgnoreCase)]
     private static partial Regex Timing();
 
@@ -276,7 +291,9 @@ internal static partial class ToolLoopGuard
     private static string Normalise(string result)
     {
         int note = result.IndexOf(Marker, StringComparison.Ordinal);
-        string text = note >= 0 ? result[..note] : result;
+        int budget = result.IndexOf(RoundBudgetPrefix, StringComparison.Ordinal);
+        int cut = note < 0 ? budget : budget < 0 ? note : Math.Min(note, budget);
+        string text = cut >= 0 ? result[..cut] : result;
         text = Timing().Replace(text, "<time>");
         text = Spaces().Replace(text, " ").Trim();
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)));

@@ -50,6 +50,9 @@ internal interface IStepSession
     /// <summary>Whether the next message may offer dispute_test (an ordinary step while frozen tests are in play). Off by default.</summary>
     void OfferDispute(bool offered) { }
 
+    /// <summary>Where the next message's tool calls are counted, so a timed-out attempt can still say what it did. Doubles ignore it.</summary>
+    void TrackActivity(StepToolActivity activity) { }
+
     Task<StepAgentReply> SendAsync(string message, string tier, string? machine, CancellationToken cancellationToken);
 }
 
@@ -57,6 +60,27 @@ internal interface IStepSession
 internal sealed record AgentToolCall(string Name, IReadOnlyDictionary<string, string?> Arguments);
 
 internal sealed record StepAgentReply(string Text, int ToolCalls, bool EditToolCalled, IReadOnlyList<AgentToolCall>? Calls = null, int LoopGuardNotes = 0);
+
+/// <summary>
+/// The tool calls one attempt has made so far, counted as they run. A reply is the only other place these come from, and an
+/// attempt that times out has no reply, so the runner reads this instead.
+/// </summary>
+internal sealed class StepToolActivity
+{
+    public const string Key = "fleet.runner.activity";
+
+    public int ToolCalls { get; private set; }
+
+    public bool EditToolCalled { get; private set; }
+
+    public void Record(string toolName)
+    {
+        ToolCalls++;
+        EditToolCalled |= IsEdit(toolName);
+    }
+
+    public static bool IsEdit(string toolName) => toolName is "write_file" or "edit_file" or "move_file" or "delete_file";
+}
 
 /// <summary>
 /// Drives the real agent. Each conversation is its own session, so a step never inherits another step's
@@ -91,6 +115,10 @@ internal sealed class FleetStepSession(AIAgent agent, string? role = null) : ISt
 
     public void OfferDispute(bool offered) => _offerDispute = offered;
 
+    private StepToolActivity? _activity;
+
+    public void TrackActivity(StepToolActivity activity) => _activity = activity;
+
     public bool HasHistory { get; private set; }
 
     public async Task<StepAgentReply> SendAsync(string message, string tier, string? machine, CancellationToken cancellationToken)
@@ -99,6 +127,10 @@ internal sealed class FleetStepSession(AIAgent agent, string? role = null) : ISt
         _promptData = null;
         _session ??= await _agent.CreateSessionAsync(cancellationToken);
         var properties = new AdditionalPropertiesDictionary { [FleetRoutingChatClient.RunnerTierKey] = tier };
+        if (_activity is not null)
+        {
+            properties[StepToolActivity.Key] = _activity;
+        }
         if (!string.IsNullOrWhiteSpace(machine))
         {
             properties[FleetRoutingChatClient.RunnerMachineKey] = machine;
@@ -179,7 +211,7 @@ internal sealed class FleetStepSession(AIAgent agent, string? role = null) : ISt
             },
             StringComparer.Ordinal));
 
-    private static bool IsEditTool(FunctionCallContent call) => call.Name is "write_file" or "edit_file" or "move_file" or "delete_file";
+    private static bool IsEditTool(FunctionCallContent call) => StepToolActivity.IsEdit(call.Name);
 }
 
 /// <summary>
@@ -2966,6 +2998,7 @@ internal sealed partial class PlanRunner
         IWorkerWorkspaceSession? worker = null;
         bool stagingWorkerWorkspace = false;
         ModelAttemptResult result = new(step.Id, string.Empty, null, ShouldVerify: false, Machine: machine, ModelNode: modelMachine);
+        var activity = new StepToolActivity();
         try
         {
             SnapshotFilesToCreate(plan, step);
@@ -3025,6 +3058,7 @@ internal sealed partial class PlanRunner
                 // The brief is read by the prompt providers, so what a tests step adds to it has to be in the data they get.
                 string? stepBrief = IsTestsStep(step) ? PlanTestsStepPrompt.Append(conversation.Brief, plan.Requirements) : conversation.Brief;
                 conversation.Session.OfferDispute(disputeOffered);
+                conversation.Session.TrackActivity(activity);
                 conversation.Session.ConfigurePrompt(conversation.RepairMessage is null
                     ? new PlanStepPromptData(plan, step, attempt, lastFailure, fileContext, parallelGroup,
                         contextId is not null, retryRoute, worker is not null, machine, worker?.Platform,
@@ -3066,7 +3100,8 @@ internal sealed partial class PlanRunner
             _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.TimedOut, tier, modelMachine ?? _journal?.ActualNode, failure,
                 modelNode: modelMachine, workspaceNode: machine, rung: conversation.Rung, round: conversation.Round);
             result = new ModelAttemptResult(step.Id, string.Empty, failure, ShouldVerify: true, Workspace: worker, Machine: machine,
-                ModelNode: modelMachine ?? _journal?.ActualNode, WorkBefore: work, TimedOut: true);
+                ModelNode: modelMachine ?? _journal?.ActualNode, WorkBefore: work, TimedOut: true,
+                ToolCalls: activity.ToolCalls, EditToolCalled: activity.EditToolCalled);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {

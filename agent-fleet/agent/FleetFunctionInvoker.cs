@@ -68,6 +68,11 @@ internal sealed class FleetFunctionInvoker(
         bool fromRunner = context.Options?.AdditionalProperties?.ContainsKey(FleetRoutingChatClient.RunnerTierKey) == true;
         if (fromRunner)
         {
+            if (context.Options?.AdditionalProperties?.TryGetValue(StepToolActivity.Key, out object? activity) == true && activity is StepToolActivity counter)
+            {
+                counter.Record(toolName);
+            }
+
             string? command = null;
             if (toolName == "run_command" && context.Arguments.TryGetValue("command", out object? commandValue))
                 command = commandValue?.ToString();
@@ -157,6 +162,13 @@ internal sealed class FleetFunctionInvoker(
             if (fromRunner && context.Iteration >= planStepToolRounds - 1)
             {
                 context.Terminate = true;
+            }
+
+            // The model is told how many rounds are left in the last few, so it can leave the project in a working state.
+            int roundsLeft = planStepToolRounds - (context.Iteration + 1);
+            if (fromRunner && roundsLeft is >= 1 and <= ToolLoopGuard.RoundBudgetWarnAt)
+            {
+                result = ToolLoopGuard.WithRoundBudget(result, roundsLeft);
             }
 
             string text = result?.ToString() ?? string.Empty;

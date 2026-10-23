@@ -128,6 +128,25 @@ public sealed class TestFirstTests
             Step(["tests/LimitsTests.cs"], "tests"), Step(["src/limits.cs"])));
     }
 
+    // node --check parses JavaScript only: for TypeScript it checks nothing, so it cannot prove a skeleton builds.
+    [Theory]
+    [InlineData("node --check src/limits.js", "src/limits.js", true)]
+    [InlineData("node --check src/limits.mjs", "src/limits.mjs", true)]
+    [InlineData("node --check src/limits.cjs", "src/limits.cjs", true)]
+    [InlineData("node --check src/limits.ts", "src/limits.ts", false)]
+    [InlineData("node --check src/limits.tsx", "src/limits.tsx", false)]
+    [InlineData("npx tsc --noEmit", "src/limits.ts", true)]
+    public void Skeleton_check_must_really_check_the_file_type(string verify, string file, bool accepted)
+    {
+        IReadOnlyList<string> problems = Problems(
+            Step([file], verify: verify, detail: "Create a skeleton whose bodies throw not implemented"),
+            Step(["tests/LimitsTests.ts"], "tests"), Step([file]));
+        if (accepted)
+            Assert.DoesNotContain(problems, problem => problem.StartsWith("Step 1 ", StringComparison.Ordinal));
+        else
+            Assert.Contains(problems, problem => problem.StartsWith("Step 1 ", StringComparison.Ordinal) && problem.Contains("needs an earlier tests step"));
+    }
+
     [Theory]
     [InlineData("unknown")]
     [InlineData("TESTS")]

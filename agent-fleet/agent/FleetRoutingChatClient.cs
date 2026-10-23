@@ -495,7 +495,8 @@ internal sealed class FleetRoutingChatClient : IChatClient
     {
         if (options?.AdditionalProperties is null ||
             (!options.AdditionalProperties.ContainsKey(RunnerTierKey) && !options.AdditionalProperties.ContainsKey(RunnerMachineKey) &&
-             !options.AdditionalProperties.ContainsKey(RunnerRoleKey) && !options.AdditionalProperties.ContainsKey(RunnerDisputeKey)))
+             !options.AdditionalProperties.ContainsKey(RunnerRoleKey) && !options.AdditionalProperties.ContainsKey(RunnerDisputeKey) &&
+             !options.AdditionalProperties.ContainsKey(StepToolActivity.Key)))
         {
             return options;
         }
@@ -505,6 +506,7 @@ internal sealed class FleetRoutingChatClient : IChatClient
         cleaned.AdditionalProperties.Remove(RunnerMachineKey);
         cleaned.AdditionalProperties.Remove(RunnerRoleKey);
         cleaned.AdditionalProperties.Remove(RunnerDisputeKey);
+        cleaned.AdditionalProperties.Remove(StepToolActivity.Key);
         return cleaned;
     }
 

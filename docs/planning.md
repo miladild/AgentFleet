@@ -65,8 +65,9 @@ steps, and checks each step with a real command instead of trusting itself.
      worker or hub edits and block instead of overwriting. Existing worker files that differ from the hub are preserved and
      staging stops. External web, HTTP, MCP/custom, GitHub CLI, publishing, deployment, and known remote-shell commands are blocked
      at the tool boundary. **Only a passing check and successful sync mark a step done.**
-   - A model turn ends after 25 rounds of tool calls (`FLEET_PLAN_STEP_TOOL_ROUNDS`) or 20 minutes, whichever comes
-     first, so a model going round in circles cannot hold a machine; the step's check then decides. A turn also ends early
+   - A model turn ends after 25 rounds of tool calls (`FLEET_PLAN_STEP_TOOL_ROUNDS`) or 30 minutes, whichever comes
+     first, so a model going round in circles cannot hold a machine; the step's check then decides. In the last five rounds
+     the model is told how many are left, so it can leave the project in a working state. A turn also ends early
      when the model makes the same call and gets the same error back: the third time the result carries a short note ("this is
      not working, try a different approach"), the fifth ends the turn. Only failing calls count, and timings in the error
      text do not make two failures different.
