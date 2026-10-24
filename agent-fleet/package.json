@@ -9,7 +9,7 @@
     "build": "next build",
     "start": "node scripts/serve.mjs start",
     "test:e2e": "playwright test",
-    "test:unit": "node --test src/components/planEvidence.test.mjs src/components/fitPresentation.test.mjs src/components/workPresentation.test.mjs src/components/approvalPresentation.test.mjs src/components/weeklyPresentation.test.mjs src/components/modelsPresentation.test.mjs src/components/labProxyPaths.test.mjs src/components/planRequirements.test.mjs src/requestGuard.test.mjs",
+    "test:unit": "node --test src/components/planEvidence.test.mjs src/components/fitPresentation.test.mjs src/components/workPresentation.test.mjs src/components/approvalPresentation.test.mjs src/components/weeklyPresentation.test.mjs src/components/visionPresentation.test.mjs src/components/modelsPresentation.test.mjs src/components/labProxyPaths.test.mjs src/components/planRequirements.test.mjs src/requestGuard.test.mjs",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit"
   },

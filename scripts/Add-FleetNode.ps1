@@ -27,6 +27,11 @@
 .PARAMETER Vision
     This machine reads images. It is used only when a message contains an image.
 
+.PARAMETER VisionMode
+    For a vision machine: off (nothing contacts it; images get a note), ondemand (the model loads when an image
+    arrives and leaves when idle; the default) or always (the model is kept loaded). Change it later with
+    Set-FleetVision.ps1.
+
 .PARAMETER Pull
     Download the model onto the machine through its Ollama if it is not there yet.
 
@@ -44,6 +49,7 @@ param(
     [Parameter(Mandatory)][string]$Model,
     [ValidateSet('heavy', 'standard', 'light')][string]$Tier = 'standard',
     [switch]$Vision,
+    [ValidateSet('off', 'ondemand', 'always')][string]$VisionMode = 'ondemand',
     [switch]$Fallback,
     [switch]$Pull,
     [string]$Purpose,
@@ -95,10 +101,18 @@ if (-not $Purpose) {
     $Purpose = if ($Vision) { 'Reads screenshots and images.' } else { switch ($Tier) { 'heavy' { 'Hard coding work and planning.' } 'light' { 'Quick questions and trivial edits.' } default { 'Ordinary coding work and plan steps.' } } }
 }
 $node = [ordered]@{ name = $Name; url = $nodeUrl; model = $Model; purpose = $Purpose }
-if ($Vision) { $node.vision = $true } else { $node.tier = $Tier }
+if ($Vision) { $node.vision = $true; $node.visionMode = $VisionMode } else { $node.tier = $Tier }
 if ($Fallback -and -not $Vision) { $node.fallback = $true }
 
 # --- apply it ----------------------------------------------------------------------------------
+# An existing node goes back to the backend exactly as it was read: the backend takes some fields (such as the context
+# length and the API) from the request as they are, so a field left out here would be reset on every add.
+function ConvertTo-FleetNodeForSave($Existing) {
+    $copy = [ordered]@{}
+    foreach ($property in $Existing.PSObject.Properties) { $copy[$property.Name] = $property.Value }
+    return $copy
+}
+
 $viaBackend = $false
 try { $null = Invoke-RestMethod -Uri "$BackendUrl/health" -TimeoutSec 3 -ErrorAction Stop; $viaBackend = $true }
 catch { if ($_.ErrorDetails.Message) { $viaBackend = $true } }
@@ -107,12 +121,13 @@ if ($viaBackend) {
     Write-Step 'Adding it through the running backend (it validates the change)'
     $current = Invoke-RestMethod -Uri "$BackendUrl/api/fleet-config"
     $nodes = @($current.nodes | ForEach-Object {
-        $o = [ordered]@{ name = $_.name; url = $_.url; model = $_.model; purpose = $_.purpose; tier = $_.tier; vision = [bool]$_.vision; fallback = [bool]$_.fallback }
+        $o = ConvertTo-FleetNodeForSave $_
         if ($Fallback -and -not $Vision) { $o.fallback = $false }
         $o
     })
     if ($nodes | Where-Object { $_.name -eq $Name }) { throw "A node called '$Name' already exists. Edit it in the web UI's Config panel or pick another name." }
     $newNode = [ordered]@{ name = $Name; url = $nodeUrl; model = $Model; purpose = $Purpose; tier = $(if ($Vision) { $null } else { $Tier }); vision = [bool]$Vision; fallback = [bool]($Fallback -and -not $Vision) }
+    if ($Vision) { $newNode['visionMode'] = $VisionMode }
     $body = @{ nodes = @($nodes + $newNode) } | ConvertTo-Json -Depth 8
     try { $saveResult = Invoke-RestMethod -Uri "$BackendUrl/api/fleet-config" -Method Put -Body $body -ContentType 'application/json' }
     catch {

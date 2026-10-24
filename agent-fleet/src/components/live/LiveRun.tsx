@@ -4,6 +4,7 @@ import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "rea
 import { waitingOn, type PlanStep } from "../PlanCard";
 import { RUNG_NAME, useLiveFeed, type LiveNode, type LivePlan, type LogLine, type StepActivity } from "./useLiveFeed";
 import { blockOf, stepFailures, withRunAttempts, type Why } from "./why";
+import { statusTone } from "../visionPresentation";
 
 // ---------- colours and helpers ----------
 
@@ -352,7 +353,7 @@ function TopBar({
       <Clock from={started} until={finished} />
       <span className="mod hide-narrow" aria-label="Machines">
         {nodes.map((node) => (
-          <span key={node.name} title={`${node.name}: ${node.model} (${node.ready ? "ready to answer" : node.listsModels ? "model listed, but not answering" : "not ready"})`} style={{ color: node.ready ? colorOf(node.name) : "#565f89" }}>
+          <span key={node.name} title={`${node.name}: ${node.model} (${statusTone(node) === "off" ? "turned off by its Vision machine setting" : node.ready ? "ready to answer" : node.listsModels ? "model listed, but not answering" : "not ready"})`} style={{ color: node.ready ? colorOf(node.name) : "#565f89" }}>
             {busyNodes.has(node.name) ? "◉" : "●"} {node.name}
           </span>
         ))}
@@ -612,7 +613,7 @@ function Machines({
         return (
           <div
             key={node.name}
-            className={`live-machine${working.length ? " busy" : ""}${node.ready ? "" : " down"}`}
+            className={`live-machine${working.length ? " busy" : ""}${node.ready || statusTone(node) === "off" ? "" : " down"}`}
             style={{ ["--m" as string]: colorOf(node.name) }}
           >
             <div className="live-core">
@@ -625,7 +626,7 @@ function Machines({
               <small>{node.model}</small>
             </div>
             <div className="doing">
-              {!node.ready ? node.listsModels ? "model listed, but not answering" : node.reachable ? "model not listed" : "not reachable" : working.length ? working.map((step) => {
+              {!node.ready ? statusTone(node) === "off" ? "turned off by setting" : node.listsModels ? "model listed, but not answering" : node.reachable ? "model not listed" : "not reachable" : working.length ? working.map((step) => {
                 const route = activity.get(step.id);
                 const role = route?.node === node.name ? "model" : "workspace";
                 return `#${step.id} ${role}: ${step.title}`;

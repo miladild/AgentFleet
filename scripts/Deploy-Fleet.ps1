@@ -166,7 +166,8 @@ if (-not $health) { throw "The backend did not answer $healthUrl within 150 seco
 
 Write-Host "Overall: $($health.status)"
 foreach ($node in $health.nodes) {
-    $state = if ($node.ready) { 'ready' } else { "NOT READY ($($node.reason))" }
+    # Turned off on purpose (its Vision machine setting): a choice, not a fault, so it is not reported as not ready.
+    $state = if ($node.ready) { 'ready' } elseif ($node.reason -eq 'turned_off') { 'off (turned off by setting)' } else { "NOT READY ($($node.reason))" }
     Write-Host ('  {0,-14} {1,-32} {2}' -f $node.name, $node.model, $state)
 }
 # Two backends were seen once, started seconds apart: the second answered for about a minute and then exited, which

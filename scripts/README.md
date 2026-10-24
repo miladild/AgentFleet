@@ -14,6 +14,8 @@ dry-run option (`-DryRun` in PowerShell, `--dry-run` in shell scripts). Get Powe
 | `Setup-WorkerWorkspace.ps1` | on each Windows worker, elevated | Creates a standard SSH account with a public key and grants it a dedicated `AgentFleet\Workspaces` folder; refuses broader paths and reparse-point paths, and does not change SSH service or firewall settings. `-DryRun` previews it |
 | `setup-worker-workspace.sh` | on each Linux worker, with sudo | Creates a standard, non-sudo account and grants it a workspace folder beneath that account's home; canonicalizes the path and does not change SSH service or firewall settings. Pass `--dry-run` as the fourth argument to preview |
 | `Add-FleetNode.ps1` | on the hub | Checks a worker, downloads the model onto it over the network, adds it to the fleet |
+| `Set-FleetVision.ps1` | on the hub | Shows, or with `-Mode` changes, a vision machine's mode: off, on demand or always ready, through the running backend |
+| `Test-SetFleetVision.ps1` | on the hub, when changing `Set-FleetVision.ps1` | Checks its mode, machine choice and saved body without a backend |
 | `Test-Fleet.ps1` | on the hub, any time | The health check: tools, config, every machine, the running backend and UI, the VS Code extension |
 | `Get-FleetModels.ps1` | on the hub | Every model installed on every machine |
 | `Get-FrameworkUpdates.ps1` | on the hub, monthly | Read-only: lists the agent-framework, Microsoft.Extensions.AI, MCP, AG-UI, OllamaSharp and OpenAI packages in the agent project that have newer versions, with release links; `-FromFile` reads saved `dotnet list package --outdated` text |

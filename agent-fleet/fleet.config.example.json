@@ -37,6 +37,7 @@
       "model": "qwen2.5vl:7b",
       "purpose": "Reads screenshots and images. Only used when a message contains an image.",
       "vision": true,
+      "visionMode": "ondemand",
       "caveman": "off",
       "ponytail": "off"
     }

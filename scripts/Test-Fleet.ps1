@@ -125,7 +125,9 @@ catch {
 if ($health) {
     Write-Ok "Backend answers at $BackendUrl (overall: $($health.status))"
     foreach ($n in @($health.nodes)) {
-        if ($n.ready) { Write-Ok "backend sees $($n.name) as ready" } else { Warn "backend sees $($n.name) as NOT ready ($($n.reason))" }
+        if ($n.ready) { Write-Ok "backend sees $($n.name) as ready" }
+        elseif ($n.reason -eq 'turned_off') { Write-Info "backend sees $($n.name) as off (turned off by setting, see Set-FleetVision.ps1)" }
+        else { Warn "backend sees $($n.name) as NOT ready ($($n.reason))" }
     }
     try {
         # A JSON array can arrive as one object; ForEach-Object unrolls it so the count is right.

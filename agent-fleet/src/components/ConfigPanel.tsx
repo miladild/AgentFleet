@@ -14,6 +14,7 @@ import { CopyCommand, DownloadButton, announceFleetChanged, type HubInfo } from 
 import { FitProbe } from "./FitProbe";
 import { formatFitSize } from "./fitPresentation";
 import type { WeeklyProbeConfig } from "./weeklyPresentation";
+import { TURNED_OFF_HINT, VISION_MODES, effectiveVisionMode, nodesForSave, normalizeVisionMode, roleOf, statusTone, withRole, type StatusTone } from "./visionPresentation";
 
 type FleetConfigNode = {
   name: string;
@@ -30,6 +31,8 @@ type FleetConfigNode = {
   ponytail?: string | null;
   /** off (default): a model that thinks first is told not to; model: the model's own behaviour. */
   thinking?: string | null;
+  /** For a vision machine only: off, ondemand or always. Absent means on demand. */
+  visionMode?: string | null;
   workspace?: WorkerWorkspaceConfig | null;
   clearWorkspace?: boolean;
 };
@@ -74,15 +77,6 @@ const NODE_ROLES: { value: string; label: string; hint: string }[] = [
 const STYLE_LEVELS = ["off", "lite", "full", "ultra"] as const;
 
 const NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
-
-function roleOf(node: FleetConfigNode): string {
-  return node.vision ? "vision" : (node.tier ?? "standard");
-}
-
-function withRole(node: FleetConfigNode, role: string): FleetConfigNode {
-  // A vision node cannot be the fallback: it cannot serve text-only work with tools.
-  return role === "vision" ? { ...node, vision: true, tier: null, fallback: false } : { ...node, vision: false, tier: role };
-}
 
 function formatSize(bytes: number): string {
   if (bytes <= 0) return "";
@@ -393,16 +387,19 @@ function MachineCard({
     else setModels(result.models);
   }
 
-  const dot = !status ? "bg-neutral-600" : status.ready ? "bg-emerald-400" : status.reachable ? "bg-amber-400" : "bg-red-500";
+  const tone: StatusTone = statusTone(status);
+  const dot = { ready: "bg-emerald-400", warn: "bg-amber-400", down: "bg-red-500", off: "bg-neutral-500", unknown: "bg-neutral-600" }[tone];
   const dotTitle = !status
     ? "not checked yet (new or just saved)"
-    : status.ready
-      ? "ready to answer"
-      : status.reachable
-        ? status.listsModels
-          ? "model listed, but it did not answer"
-          : "reachable, but the model is not installed there"
-        : "not reachable";
+    : tone === "off"
+      ? "turned off by its Vision machine setting"
+      : status.ready
+        ? "ready to answer"
+        : status.reachable
+          ? status.listsModels
+            ? "model listed, but it did not answer"
+            : "reachable, but the model is not installed there"
+          : "not reachable";
 
   return (
     <div className="bg-neutral-800/60 border border-neutral-700 rounded-md p-3 space-y-2">
@@ -454,7 +451,8 @@ function MachineCard({
           Remove
         </button>
       </div>
-      {status && !status.ready && (
+      {tone === "off" && <p className="text-[11px] text-neutral-400">{TURNED_OFF_HINT}</p>}
+      {status && (tone === "warn" || tone === "down") && (
         <div className="space-y-1">
           <p className="text-[11px] text-amber-300">
             {status.reachable && status.listsModels
@@ -575,6 +573,23 @@ function MachineCard({
                 {STYLE_LEVELS.map((level) => <option key={level} value={level}>{level[0].toUpperCase() + level.slice(1)}</option>)}
               </select>
             </div>
+            {node.vision && (
+              <div>
+                <label className="block text-[10px] uppercase tracking-wide text-neutral-500 mb-0.5">Vision machine</label>
+                <select
+                  value={effectiveVisionMode(node)}
+                  onChange={(e) => onChange({ ...node, visionMode: normalizeVisionMode(e.target.value) ?? "ondemand" })}
+                  aria-label="Vision machine"
+                  className="text-xs px-2 py-1 rounded bg-neutral-900 border border-neutral-700 text-neutral-200"
+                >
+                  {VISION_MODES.map((mode) => (
+                    <option key={mode.value} value={mode.value}>
+                      {mode.label} - {mode.hint}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div>
               <label className="block text-[10px] uppercase tracking-wide text-neutral-500 mb-0.5">Thinking</label>
               <select
@@ -723,7 +738,7 @@ export function ConfigPanel() {
         body: JSON.stringify({
           triageModel: next.triageModel,
           ifVersion: next.version,
-          nodes: next.nodes,
+          nodes: nodesForSave(next.nodes),
           tools: Object.fromEntries(Object.entries(next.tools).map(([name, tool]) => [name, tool.enabled])),
           mcpServers: next.mcpServers,
           // Left out when unknown, so the backend keeps what it has.

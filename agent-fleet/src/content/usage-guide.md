@@ -182,7 +182,7 @@ To work on a project, give the full path:
 
 > In C:\fleet-test\project\app.py, fix the bug where X happens.
 
-You can attach a screenshot: it goes to the vision machine, if one is set up.
+You can attach a screenshot: it goes to the vision machine, if one is set up. If that machine is turned off in Config, the chat says so instead.
 
 There is **no folder restriction**. Outside plan mode, chat asks before it runs a shell, Git or HTTP call by default (the level
 is chosen in Config, Tools tab); other tools run immediately with the permissions of the account the backend runs as. A call

@@ -14,7 +14,18 @@ Each machine ("node") has a **tier** that says what kind of work it should get:
 | `light` | Quick questions and trivial edits | `llama3.2:3b`, `qwen2.5-coder:3b` |
 
 A node can also be a **vision** node, which reads screenshots and images, for example with `qwen2.5vl:7b`. It is used
-only when a message contains an image.
+only when a message contains an image. A vision node has a mode that says when its model is loaded:
+
+- **On demand** (the default): the model loads when an image arrives, and leaves when the machine is idle. The first
+  image waits for the model to load. Nothing holds the model's graphics memory while no images come.
+- **Always ready**: the model is kept loaded, as the fleet always did. Images are answered at once, and the model's
+  graphics memory is held the whole time.
+- **Off**: nothing contacts the machine. The node stays in the configuration, and an image in a chat gets a note that
+  vision is turned off.
+
+On a fresh network, start with on demand. Choose always ready when images are frequent and the first answer must not
+wait, or when the machine has graphics memory to spare. Choose off when the machine is needed for other work for now.
+A change of mode applies at once, with no restart.
 
 Exactly one node is the **fallback**: it answers when routing fails, continues a conversation that is in the middle of a
 tool call, and stands in when another machine is down. It also does the routing itself, with a small model. Make it
@@ -88,7 +99,8 @@ On the hub:
 
 - `-Address` can be the plain address; `:11434` and `/v1` are added for you.
 - `-Pull` downloads the model onto the worker over the network, so you never have to log in there.
-- `-Vision` marks it as a vision node. `-Fallback` makes it the fallback.
+- `-Vision` marks it as a vision node. `-VisionMode` sets its mode (`off`, `ondemand` or `always`; on demand by default).
+  `-Fallback` makes it the fallback.
 - With two or more text nodes, the script also makes sure the small routing model is installed on the fallback node.
 
 The script checks that the worker answers and has the model before it changes anything. If the backend is running it
@@ -96,6 +108,18 @@ adds the node through the backend, which validates the change; otherwise it edit
 
 A running backend uses the new machine straight away; there is no restart. (If the backend was stopped, it reads the
 machine when it starts.)
+
+### Changing a vision machine's mode
+
+In **Config**, the **Vision machine** choice on a vision node's card sets its mode. From a terminal on the hub:
+
+```powershell
+.\scripts\Set-FleetVision.ps1                  # shows the current mode
+.\scripts\Set-FleetVision.ps1 -Mode always     # off, ondemand or always
+```
+
+Pass `-Node <name>` when the fleet has more than one vision machine. The script saves through the running backend and
+refuses the change, saying so, if the configuration was changed by someone else in the meantime.
 
 ### Or from the web UI
 
