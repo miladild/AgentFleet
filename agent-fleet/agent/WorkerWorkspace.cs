@@ -1541,15 +1541,27 @@ internal static class WorkspaceTools
         CarriesHistoryPlaceholder(content)
             ? Task.FromResult(HistoryPlaceholderRefusal(path))
             : WorkerWorkspaceContext.Current is { } worker
-                ? worker.WriteFileAsync(path, content, cancellationToken)
+                ? WithEditCheck(path, cancellationToken, token => worker.WriteFileAsync(path, content, token))
                 : HubFileSystemTools.WriteFileAsync(path, content, cancellationToken);
 
     public static Task<string> EditFileAsync(string path, string oldText, string newText, bool? replaceAll, CancellationToken cancellationToken) =>
         CarriesHistoryPlaceholder(newText)
             ? Task.FromResult(HistoryPlaceholderRefusal(path))
             : WorkerWorkspaceContext.Current is { } worker
-                ? worker.EditFileAsync(path, oldText, newText, replaceAll, cancellationToken)
+                ? WithEditCheck(path, cancellationToken, token => worker.EditFileAsync(path, oldText, newText, replaceAll, token))
                 : HubFileSystemTools.EditFileAsync(path, oldText, newText, replaceAll, cancellationToken);
+
+    // Without a gate in scope the edit is the same call as before. With one, the check runs before and after the edit; a reply
+    // that starts with "Error:" changed nothing, so there is nothing to check.
+    private static Task<string> WithEditCheck(string path, CancellationToken cancellationToken, Func<CancellationToken, Task<string>> edit) =>
+        EditCheckContext.Current is { } gate ? CheckedEditAsync(gate, path, cancellationToken, edit) : edit(cancellationToken);
+
+    private static async Task<string> CheckedEditAsync(EditCheckGate gate, string path, CancellationToken cancellationToken, Func<CancellationToken, Task<string>> edit)
+    {
+        await gate.BeforeMutationAsync(path, cancellationToken);
+        string reply = await edit(cancellationToken);
+        return reply.StartsWith("Error:", StringComparison.Ordinal) ? reply : await gate.AfterMutationAsync(path, reply, cancellationToken);
+    }
 
     public static string ListDirectory(string path) =>
         WorkerWorkspaceContext.Current is { } worker ? worker.ListDirectory(path) : HubFileSystemTools.ListDirectory(path);
@@ -1573,9 +1585,18 @@ internal static class WorkspaceTools
     public static string ProjectOverview(string path, int? depth) =>
         WorkerWorkspaceContext.Current is { } worker ? worker.ProjectOverview(path, depth) : ProjectTools.ProjectOverview(path, depth);
 
-    public static string MoveFile(string source, string destination, bool? overwrite) =>
-        WorkerWorkspaceContext.Current is { } worker ? worker.MoveFile(source, destination, overwrite) : ProjectTools.MoveFile(source, destination, overwrite);
+    public static string MoveFile(string source, string destination, bool? overwrite)
+    {
+        if (WorkerWorkspaceContext.Current is not { } worker) return ProjectTools.MoveFile(source, destination, overwrite);
+        // The edit check follows writes and edits only; after a move its picture of the project is out of date.
+        EditCheckContext.Current?.Disable("a file was moved or deleted");
+        return worker.MoveFile(source, destination, overwrite);
+    }
 
-    public static string DeleteFile(string path) =>
-        WorkerWorkspaceContext.Current is { } worker ? worker.DeleteFile(path) : ProjectTools.DeleteFile(path);
+    public static string DeleteFile(string path)
+    {
+        if (WorkerWorkspaceContext.Current is not { } worker) return ProjectTools.DeleteFile(path);
+        EditCheckContext.Current?.Disable("a file was moved or deleted");
+        return worker.DeleteFile(path);
+    }
 }

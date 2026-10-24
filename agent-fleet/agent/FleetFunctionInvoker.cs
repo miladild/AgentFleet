@@ -164,6 +164,12 @@ internal sealed class FleetFunctionInvoker(
                 context.Terminate = true;
             }
 
+            // The edit check ends the round when the project has stopped improving, or when every check passes.
+            if (fromRunner && EditCheckContext.Current is { StopRequested: true })
+            {
+                context.Terminate = true;
+            }
+
             // The model is told how many rounds are left in the last few, so it can leave the project in a working state.
             int roundsLeft = planStepToolRounds - (context.Iteration + 1);
             if (fromRunner && roundsLeft is >= 1 and <= ToolLoopGuard.RoundBudgetWarnAt)
