@@ -91,6 +91,7 @@ internal sealed class EditCheckGate
     public async Task BeforeMutationAsync(string path, CancellationToken cancellationToken)
     {
         if (_disabled) return;
+        _pending = null;
         if (!_baselineTaken)
         {
             _baselineTaken = true;
@@ -102,6 +103,12 @@ internal sealed class EditCheckGate
         {
             byte[]? previous = await _files.ReadBytesAsync(path, cancellationToken);
             _pending = new PendingEdit(_files.Canonical(path), path, previous);
+        }
+        catch (WorkerPathRefusedException exception)
+        {
+            // The file tools refuse this path themselves (a frozen test file, a file the project does not sync), so no edit
+            // happens here to check. The gate stays on for the other edits.
+            _log($"edit {path}: not tracked, the tools refuse this path: {exception.Message}");
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -123,6 +130,11 @@ internal sealed class EditCheckGate
         try
         {
             current = await _files.ReadBytesAsync(path, cancellationToken);
+        }
+        catch (WorkerPathRefusedException exception)
+        {
+            _log($"edit {path}: not tracked, the tools refuse this path: {exception.Message}");
+            return toolReply;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {

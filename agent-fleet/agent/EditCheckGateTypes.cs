@@ -28,4 +28,25 @@ internal sealed record EditCheckSettings
 
     /// <summary>How many edits to one file that break a loading project are undone before the next one is kept with a warning.</summary>
     public int RefusalsBeforeKeeping { get; init; } = 2;
+
+    /// <summary>
+    /// The settings from the three configuration values, as they are read at startup. Anything that is not a recognised
+    /// off value leaves the check on; a limit or a patience outside its range, or not a number, takes the default.
+    /// </summary>
+    public static EditCheckSettings Parse(string? switchValue, string? seconds, string? patience)
+    {
+        string normalized = (switchValue ?? string.Empty).Trim().ToLowerInvariant();
+        int limit = int.TryParse(seconds, out int parsedSeconds) && parsedSeconds is >= 5 and <= 120
+            ? parsedSeconds
+            : (int)new EditCheckSettings().MaximumCheckTime.TotalSeconds;
+        int attempts = int.TryParse(patience, out int parsedPatience) && parsedPatience is >= 1 and <= 10
+            ? parsedPatience
+            : new EditCheckSettings().Patience;
+        return new EditCheckSettings
+        {
+            Enabled = normalized is not ("off" or "false" or "0"),
+            MaximumCheckTime = TimeSpan.FromSeconds(limit),
+            Patience = attempts,
+        };
+    }
 }

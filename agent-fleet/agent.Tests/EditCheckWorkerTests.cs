@@ -36,28 +36,10 @@ public sealed class EditCheckWorkerTests
         }
     }
 
-    private static WorkerWorkspaceSession NewSession(FileLayer layer) => new("worker-edit-check",
+    private static WorkerWorkspaceSession NewSession(FileLayer layer, params PlanFrozenTestFile[] frozen) => new("worker-edit-check",
         new FleetWorkerWorkspaceConfig("worker.example.test", "fleet-test", "C:/fleet-test/key", "SHA256:synthetic-host-key",
             "/tmp/fleet-test/workspaces", "linux"),
-        "C:/fleet-test/project", NullLogger.Instance, TimeSpan.FromSeconds(1), fileAccess: layer);
-
-    /// <summary>The gate's view of the worker's files: the same remote files the session edits.</summary>
-    private sealed class WorkerFiles(WorkerWorkspaceSession session, FileLayer layer) : IEditCheckFiles
-    {
-        private string Remote(string path) => session.RemoteRoot + "/" + Canonical(path);
-
-        public Task<byte[]?> ReadBytesAsync(string path, CancellationToken cancellationToken) =>
-            Task.FromResult(layer.Files.TryGetValue(Remote(path), out string? text) ? Encoding.UTF8.GetBytes(text) : null);
-
-        public Task WriteBytesAsync(string path, byte[]? contents, CancellationToken cancellationToken)
-        {
-            if (contents is null) layer.Files.Remove(Remote(path));
-            else layer.Files[Remote(path)] = Encoding.UTF8.GetString(contents);
-            return Task.CompletedTask;
-        }
-
-        public string Canonical(string path) => path.Replace('\\', '/').TrimStart('.').TrimStart('/').ToLowerInvariant();
-    }
+        "C:/fleet-test/project", NullLogger.Instance, TimeSpan.FromSeconds(1), fileAccess: layer, frozenFiles: frozen);
 
     private sealed class ScriptedCheck(params string[] outputs)
     {
@@ -75,7 +57,7 @@ public sealed class EditCheckWorkerTests
     }
 
     private static EditCheckGate NewGate(WorkerWorkspaceSession session, FileLayer layer, ScriptedCheck check) =>
-        new(new WorkerFiles(session, layer), check.RunAsync, output => RoundScore.Of(PlanFailure.FailureSignature(output), output),
+        new(session, check.RunAsync, output => RoundScore.Of(PlanFailure.FailureSignature(output), output),
             new EditCheckSettings(), _ => { });
 
     private static void SeedApp(WorkerWorkspaceSession session, FileLayer layer) =>
@@ -167,6 +149,33 @@ public sealed class EditCheckWorkerTests
         Assert.Equal(viaSession, viaTools);
         Assert.DoesNotContain("[Check after this edit", viaTools);
         Assert.Equal(direct.Files[directSession.RemoteRoot + "/src/app.js"], hooked.Files[hookedSession.RemoteRoot + "/src/app.js"]);
+    }
+
+    [Fact]
+    public async Task An_edit_of_a_frozen_test_file_is_refused_by_the_tool_and_the_check_stays_on_for_the_next_edit()
+    {
+        var layer = new FileLayer();
+        using WorkerWorkspaceSession session = NewSession(layer, new PlanFrozenTestFile("tests/LimitTests.cs", "0"));
+        SeedApp(session, layer);
+        layer.Files[session.RemoteRoot + "/tests/LimitTests.cs"] = "fixed\n";
+        var check = new ScriptedCheck(Failing(3), Failing(2));
+        EditCheckGate gate = NewGate(session, layer, check);
+
+        string refused;
+        string normal;
+        using (WorkerWorkspaceContext.Push(session))
+        using (EditCheckContext.Push(gate))
+        {
+            refused = await WorkspaceTools.EditFileAsync("tests/LimitTests.cs", "fixed", "changed", null, CancellationToken.None);
+            normal = await WorkspaceTools.EditFileAsync("src/app.js", "42", "43", null, CancellationToken.None);
+        }
+
+        Assert.Contains("fixed for this plan", refused);
+        Assert.Equal("fixed\n", layer.Files[session.RemoteRoot + "/tests/LimitTests.cs"]);
+        Assert.EndsWith("\n[Check after this edit: 2 failing, best so far 2. This is the best state so far.]", normal);
+        Assert.Equal(2, check.Calls);
+        EditCheckSummary summary = await gate.FinishAsync(CancellationToken.None);
+        Assert.False(summary.Disabled);
     }
 
     [Fact]

@@ -295,6 +295,7 @@ internal sealed partial class PlanRunner
     private readonly TestFirstMode _testFirstMode;
     private readonly ConcurrentDictionary<string, bool> _testFirstSnapshotAttempts = new(StringComparer.Ordinal);
     private readonly Func<string?>? _testWriterNode;
+    private readonly EditCheckSettings _editCheck;
 
     public PlanRunner(
         FleetPlanStore store,
@@ -319,7 +320,8 @@ internal sealed partial class PlanRunner
         FitProbeService? fitProbes = null,
         FailFirstMode failFirst = FailFirstMode.Off,
         TestFirstMode testFirst = TestFirstMode.Off,
-        Func<string?>? testWriterNode = null)
+        Func<string?>? testWriterNode = null,
+        EditCheckSettings? editCheck = null)
     {
         _notifier = notifier;
         _stepGuidance = stepGuidance;
@@ -327,6 +329,7 @@ internal sealed partial class PlanRunner
         _failFirstMode = failFirst;
         _testFirstMode = testFirst;
         _testWriterNode = testWriterNode;
+        _editCheck = editCheck ?? new EditCheckSettings();
         _roundsPerRung = Math.Max(1, roundsPerRung);
         _stepClock = stepClock is { } clock && clock > TimeSpan.Zero ? clock : DefaultStepClock;
         _transientDelay = transientDelay ?? DefaultTransientDelay;
@@ -2892,6 +2895,33 @@ internal sealed partial class PlanRunner
         return false;
     }
 
+    // The edit check runs the step's own check after each edit a worker model makes (see EditCheckGate). It needs a worker whose
+    // files it can read and write as bytes, and a step with a check that may run. A tests step writes tests that are allowed to
+    // fail while they are written, so it is never checked this way.
+    private EditCheckGate? CreateEditCheck(PlanRecord plan, PlanStep step, IWorkerWorkspaceSession worker)
+    {
+        if (!_editCheck.Enabled || IsTestsStep(step) || step.Kind == "tests" || string.IsNullOrWhiteSpace(step.Verify) ||
+            PlanRunnerToolPolicy.CommandRefusal(step.Verify) is not null || worker is not IEditCheckFiles files)
+        {
+            return null;
+        }
+
+        string command = step.Verify!;
+        return new EditCheckGate(files, cancellationToken => _tools.RunFrozenTestsAsync(plan, command, cancellationToken),
+            output => RoundScore.Of(PlanFailure.FailureSignature(output), output), _editCheck,
+            line => _logger.LogInformation("Plan {PlanId} step {StepId}: edit check: {Line}", plan.Id, step.Id, line));
+    }
+
+    // Returns the summary for the attempt's event, or null when no gate was made. Called once per attempt (the gate is cleared).
+    private async Task<string?> FinishEditCheckAsync(EditCheckGate? gate, PlanRecord plan, PlanStep step, int attempt)
+    {
+        if (gate is null) return null;
+        EditCheckSummary summary = await gate.FinishAsync(CancellationToken.None);
+        string text = summary.Describe();
+        _logger.LogInformation("Plan {PlanId} step {StepId} attempt {Attempt}: edit check finished: {Summary}", plan.Id, step.Id, attempt, text);
+        return $"Edit check: {text}";
+    }
+
     private async Task<ModelAttemptResult> RunModelAttemptAsync(
         PlanRecord plan,
         PlanStep step,
@@ -2999,6 +3029,8 @@ internal sealed partial class PlanRunner
         bool stagingWorkerWorkspace = false;
         ModelAttemptResult result = new(step.Id, string.Empty, null, ShouldVerify: false, Machine: machine, ModelNode: modelMachine);
         var activity = new StepToolActivity();
+        EditCheckGate? editCheck = null;
+        string? editCheckNote = null;
         try
         {
             SnapshotFilesToCreate(plan, step);
@@ -3028,6 +3060,7 @@ internal sealed partial class PlanRunner
                 _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.WorkspaceStaged, tier, machine,
                     "Staged the project on this worker. File tools and this step's verification command run in that worker workspace.",
                     modelNode: modelMachine, workspaceNode: machine);
+                editCheck = CreateEditCheck(plan, step, worker);
             }
 
             // Everything the step's model does (routing, tool calls, decisions it pins) is recorded in the
@@ -3048,6 +3081,8 @@ internal sealed partial class PlanRunner
             using IDisposable? hubScope = worker is null ? HubFrozenScopeFor(plan) : null;
             using (IDisposable? workerScope = worker?.Enter())
             {
+                // The edit check looks at each file edit the model makes; the context is ambient for the model call only.
+                using IDisposable? editCheckScope = editCheck is null ? null : EditCheckContext.Push(editCheck);
                 bool addStepGuidance = conversation.RepairMessage is null &&
                     _stepGuidance && PlanStepGuidance.AppliesTo(step.Files);
                 if (addStepGuidance)
@@ -3074,10 +3109,12 @@ internal sealed partial class PlanRunner
                     modelMachine,
                     attemptCancellation.Token);
             }
+            editCheckNote = await FinishEditCheckAsync(editCheck, plan, step, attempt);
+            editCheck = null;
             string summary = reply.Text;
 
             _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.AttemptEnded, tier, modelMachine ?? ViaNode(summary) ?? _journal?.ActualNode,
-                $"Model finished after {(int)stopwatch.Elapsed.TotalSeconds} s: {Summarize(summary)}",
+                $"Model finished after {(int)stopwatch.Elapsed.TotalSeconds} s: {Summarize(summary)}{(editCheckNote is null ? string.Empty : " " + editCheckNote)}",
                 modelNode: modelMachine ?? ViaNode(summary), workspaceNode: machine, rung: conversation.Rung, round: conversation.Round);
             result = new ModelAttemptResult(step.Id, summary, null, ShouldVerify: true, Workspace: worker, Machine: machine,
                 ModelNode: modelMachine ?? ViaNode(summary) ?? _journal?.ActualNode, ToolCalls: reply.ToolCalls,
@@ -3131,6 +3168,14 @@ internal sealed partial class PlanRunner
         }
         finally
         {
+            // The edit check ends with the attempt however it ended (a timeout or a failure too), and before the sync below sends
+            // the worker's files to the hub: a run left worse than its best state goes back to that state first.
+            if (editCheck is not null)
+            {
+                await FinishEditCheckAsync(editCheck, plan, step, attempt);
+                editCheck = null;
+            }
+
             try
             {
                 // Publish this attempt before restoring earlier edits on the hub; then update the worker copy so

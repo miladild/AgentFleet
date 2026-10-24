@@ -31,8 +31,18 @@ public sealed class EditCheckGateTests : IDisposable
 
         public bool FailWrites { get; set; }
 
-        public Task<byte[]?> ReadBytesAsync(string path, CancellationToken cancellationToken) =>
-            Task.FromResult(_store.TryGetValue(Canonical(path), out byte[]? bytes) ? bytes : null);
+        /// <summary>Per path, the outcome of each successive read: null succeeds, an exception is thrown.</summary>
+        public Dictionary<string, Queue<Exception?>> ReadOutcomes { get; } = new(StringComparer.Ordinal);
+
+        public Task<byte[]?> ReadBytesAsync(string path, CancellationToken cancellationToken)
+        {
+            if (ReadOutcomes.TryGetValue(Canonical(path), out Queue<Exception?>? outcomes) && outcomes.Count > 0 && outcomes.Dequeue() is { } failure)
+            {
+                return Task.FromException<byte[]?>(failure);
+            }
+
+            return Task.FromResult(_store.TryGetValue(Canonical(path), out byte[]? bytes) ? bytes : null);
+        }
 
         public Task WriteBytesAsync(string path, byte[]? contents, CancellationToken cancellationToken)
         {
@@ -586,6 +596,60 @@ public sealed class EditCheckGateTests : IDisposable
 
         Assert.Contains("Restored: the last 4 edits did not help.", restored);
         Assert.DoesNotContain("The first failing test:", restored);
+    }
+
+    [Fact]
+    public async Task A_refused_path_is_not_tracked_and_the_gate_stays_on_for_a_normal_edit()
+    {
+        var files = new MemoryFiles();
+        files.Seed(Path3, "v0");
+        files.ReadOutcomes["tests/limit.ts"] = new Queue<Exception?>([new WorkerPathRefusedException("a frozen test file")]);
+        var check = new ScriptedCheck(Failing(3), Failing(2));
+        EditCheckGate gate = NewGate(files, check.RunAsync);
+
+        // The file tool refuses this edit itself, so no write follows the look before.
+        await gate.BeforeMutationAsync("tests/limit.ts", CancellationToken.None);
+        string reply = await Write(gate, files, Path3, "v1");
+
+        Assert.Equal("Wrote src/shop.ts\n[Check after this edit: 2 failing, best so far 2. This is the best state so far.]", reply);
+        Assert.Equal(2, check.Calls);
+        EditCheckSummary summary = await gate.FinishAsync(CancellationToken.None);
+        Assert.False(summary.Disabled);
+    }
+
+    [Fact]
+    public async Task A_refused_read_after_an_edit_is_not_tracked_and_the_gate_stays_on()
+    {
+        var files = new MemoryFiles();
+        files.Seed(Path3, "v0");
+        files.ReadOutcomes[Path3] = new Queue<Exception?>([null, new WorkerPathRefusedException("a frozen test file")]);
+        var check = new ScriptedCheck(Failing(3), Failing(2));
+        EditCheckGate gate = NewGate(files, check.RunAsync);
+
+        string reply = await Write(gate, files, Path3, "v1");
+        Assert.Equal("Wrote src/shop.ts", reply);
+        string next = await Write(gate, files, Path3, "v2");
+
+        Assert.Equal("Wrote src/shop.ts\n[Check after this edit: 2 failing, best so far 2. This is the best state so far.]", next);
+        EditCheckSummary summary = await gate.FinishAsync(CancellationToken.None);
+        Assert.False(summary.Disabled);
+    }
+
+    [Fact]
+    public async Task Any_other_read_failure_still_switches_the_gate_off()
+    {
+        var files = new MemoryFiles();
+        files.Seed(Path3, "v0");
+        files.ReadOutcomes[Path3] = new Queue<Exception?>([new IOException("the worker's disk is gone")]);
+        var check = new ScriptedCheck(Failing(3), Failing(2));
+        EditCheckGate gate = NewGate(files, check.RunAsync);
+
+        string reply = await Write(gate, files, Path3, "v1");
+
+        Assert.Equal("Wrote src/shop.ts", reply);
+        EditCheckSummary summary = await gate.FinishAsync(CancellationToken.None);
+        Assert.True(summary.Disabled);
+        Assert.Contains("could not read", summary.DisabledReason);
     }
 
     [Fact]

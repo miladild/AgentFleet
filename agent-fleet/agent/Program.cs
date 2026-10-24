@@ -610,6 +610,11 @@ int planAttemptMinutes = int.TryParse(builder.Configuration["FLEET_PLAN_ATTEMPT_
     ? attemptMinutes
     : (int)PlanRunner.DefaultAttemptTimeout.TotalMinutes;
 
+// The edit check runs a step's check after each file edit a worker model makes, and undoes an edit that stops the project
+// loading (see EditCheckGate). On by default; FLEET_PLAN_EDIT_CHECK=off, false or 0 switches it off.
+var editCheckSettings = EditCheckSettings.Parse(builder.Configuration["FLEET_PLAN_EDIT_CHECK"],
+    builder.Configuration["FLEET_PLAN_EDIT_CHECK_SECONDS"], builder.Configuration["FLEET_PLAN_EDIT_CHECK_PATIENCE"]);
+
 // How many rounds (model works, then the approved check runs) a step gets on each rung of the repair ladder before it
 // climbs to the next one.
 int planRoundsPerRung = int.TryParse(builder.Configuration["FLEET_PLAN_ROUNDS_PER_RUNG"], out int roundsPerRung) && roundsPerRung is >= 1 and <= 10
@@ -742,7 +747,8 @@ var planRunner = new PlanRunner(
     stepGuidance: stepGuidanceEnabled,
     fitProbes: fitProbeService,
     failFirst: failFirstMode,
-    testFirst: testFirstMode, testWriterNode: () => fleetConfigStore.Current.Plan?.TestWriterNode);
+    testFirst: testFirstMode, testWriterNode: () => fleetConfigStore.Current.Plan?.TestWriterNode,
+    editCheck: editCheckSettings);
 planStore.Approved += planRunner.Enqueue;
 app.Lifetime.ApplicationStarted.Register(() => planRunner.Start(app.Lifetime.ApplicationStopping));
 

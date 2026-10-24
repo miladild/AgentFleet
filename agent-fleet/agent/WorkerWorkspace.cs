@@ -177,7 +177,7 @@ internal static class WorkerWorkspaceContext
 /// An SSH/SFTP session for one plan attempt. Paths exposed to tools are confined to its staged project; shell
 /// commands run as the configured worker account, whose OS permissions must be limited to its own workspace.
 /// </summary>
-internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
+internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession, IEditCheckFiles
 {
     private static readonly HashSet<string> SkippedDirectories = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -1138,6 +1138,69 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession
         using var content = new MemoryStream();
         _sftp!.DownloadFile(path, content);
         return content.ToArray();
+    }
+
+    // The edit check (see EditCheckGate) reads and writes the bytes of a file exactly as the file tools would reach it: the same
+    // path resolution and refusals, and no text decoding, so a byte order mark and the line breaks come back as they went in.
+    public async Task<byte[]?> ReadBytesAsync(string path, CancellationToken cancellationToken)
+    {
+        string remote = CheckedRemotePath(path);
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            return await ReadRemoteBytesAsync(remote, cancellationToken);
+        }
+        finally { _gate.Release(); }
+    }
+
+    public async Task WriteBytesAsync(string path, byte[]? contents, CancellationToken cancellationToken)
+    {
+        string remote = CheckedRemotePath(path);
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            if (contents is null)
+            {
+                DeleteRemoteFile(remote);
+                return;
+            }
+
+            if (_fileAccess is not null)
+            {
+                _fileAccess.CreateDirectoryTree(Parent(remote));
+                await _fileAccess.WriteTextAsync(remote, Encoding.UTF8.GetString(contents), cancellationToken);
+                return;
+            }
+
+            CreateDirectoryTree(Parent(remote));
+            using var output = _sftp!.Open(remote, FileMode.Create, FileAccess.Write);
+            await output.WriteAsync(contents, cancellationToken);
+        }
+        finally { _gate.Release(); }
+    }
+
+    // One key per file: the resolved remote path, lower-cased on a Windows worker, where the same name can be spelled two ways.
+    public string Canonical(string path)
+    {
+        string remote = ResolveRemotePath(path);
+        return IsWindowsPlatform(_config.Platform) ? remote.ToLowerInvariant() : remote;
+    }
+
+    // The refusals the file tools apply, and the sync's rule for which files belong to the project at all. A path refused here
+    // throws, so the edit check switches itself off rather than write to it.
+    private string CheckedRemotePath(string path)
+    {
+        string relative = WorkerWorkspacePath.RelativeToProject(path, _hubRoot, RemoteRoot);
+        if (!AllowedRelative(relative)) throw new WorkerPathRefusedException($"The edit check does not read or write {path}.");
+        if (FrozenRefusal(covering: false, path) is { } frozenRefusal) throw new WorkerPathRefusedException(frozenRefusal);
+        return ResolveRemotePath(path);
+    }
+
+    private void DeleteRemoteFile(string remote)
+    {
+        if (!RemoteFileExists(remote)) return;
+        if (_fileAccess is not null) throw new NotSupportedException("The in-memory file layer cannot delete a file.");
+        _sftp!.DeleteFile(remote);
     }
 
     public void Dispose()
