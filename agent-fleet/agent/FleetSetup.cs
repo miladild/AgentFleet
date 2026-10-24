@@ -617,9 +617,15 @@ internal sealed class FleetSetupService(
             });
     }
 
-    private static SetupCheck NodeCheck(FleetNodeDefinition node, NodeHealthSnapshot snapshot, bool localOllamaUp, HubInfo hub)
+    internal static SetupCheck NodeCheck(FleetNodeDefinition node, NodeHealthSnapshot snapshot, bool localOllamaUp, HubInfo hub)
     {
         string where = IsLocal(node.OpenAiEndpoint) ? "this computer" : node.OpenAiEndpoint.Host;
+        if (snapshot.TurnedOff)
+        {
+            return new SetupCheck($"node:{node.Name}", "machines", Info, $"{node.Name}: vision machine turned off",
+                "It is not contacted and takes no graphics memory. Images are answered with a note saying so until it is turned on.");
+        }
+
         if (snapshot.Ready)
         {
             return new SetupCheck($"node:{node.Name}", "machines", Ok, $"{node.Name}: {node.Model} is ready",

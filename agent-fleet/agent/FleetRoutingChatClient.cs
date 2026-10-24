@@ -15,6 +15,9 @@ internal sealed record FleetRouteTarget(FleetNodeDefinition Node, IChatClient Cl
 /// </summary>
 internal sealed class FleetRoutingChatClient : IChatClient
 {
+    /// <summary>What a router is built from. A change in any machine, its vision mode included, or in the triage model needs a new router.</summary>
+    internal static string Fingerprint(FleetConfig config) => JsonSerializer.Serialize(new { config.Nodes, config.TriageModel });
+
     // Matches the marker the Next.js proxy (src/app/api/copilotkit/[[...slug]]/route.ts)
     // repacks an image attachment into, working around the AG-UI hosting library
     // dropping the protocol's native "image" message part during deserialization.
@@ -39,6 +42,7 @@ internal sealed class FleetRoutingChatClient : IChatClient
     private readonly IReadOnlyList<FleetRouteTarget> _targets;
     private readonly IReadOnlyList<FleetRouteTarget> _textTargets;
     private readonly IReadOnlyList<FleetRouteTarget> _visionTargets;
+    private readonly bool _visionTurnedOff;
     private readonly IReadOnlyDictionary<string, FleetRouteTarget> _byName;
     private readonly FleetRouteTarget _fallback;
     private readonly FleetHealthMonitor _healthMonitor;
@@ -78,7 +82,9 @@ internal sealed class FleetRoutingChatClient : IChatClient
         _logger = logger;
 
         _textTargets = targets.Where(target => !target.Node.Vision).ToList();
-        _visionTargets = targets.Where(target => target.Node.Vision).ToList();
+        // A vision machine the owner turned off is never routed to; images then get the note that says how to turn it on.
+        _visionTargets = targets.Where(target => target.Node.Vision && !target.Node.IsTurnedOff).ToList();
+        _visionTurnedOff = targets.Any(target => target.Node.IsTurnedOff);
         _byName = targets.ToDictionary(target => target.Node.Name, StringComparer.Ordinal);
 
         if (_textTargets.Count == 0)
@@ -583,7 +589,12 @@ internal sealed class FleetRoutingChatClient : IChatClient
     private IReadOnlyList<ChatMessage> PrepareMessages(IEnumerable<ChatMessage> messages)
     {
         IReadOnlyList<ChatMessage> messageList = ReconstructImages(Materialize(messages));
-        return _visionTargets.Count == 0 ? StripImages(messageList) : messageList;
+        if (_visionTargets.Count > 0)
+        {
+            return messageList;
+        }
+
+        return StripImages(messageList, _visionTurnedOff ? TurnedOffImageNote : NoVisionImageNote);
     }
 
     // Undoes the Next.js proxy's marker-based repacking (see ImageMarker above),
@@ -643,7 +654,13 @@ internal sealed class FleetRoutingChatClient : IChatClient
     // With no vision node configured, a text model would either error on the image or
     // silently ignore it and answer as if it had seen it. Replace it with a plain note
     // so the model can say it could not see the attachment.
-    private static IReadOnlyList<ChatMessage> StripImages(IReadOnlyList<ChatMessage> messages)
+    private const string NoVisionImageNote = "[An image was attached, but this fleet has no vision node configured, so it could not be read.]";
+
+    // Said when the vision machine exists but is turned off: it is not contacted, and the owner can switch it on from Machines or the script.
+    private const string TurnedOffImageNote =
+        "[An image was attached, but the vision machine is turned off, so it could not be read. To use it, set its visionMode to ondemand under Machines, or run Set-FleetVision.ps1.]";
+
+    private static IReadOnlyList<ChatMessage> StripImages(IReadOnlyList<ChatMessage> messages, string note)
     {
         if (!messages.Any(ContainsImage))
         {
@@ -657,7 +674,7 @@ internal sealed class FleetRoutingChatClient : IChatClient
                     message.Role,
                     message.Contents
                         .Select(content => IsImage(content)
-                            ? new TextContent("[An image was attached, but this fleet has no vision node configured, so it could not be read.]")
+                            ? new TextContent(note)
                             : content)
                         .ToList()))
             .ToList();

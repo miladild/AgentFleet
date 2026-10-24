@@ -42,6 +42,7 @@ rules to the named peer IPs. `-RestrictOllamaRules` remains accepted for compati
   Use `localhost` or an IP address, or list the name in `FLEET_ALLOWED_HOSTS`.
 - **`fetch failed` or a stream error.** The machine that was chosen is unreachable. Check the panel on the left; requests
   for a down machine normally go to the fallback node, but a vision request has no fallback (nothing else can read images).
+- **An image gets a note that the vision machine is turned off.** Its `visionMode` is `off`, so nothing contacts it. Set `visionMode` to `ondemand` under Machines, or run `Set-FleetVision.ps1`, and the next image uses it. The first image after an idle spell takes a few seconds while the model loads.
 - **Nothing happens for minutes.** The model may be spilling out of graphics memory. A model bigger than your card's memory
   can be ten times slower. Use a smaller one, or check `ollama ps` on that machine to see how it is loaded: the
   `CONTEXT` column is the size the fleet asked for, and a `PROCESSOR` split such as `20%/80% CPU/GPU` means it did not

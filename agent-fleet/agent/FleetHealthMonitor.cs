@@ -14,7 +14,23 @@ internal sealed record NodeHealthSnapshot(
     DateTimeOffset CheckedAtUtc,
     string? Failure)
 {
+    /// <summary>The failure of a vision machine the owner turned off. Nothing was asked of it, so it is not a problem.</summary>
+    public const string TurnedOffFailure = "turned_off";
+
     public bool Ready => Reachable && ModelAvailable && Answers;
+
+    public bool TurnedOff => Failure == TurnedOffFailure;
+}
+
+/// <summary>The overall status /health reports. A machine turned off on purpose does not make the fleet degraded.</summary>
+internal static class FleetHealthRollup
+{
+    public static string Status(IReadOnlyList<NodeHealthSnapshot> nodes, string fallbackName)
+    {
+        bool hubReady = nodes.Single(node => node.Name == fallbackName).Ready;
+        bool allReady = nodes.Where(node => !node.TurnedOff).All(node => node.Ready);
+        return hubReady ? (allReady ? "ok" : "degraded") : "unhealthy";
+    }
 }
 
 internal sealed class FleetHealthMonitor
@@ -48,6 +64,12 @@ internal sealed class FleetHealthMonitor
         if (!_options.TryGetNode(nodeName, out FleetNodeDefinition? node))
         {
             return new NodeHealthSnapshot(nodeName, string.Empty, false, false, false, DateTimeOffset.UtcNow, "not_configured");
+        }
+
+        // A turned-off vision machine is not contacted by anything, not even a forced probe, so it is answered before any cache or lock.
+        if (node.IsTurnedOff)
+        {
+            return new NodeHealthSnapshot(node.Name, node.Model, Reachable: false, ModelAvailable: false, Answers: false, DateTimeOffset.UtcNow, NodeHealthSnapshot.TurnedOffFailure);
         }
 
         if (IsBeingMeasured(node, forceInferenceProbe))
@@ -298,6 +320,12 @@ internal sealed class FleetHealthMonitor
     internal static async Task<HttpRequestMessage?> InferenceProbeRequestAsync(
         HttpClient client, FleetNodeDefinition node, bool force, CancellationToken cancellationToken)
     {
+        // A vision machine set to ondemand is asked only for its model list: an image loads the model, and a routine question would keep it loaded.
+        if (node.Vision && node.VisionMode == NodeVisionMode.OnDemand && !force)
+        {
+            return null;
+        }
+
         if (string.Equals(node.Api, "openai", StringComparison.OrdinalIgnoreCase))
         {
             return new HttpRequestMessage(HttpMethod.Post, new Uri(node.OpenAiEndpoint.ToString().TrimEnd('/') + "/chat/completions"))

@@ -311,6 +311,10 @@ internal sealed class FleetConfigStore
                 Caveman = AgentStylePrompt.Normalize(node.Caveman),
                 Ponytail = AgentStylePrompt.Normalize(node.Ponytail),
                 Thinking = string.IsNullOrWhiteSpace(node.Thinking) ? null : node.Thinking.Trim().ToLowerInvariant(),
+                // A vision machine always has a mode (ondemand when none is given); a text machine keeps only what was written, so Validate can refuse it.
+                VisionMode = node.Vision
+                    ? NodeVisionMode.Normalize(node.VisionMode)
+                    : string.IsNullOrWhiteSpace(node.VisionMode) ? null : NodeVisionMode.Canonical(node.VisionMode),
                 Workspace = node.Workspace is null ? null : node.Workspace with
                 {
                     Host = node.Workspace.Host?.Trim() ?? string.Empty,
@@ -441,6 +445,19 @@ internal sealed class FleetConfigStore
             if (node.Thinking is not (null or NodeThinking.Off or NodeThinking.Model))
             {
                 throw new InvalidOperationException($"Node '{node.Name}' has thinking '{node.Thinking}': choose off (the default) or model.");
+            }
+
+            if (node.VisionMode is not null)
+            {
+                if (!node.Vision)
+                {
+                    throw new InvalidOperationException($"Node '{node.Name}' is not a vision node, so visionMode does not apply to it: remove it.");
+                }
+
+                if (!NodeVisionMode.IsKnown(node.VisionMode))
+                {
+                    throw new InvalidOperationException($"Node '{node.Name}' has visionMode '{node.VisionMode}': choose {NodeVisionMode.Choices}.");
+                }
             }
 
             if (!AgentStylePrompt.IsValid(node.Ponytail))

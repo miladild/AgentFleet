@@ -16,8 +16,12 @@ internal sealed record FleetNodeDefinition(
     string Caveman = AgentStylePrompt.Off,
     string Ponytail = AgentStylePrompt.Off,
     FleetWorkerWorkspaceConfig? Workspace = null,
-    string Thinking = NodeThinking.Off)
+    string Thinking = NodeThinking.Off,
+    string VisionMode = NodeVisionMode.OnDemand)
 {
+    /// <summary>A vision machine the owner turned off: nothing contacts it (see NodeVisionMode).</summary>
+    public bool IsTurnedOff => Vision && VisionMode == NodeVisionMode.Off;
+
     /// <summary>The machine's Ollama root, http://host:11434/, for the native API.</summary>
     public Uri OllamaRoot => new UriBuilder(OpenAiEndpoint.Scheme, OpenAiEndpoint.Host, OpenAiEndpoint.IsDefaultPort ? -1 : OpenAiEndpoint.Port, "/").Uri;
 
@@ -138,7 +142,8 @@ internal sealed class FleetOptions
             AgentStylePrompt.Normalize(config.Caveman),
             AgentStylePrompt.Normalize(config.Ponytail),
             config.Workspace,
-            NodeThinking.Normalize(config.Thinking));
+            NodeThinking.Normalize(config.Thinking),
+            NodeVisionMode.Normalize(config.VisionMode));
     }
 
     private static TimeSpan ReadDuration(

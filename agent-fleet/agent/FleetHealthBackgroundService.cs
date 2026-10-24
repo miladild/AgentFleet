@@ -52,9 +52,13 @@ internal sealed class FleetHealthBackgroundService : BackgroundService
         while (!stoppingToken.IsCancellationRequested && await timer.WaitForNextTickAsync(stoppingToken));
     }
 
+    // A turned-off vision machine is not looked up or probed, so it is left out here, before any DNS or UDP lookup.
+    internal static IReadOnlyList<FleetNodeDefinition> MachinesToProbe(IEnumerable<FleetNodeDefinition> nodes) =>
+        nodes.Where(node => !node.IsTurnedOff).ToList();
+
     private async Task ProbeAllAsync(CancellationToken cancellationToken)
     {
-        foreach (FleetNodeDefinition node in _options.Nodes)
+        foreach (FleetNodeDefinition node in MachinesToProbe(_options.Nodes))
         {
             if (cancellationToken.IsCancellationRequested)
             {

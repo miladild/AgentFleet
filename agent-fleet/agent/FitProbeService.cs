@@ -200,6 +200,9 @@ internal sealed class FitProbeService
         string name = requestedNode?.Trim() ?? string.Empty;
         if (!_options.TryGetNode(name, out FleetNodeDefinition? node)) return null;
 
+        // Reading the model's identity from a turned-off machine would contact it, so there is nothing to report for it.
+        if (node.IsTurnedOff) return null;
+
         FitProbeHistoryEntry[] history = ReadHistory()
             .Where(entry => string.Equals(entry.Node, node.Name, StringComparison.Ordinal))
             .ToArray();

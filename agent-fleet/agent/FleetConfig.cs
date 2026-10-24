@@ -31,6 +31,9 @@ internal static class FleetTiers
 /// FLEET_CONTEXT_LENGTH), capped at what the model supports. Ollama's own default, 4096, is smaller than the fleet's
 /// instructions and tool list together, so without this Ollama silently cuts off the start of every request.
 /// </param>
+/// <param name="VisionMode">
+/// Vision machines only: "ondemand" (the default when absent), "off" or "always". See NodeVisionMode.
+/// </param>
 /// <param name="Api">
 /// "ollama" (default): Ollama's native API, which is what lets the fleet set the context size. "openai": any
 /// OpenAI-compatible server (LM Studio, vLLM, llama.cpp), which gets requests the way it expects and sets its own size.
@@ -55,7 +58,8 @@ internal sealed record FleetNodeConfig(
     string? Caveman = null,
     string? Ponytail = null,
     FleetWorkerWorkspaceConfig? Workspace = null,
-    string? Thinking = null);
+    string? Thinking = null,
+    string? VisionMode = null);
 
 /// <summary>SSH workspace for approved plan work. Configure only a dedicated, non-admin worker account.</summary>
 internal sealed record FleetWorkerWorkspaceConfig(

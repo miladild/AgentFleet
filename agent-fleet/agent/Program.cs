@@ -191,8 +191,7 @@ FleetRoutingChatClient BuildRouter(FleetConfig config)
 }
 
 // What the current router was built from, to tell whether a save needs a new one.
-string RoutingFingerprint(FleetConfig config) =>
-    System.Text.Json.JsonSerializer.Serialize(new { config.Nodes, config.TriageModel });
+string RoutingFingerprint(FleetConfig config) => FleetRoutingChatClient.Fingerprint(config);
 
 var fleetClient = new SwappableChatClient(BuildRouter(fleetConfigStore.Current));
 string routedFingerprint = RoutingFingerprint(fleetConfigStore.Current);
@@ -756,13 +755,12 @@ app.MapGet("/health", async (CancellationToken cancellationToken) =>
 {
     IReadOnlyList<NodeHealthSnapshot> nodes = await healthMonitor.GetAllAsync(cancellationToken);
     string fallbackName = fleetOptions.Nodes.Single(node => node.Fallback).Name;
-    bool hubReady = nodes.Single(node => node.Name == fallbackName).Ready;
-    bool allReady = nodes.All(node => node.Ready);
+    string status = FleetHealthRollup.Status(nodes, fallbackName);
 
     return Results.Json(
         new
         {
-            status = hubReady ? (allReady ? "ok" : "degraded") : "unhealthy",
+            status,
             nodes = nodes.Select(node => new
             {
                 name = node.Name,
@@ -772,10 +770,11 @@ app.MapGet("/health", async (CancellationToken cancellationToken) =>
                 listsModels = node.ModelAvailable,
                 answers = node.Answers,
                 checkedAtUtc = node.CheckedAtUtc,
-                reason = node.Failure
+                reason = node.Failure,
+                mode = fleetOptions.GetNode(node.Name) is { Vision: true } vision ? vision.VisionMode : null
             })
         },
-        statusCode: hubReady ? StatusCodes.Status200OK : StatusCodes.Status503ServiceUnavailable);
+        statusCode: status == "unhealthy" ? StatusCodes.Status503ServiceUnavailable : StatusCodes.Status200OK);
 });
 
 app.MapGet("/api/fleet-mode", () => Results.Json(new { mode = modeService.Mode.ToString().ToLowerInvariant() }));
@@ -817,6 +816,7 @@ app.MapGet("/api/fleet-status", async (CancellationToken cancellationToken) =>
             answers = node.Answers,
             reason = node.Failure,
             vision = fleetOptions.GetNode(node.Name).Vision,
+            mode = fleetOptions.GetNode(node.Name) is { Vision: true } visionNode ? visionNode.VisionMode : null,
             workspace = fleetOptions.GetNode(node.Name).Workspace is not null && !fleetOptions.GetNode(node.Name).Fallback
         }),
         recentActivity = activityLog.Recent().Select(entry => new
@@ -836,7 +836,7 @@ app.MapGet("/api/fleet-config", () =>
         version = fleetConfigStore.Version,
         defaultContextLength,
         triageModel = config.TriageModel,
-        nodes = config.Nodes.Select(node => new { node.Name, node.Url, node.Model, node.Purpose, node.Tier, node.Vision, node.Fallback, node.ContextLength, node.Api, node.Caveman, node.Ponytail, node.Workspace, node.Thinking }),
+        nodes = config.Nodes.Select(node => new { node.Name, node.Url, node.Model, node.Purpose, node.Tier, node.Vision, node.Fallback, node.ContextLength, node.Api, node.Caveman, node.Ponytail, node.Workspace, node.Thinking, node.VisionMode }),
         tools = ToolsPayload(config),
         mcpServers = config.McpServerMap,
         // What actually happened at the last startup, which can differ from the saved
@@ -899,6 +899,11 @@ app.MapGet("/api/fleet-config/models", async (string url, IHttpClientFactory htt
     if (!Uri.TryCreate(url, UriKind.Absolute, out Uri? endpoint) || endpoint.Scheme is not ("http" or "https"))
     {
         return Results.BadRequest(new { error = "url must be an absolute http(s) URL." });
+    }
+
+    if (NodeVisionMode.IsTurnedOffAt(fleetOptions.Nodes, endpoint))
+    {
+        return Results.BadRequest(new { error = NodeVisionMode.TurnedOffRefusal });
     }
 
     Uri tagsEndpoint = new UriBuilder(
@@ -966,7 +971,8 @@ app.MapPut("/api/fleet-config", async (FleetConfigUpdateRequest request, Cancell
                         node.Caveman ?? previous?.Caveman,
                         node.Ponytail ?? previous?.Ponytail,
                         node.ClearWorkspace ? null : node.Workspace ?? previous?.Workspace,
-                        node.Thinking ?? previous?.Thinking);
+                        node.Thinking ?? previous?.Thinking,
+                        NodeVisionMode.Resolve(node.Vision, node.VisionMode, previous?.VisionMode));
                 }).ToList()
                 : current.Nodes,
             Tools = updatedTools ?? current.Tools,
@@ -1021,7 +1027,7 @@ app.MapPut("/api/fleet-config", async (FleetConfigUpdateRequest request, Cancell
             version,
             defaultContextLength,
             triageModel = saved.TriageModel,
-            nodes = saved.Nodes.Select(node => new { node.Name, node.Url, node.Model, node.Purpose, node.Tier, node.Vision, node.Fallback, node.ContextLength, node.Api, node.Caveman, node.Ponytail, node.Workspace, node.Thinking }),
+            nodes = saved.Nodes.Select(node => new { node.Name, node.Url, node.Model, node.Purpose, node.Tier, node.Vision, node.Fallback, node.ContextLength, node.Api, node.Caveman, node.Ponytail, node.Workspace, node.Thinking, node.VisionMode }),
             tools = ToolsPayload(saved),
             mcpServers = saved.McpServerMap,
             mcpStatus = toolRegistry.Mcp.Statuses,
@@ -1739,6 +1745,11 @@ app.MapPost("/api/setup/pull", (ModelPullRequest request) =>
         return Results.BadRequest(new { error = "url must be the machine's address, for example http://192.0.2.20:11434." });
     }
 
+    if (NodeVisionMode.IsTurnedOffAt(fleetOptions.Nodes, root))
+    {
+        return Results.BadRequest(new { error = NodeVisionMode.TurnedOffRefusal });
+    }
+
     try
     {
         return Results.Json(modelPulls.Start(root, request.Model ?? string.Empty));
@@ -1988,7 +1999,8 @@ internal sealed record FleetConfigNodeUpdate(
     string? Ponytail = null,
     FleetWorkerWorkspaceConfig? Workspace = null,
     bool ClearWorkspace = false,
-    string? Thinking = null);
+    string? Thinking = null,
+    string? VisionMode = null);
 
 internal sealed record FleetConfigUpdateRequest(
     string? TriageModel,
