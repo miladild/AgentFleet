@@ -100,6 +100,18 @@ public sealed partial class PlanRunnerTests
     }
 
     [Fact]
+    public async Task A_heavy_step_on_a_fleet_whose_only_workspace_worker_is_standard_reaches_its_model_call()
+    {
+        var (after, workspaces) = await RunUnpinnedTierStepAsync("heavy", [TierHub, TierWorker("standard-worker", "standard")], unready: []);
+
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.Equal(["standard-worker"], workspaces.StagedMachines);
+        Assert.Contains(after.Events!, runEvent => runEvent.Kind == RunEventKind.AttemptStarted && runEvent.WorkspaceNode == "standard-worker");
+        Assert.DoesNotContain(after.Events!, runEvent => runEvent.Kind == RunEventKind.WorkspaceFailed);
+        Assert.DoesNotContain(after.Events!, runEvent => runEvent.Kind == RunEventKind.StepParked);
+    }
+
+    [Fact]
     public async Task A_heavy_step_with_only_a_light_workspace_uses_the_light_worker()
     {
         var (after, workspaces) = await RunUnpinnedTierStepAsync("heavy", [TierHub, TierWorker("light-worker", "light")], unready: []);

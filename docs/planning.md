@@ -53,8 +53,8 @@ steps, and checks each step with a real command instead of trusting itself.
      steps in Aggressive mode, the hub may be the model from the first attempt while all project tools still use a worker.
    - A step whose tier has no worker with a workspace (the hub never has one) runs its project tools on the nearest tier that has
      a ready worker with a workspace: the next tier up first, then the next tier down. The run log's machine-selected entry says
-     so, and the requested task tier stays as written. A tier whose workers exist but are not ready is not moved; the step waits
-     for its own tier as before.
+     so, and the requested task tier stays as written. The model for the step's own tier still does the work; only its files and
+     checks run on the borrowed worker. A tier whose workers exist but are not ready is not moved; the step waits for its own tier as before.
    - Each step goes to a configured worker workspace, in a fresh model session that sees only the goal, the assumptions,
      the step itself, a summary of earlier steps, and bounded context from the files named by that step. The runner reads
      up to eight project-local text files (32 KiB each, 48,000 characters total) before each attempt. Missing, binary,

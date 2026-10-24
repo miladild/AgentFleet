@@ -74,6 +74,15 @@ internal sealed class WorkerWorkspaceManager(FleetOptions fleet, ILogger logger,
     internal static IReadOnlyList<PlanFrozenTestFile> FrozenFilesOf(PlanRecord plan) =>
         (plan.FrozenTests ?? []).SelectMany(set => set.Files).ToArray();
 
+    // A coding worker that can hold a step's workspace: not the hub, not a vision machine, and with a workspace configured.
+    internal static bool IsWorkspaceWorker(FleetNodeDefinition node, string tier) =>
+        !node.Vision && !string.Equals(node.Name, "hub", StringComparison.OrdinalIgnoreCase) &&
+        node.Workspace is not null && string.Equals(node.Tier, tier, StringComparison.OrdinalIgnoreCase);
+
+    // A tier with no such worker borrows the nearest tier's worker for its files and checks; its own model still does the work.
+    internal static bool HasOwnWorkspaceWorker(IEnumerable<FleetNodeDefinition> nodes, string tier) =>
+        nodes.Any(node => IsWorkspaceWorker(node, tier));
+
     public async Task<IWorkerWorkspaceSession> StageAsync(PlanRecord plan, PlanStep step, string machine, CancellationToken cancellationToken)
     {
         FleetNodeDefinition node = fleet.Nodes.FirstOrDefault(candidate =>
@@ -81,7 +90,8 @@ internal sealed class WorkerWorkspaceManager(FleetOptions fleet, ILogger logger,
             ?? throw new InvalidOperationException($"Worker workspace unavailable: machine '{machine}' is not configured.");
         if (string.Equals(node.Name, "hub", StringComparison.OrdinalIgnoreCase) || node.Vision)
             throw new InvalidOperationException($"Worker workspace unavailable: '{machine}' is not a coding worker; plan work must run on a configured worker machine.");
-        if (!string.Equals(node.Tier, step.Tier, StringComparison.OrdinalIgnoreCase))
+        // A machine of another tier serves only as the borrowed worker: the step's tier has no workspace worker of its own.
+        if (!string.Equals(node.Tier, step.Tier, StringComparison.OrdinalIgnoreCase) && HasOwnWorkspaceWorker(fleet.Nodes, step.Tier))
             throw new InvalidOperationException($"Worker workspace unavailable: '{machine}' is configured for the {node.Tier ?? "unspecified"} tier, not this step's approved {step.Tier} tier.");
         FleetWorkerWorkspaceConfig config = node.Workspace
             ?? throw new InvalidOperationException($"Worker workspace unavailable: machine '{machine}' has no worker workspace configured. Configure a dedicated low-privilege SSH account and pinned host key in Config.");
@@ -117,7 +127,7 @@ internal sealed class WorkerWorkspaceManager(FleetOptions fleet, ILogger logger,
     {
         if (!fleet.TryGetNode(baseline.Machine, out FleetNodeDefinition? node) || node.Workspace is null || node.Vision ||
             string.Equals(node.Name, "hub", StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(node.Tier, step.Tier, StringComparison.OrdinalIgnoreCase))
+            (!string.Equals(node.Tier, step.Tier, StringComparison.OrdinalIgnoreCase) && HasOwnWorkspaceWorker(fleet.Nodes, step.Tier)))
             throw new InvalidOperationException($"Worker workspace unavailable: {baseline.Machine} is not configured for workspace recovery.");
         if (string.IsNullOrWhiteSpace(plan.WorkingDirectory) || !Directory.Exists(plan.WorkingDirectory))
             throw new InvalidOperationException("Worker workspace unavailable: the plan's project folder does not exist on the hub.");

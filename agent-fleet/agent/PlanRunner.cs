@@ -2440,7 +2440,7 @@ internal sealed partial class PlanRunner
         FleetNodeDefinition[] candidates = WorkspaceCandidates(tier);
         // A tier with no worker workspace at all (the hub never has one) borrows the nearest tier that has one. A tier
         // whose workers exist but are not ready is still refused, so the step waits for its own machine as before.
-        string[] tiers = candidates.Length == 0 ? [tier, .. NearestTiersFirst(tier)] : [tier];
+        string[] tiers = WorkerWorkspaceManager.HasOwnWorkspaceWorker(_fleetOptions.Nodes, tier) ? [tier] : [tier, .. NearestTiersFirst(tier)];
         foreach (string candidateTier in tiers)
         {
             foreach (FleetNodeDefinition candidate in candidateTier == tier ? candidates : WorkspaceCandidates(candidateTier))
@@ -2466,8 +2466,7 @@ internal sealed partial class PlanRunner
 
     private FleetNodeDefinition[] WorkspaceCandidates(string tier) =>
         _fleetOptions!.Nodes
-            .Where(node => !node.Vision && !string.Equals(node.Name, "hub", StringComparison.OrdinalIgnoreCase) &&
-                node.Workspace is not null && string.Equals(node.Tier, tier, StringComparison.OrdinalIgnoreCase))
+            .Where(node => WorkerWorkspaceManager.IsWorkspaceWorker(node, tier))
             .OrderByDescending(node => node.Fallback)
             .ThenBy(node => node.Name, StringComparer.OrdinalIgnoreCase)
             .ToArray();
