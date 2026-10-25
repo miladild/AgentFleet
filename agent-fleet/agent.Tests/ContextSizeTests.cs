@@ -310,6 +310,97 @@ public sealed class ContextSizeTests
         Assert.Equal(new string('p', 6_000), ContextSizeChatClient.FitToWindow(chat, null, 20_000, 1.0).First(message => message.Role == ChatRole.User && message.Text.StartsWith("ppp", StringComparison.Ordinal)).Text);
     }
 
+    private const string CheckMarker = "[plan:0123456789abcdef0123456789abcdef]";
+    private const string WhereItFailed = "Where it failed (each failing test as written, or the source line a stack frame names):";
+
+    // Tool rounds of one call and one long result each, as a plan step makes them.
+    private static void AddRounds(List<ChatMessage> conversation, int rounds, string prefix, int resultLength)
+    {
+        for (int round = 0; round < rounds; round++)
+        {
+            string callId = $"{prefix}{round}";
+            conversation.Add(new ChatMessage(ChatRole.Assistant, [new FunctionCallContent(callId, "run_command", new Dictionary<string, object?> { ["command"] = "npm test" })]));
+            conversation.Add(new ChatMessage(ChatRole.Tool, [new FunctionResultContent(callId, "Exit code: 1 " + new string('r', resultLength))]));
+        }
+    }
+
+    // The check follow-up a plan step gets after a failed round: the raw check output, then the failing tests as written.
+    private static ChatMessage CheckFollowUp(int round, int outputLength) =>
+        new(ChatRole.User, $"Round {round}: the approved check did not pass yet. " + new string('o', outputLength) + "\n" + WhereItFailed + "\n    it fails in round " + round + " " + CheckMarker);
+
+    [Fact]
+    public void The_newest_check_follow_up_stays_whole_while_older_ones_are_shortened()
+    {
+        List<ChatMessage> conversation = [new(ChatRole.System, "You carry out one plan step."), new(ChatRole.User, "Implement the holidays. " + new string('t', 2_000))];
+        AddRounds(conversation, 8, "early", 6_000);
+        conversation.Add(CheckFollowUp(2, 6_000));
+        AddRounds(conversation, 8, "middle", 6_000);
+        ChatMessage newest = CheckFollowUp(3, 5_000);
+        conversation.Add(newest);
+        AddRounds(conversation, 4, "late", 6_000);
+
+        IReadOnlyList<ChatMessage> fitted = ContextSizeChatClient.FitToWindow(conversation, null, 12_000, 1.0);
+
+        Assert.True(ContextSizeChatClient.EstimateTokens(fitted, null) <= 12_000);
+        Assert.Equal(newest.Text, fitted.Single(message => message.Text.StartsWith("Round 3:", StringComparison.Ordinal)).Text);
+        Assert.Contains(fitted, message => message.Text.StartsWith("Round 2:", StringComparison.Ordinal) && message.Text.EndsWith(ContextSizeChatClient.RemovedMarker, StringComparison.Ordinal));
+        AssertCallsAreWholeAndAnswered(fitted, conversation);
+    }
+
+    [Fact]
+    public void The_newest_check_follow_up_stays_whole_when_the_first_pass_cannot_fit_and_the_latest_turns_are_shortened()
+    {
+        // The first pass never touches the latest six messages, so here it cannot fit and the second pass runs over the turns
+        // around the follow-up. The follow-up is one of those turns and must still come out whole.
+        List<ChatMessage> conversation = [new(ChatRole.System, "You carry out one plan step."), new(ChatRole.User, "Implement the holidays. " + new string('t', 2_000))];
+        AddRounds(conversation, 2, "early", 6_000);
+        AddRounds(conversation, 1, "before", 6_000);
+        ChatMessage newest = CheckFollowUp(3, 5_000);
+        conversation.Add(newest);
+        AddRounds(conversation, 2, "after", 6_000);
+
+        IReadOnlyList<ChatMessage> fitted = ContextSizeChatClient.FitToWindow(conversation, null, 5_800, 1.0);
+
+        Assert.True(ContextSizeChatClient.EstimateTokens(fitted, null) <= 5_800);
+        Assert.Equal(newest.Text, fitted.Single(message => message.Text.StartsWith("Round 3:", StringComparison.Ordinal)).Text);
+        AssertCallsAreWholeAndAnswered(fitted, conversation);
+    }
+
+    [Fact]
+    public void A_single_check_follow_up_stays_whole()
+    {
+        List<ChatMessage> conversation = [new(ChatRole.System, "You carry out one plan step."), new(ChatRole.User, "Implement the holidays. " + new string('t', 2_000))];
+        AddRounds(conversation, 3, "early", 6_000);
+        ChatMessage only = CheckFollowUp(2, 5_000);
+        conversation.Add(only);
+        AddRounds(conversation, 4, "late", 6_000);
+
+        IReadOnlyList<ChatMessage> fitted = ContextSizeChatClient.FitToWindow(conversation, null, 12_000, 1.0);
+
+        Assert.True(ContextSizeChatClient.EstimateTokens(fitted, null) <= 12_000);
+        Assert.Equal(only.Text, fitted.Single(message => message.Text.StartsWith("Round 2:", StringComparison.Ordinal)).Text);
+        AssertCallsAreWholeAndAnswered(fitted, conversation);
+    }
+
+    [Fact]
+    public void A_chat_without_a_plan_marker_is_fitted_as_before()
+    {
+        List<ChatMessage> chat = [new(ChatRole.System, "You answer questions."), new(ChatRole.User, new string('q', 4_000))];
+        for (int turn = 0; turn < 6; turn++)
+        {
+            chat.Add(new ChatMessage(ChatRole.Assistant, new string('a', 3_000)));
+            chat.Add(new ChatMessage(ChatRole.User, new string((char)('b' + turn), 3_000)));
+        }
+
+        IReadOnlyList<ChatMessage> fitted = ContextSizeChatClient.FitToWindow(chat, null, 6_000, 1.0);
+
+        // Only the assistant's own older long answers are shortened, as they always were. No message of this chat is a plan's
+        // follow-up, so the user messages (the task and every later one) are never shortened.
+        Assert.Equal(
+            new[] { "system:21", "user:4000", "assistant:475", "user:3000", "assistant:475", "user:3000", "assistant:475", "user:3000", "assistant:475", "user:3000", "assistant:475", "user:3000", "assistant:3000", "user:3000" },
+            fitted.Select(message => $"{message.Role}:{message.Text.Length}").ToArray());
+    }
+
     [Fact]
     public void The_shortened_part_of_a_growing_conversation_changes_in_steps_so_the_model_server_keeps_its_work_on_the_start()
     {

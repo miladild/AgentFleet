@@ -535,9 +535,10 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
     /// the start, and the task goes first (measured: a plan step on the hub grew to about 50000 tokens in 34 tool
     /// rounds, lost its task and went round in circles). Here the oldest tool calls go, each with its results, and the
     /// output and follow-ups that stay are shortened, until it fits; the system instructions, the first user message (the
-    /// task) and the latest turns stay whole. A call that stays is never changed: a model copies the shape of the calls
-    /// it sees (measured: with an old write_file shown without its content or with a placeholder in it, a worker's
-    /// next write_file had no content or the placeholder as its content, 15 times in 15). The caller's list is not changed.
+    /// task), the newest check follow-up of a plan step and the latest turns stay whole. A call that stays is never changed:
+    /// a model copies the shape of the calls it sees (measured: with an old write_file shown without its content or with a
+    /// placeholder in it, a worker's next write_file had no content or the placeholder as its content, 15 times in 15). The
+    /// caller's list is not changed.
     /// </summary>
     internal static IReadOnlyList<ChatMessage> FitToWindow(IReadOnlyList<ChatMessage> messages, ChatOptions? options, int budgetTokens, double scale)
     {
@@ -550,6 +551,8 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
         bool[] gone = new bool[fitted.Count];
         int[] resultsEnd = ResultsEnds(fitted);
         int task = fitted.FindIndex(message => message.Role == ChatRole.User);
+        // The newest check follow-up says what is still failing, and nothing newer replaces it, so it stays whole like the task.
+        int latest = fitted.FindLastIndex(message => message.Role == ChatRole.User && FleetPlanStore.FindMarkerId(message.Text) is not null);
 
         // The latest turns can hold whole files (measured: a retry on the hub stayed at 29000 of its 28672 tokens after
         // every older turn was shortened, because its last turns wrote a file and read it back). The older of those go
@@ -567,7 +570,7 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
         {
             for (int index = from; index < to; index++)
             {
-                if (!gone[index] && index != task && fitted[index].Role != ChatRole.System)
+                if (!gone[index] && index != task && index != latest && fitted[index].Role != ChatRole.System)
                 {
                     if (resultsEnd[index] >= 0)
                     {
@@ -649,8 +652,9 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
                     changed = true;
                     break;
                 // The check output of an earlier round of a plan step, sent back to the model as a follow-up message: the newer
-                // rounds say what is still failing, so the old text can go. (The task, the first user message, is never
-                // reached here, and neither is anyone's own message in a chat: only a follow-up that carries a plan's marker.)
+                // rounds say what is still failing, so the old text can go. (FitToWindow never passes the task, the first user
+                // message, or the newest such follow-up, which stays whole; neither is anyone's own message in a chat. Only an
+                // older follow-up that carries a plan's marker is shortened here.)
                 case TextContent text when message.Role == ChatRole.User && text.Text is { Length: > 4 * LongPart } &&
                                            FleetPlanStore.FindMarkerId(text.Text) is not null:
                     contents.Add(new TextContent(text.Text[..(2 * LongPart)] + Removed));
