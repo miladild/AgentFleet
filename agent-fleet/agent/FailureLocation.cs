@@ -12,8 +12,11 @@ namespace AgentFleet;
 /// </summary>
 internal static partial class FailureLocation
 {
-    private const int MaxFrames = 2;
+    private const int MaxFrames = 6;
     private const int MaxLineCharacters = 200;
+    private const int MaxTextCharacters = 3000;
+    private const int MaxTestLinesUp = 15;
+    private const int ReservedCharacters = 200;
     private const long MaxFileBytes = 1_000_000;
 
     // file.ext:line or file.ext:line:column, as Node, Jest, Vitest, pytest and many compilers print it.
@@ -31,6 +34,10 @@ internal static partial class FailureLocation
     // The worker's workspace as the runner lays it out: <root>/plans/<plan id>/<machine>/project/.
     [GeneratedRegex(@"[^\s()'""<>]*?plans[\\/][0-9a-f]{32}[\\/][^\\/\s()'""<>]+[\\/]project[\\/]")]
     private static partial Regex WorkerProject();
+
+    // A line that opens a test: test(, it(, specify( and their .only, .skip and .each forms; Python def test_; a .NET test attribute.
+    [GeneratedRegex(@"^\s*(?:(?:test|it|specify)(?:\.\w+)*\s*\(|(?:async\s+)?def test_|\[(?:Fact|Theory|Test|TestCase)\b)")]
+    private static partial Regex TestOpener();
 
     /// <summary>
     /// The output of a check with the project's own folder taken off its paths, so a stack frame reads "src/semver.js:35:28" and the model
@@ -59,8 +66,9 @@ internal static partial class FailureLocation
     private static readonly string[] NotTheProject = ["node_modules", "site-packages", "dist-packages", ".nuget", "/usr/lib/", "\\dotnet\\shared\\"];
 
     /// <summary>
-    /// "Where it failed" with the source line of each of the first stack frames that name a file of the project; null when the output
-    /// names none. The paths in the output may be those of another machine: the longest tail of each that is a file of the project is used.
+    /// "Where it failed" with each of the first stack frames that name a file of the project: the whole test a failing line sits in,
+    /// as written, when the line is inside a test; otherwise the source line the frame names. Null when the output names none. The paths
+    /// in the output may be those of another machine: the longest tail of each that is a file of the project is used.
     /// </summary>
     public static string? Describe(string? output, string? projectRoot)
     {
@@ -70,38 +78,129 @@ internal static partial class FailureLocation
         }
 
         string root = Path.GetFullPath(projectRoot);
-        var found = new List<(string Path, int Line, string Text)>();
-        foreach ((string path, int line) in Frames(output))
+        // node:test prints "test at <file>:<line>:<column>" before each failure. That names where the test was declared (its position is
+        // often not mapped back to the source), not where it failed, so it is not a frame.
+        string frames = string.Join('\n', output.Split('\n').Where(line => !line.TrimStart().StartsWith("test at ", StringComparison.Ordinal)));
+        var located = new List<(string Path, int Line, string[] Lines)>();
+        foreach ((string path, int line) in Frames(frames))
         {
-            if (NotTheProject.Any(part => path.Contains(part, StringComparison.OrdinalIgnoreCase)) ||
-                path.StartsWith("node:", StringComparison.OrdinalIgnoreCase))
+            if (IsDependency(path) || located.Count == MaxFrames)
             {
                 continue;
             }
 
-            if (Read(root, path, line) is { } located && !found.Any(known => known.Path == located.Path && known.Line == located.Line))
+            if (Read(root, path, line) is { } frame && !located.Any(known => known.Path == frame.Path && known.Line == frame.Line))
             {
-                found.Add(located);
-                if (found.Count == MaxFrames)
-                {
-                    break;
-                }
+                located.Add(frame);
             }
         }
 
-        if (found.Count == 0)
+        // Frames in the same test are one block, which runs down to the last of their lines.
+        var groups = new List<(string Path, int Start, int Last, string[] Lines)>();
+        foreach ((string path, int line, string[] lines) in located)
+        {
+            int start = TestStart(lines, line);
+            int index = start == 0 ? -1 : groups.FindIndex(group => group.Path == path && group.Start == start);
+            if (index < 0)
+            {
+                groups.Add((path, start, line, lines));
+            }
+            else
+            {
+                groups[index] = (groups[index].Path, groups[index].Start, Math.Max(groups[index].Last, line), groups[index].Lines);
+            }
+        }
+
+        var entries = new List<Entry>();
+        foreach ((string path, int start, int last, string[] lines) in groups)
+        {
+            var single = new Entry($"- {path} line {last}: {SourceLine(lines, last)}", false);
+            if (start == 0)
+            {
+                entries.Add(single);
+                continue;
+            }
+
+            var block = new Entry(TestBlock(path, start, last, lines), true);
+            entries.Add(block.Text.Length + Heading.Length + ReservedCharacters <= MaxTextCharacters ? block : single);
+        }
+
+        if (entries.Count == 0)
         {
             return null;
         }
 
-        var text = new StringBuilder("Where it failed (the source line each stack frame names):");
-        foreach ((string path, int line, string source) in found)
+        int shown = 0;
+        while (shown < entries.Count && Compose(entries, shown + 1).Length <= MaxTextCharacters)
         {
-            text.Append($"\n- {path} line {line}: {source}");
+            shown++;
+        }
+
+        return Compose(entries, shown);
+    }
+
+    private sealed record Entry(string Text, bool IsTest);
+
+    private static string Compose(IReadOnlyList<Entry> entries, int shown)
+    {
+        var text = new StringBuilder(Heading);
+        for (int index = 0; index < shown; index++)
+        {
+            text.Append('\n').Append(entries[index].Text);
+        }
+
+        if (shown < entries.Count)
+        {
+            text.Append($"\n({entries.Count - shown} more failing locations not shown)");
+        }
+
+        if (entries.Take(shown).Any(entry => entry.IsTest))
+        {
+            text.Append("\nThe inputs and comments in these tests are the rules the code has to meet.");
         }
 
         return text.ToString();
     }
+
+    private const string Heading = "Where it failed (each failing test as written, or the source line a stack frame names):";
+
+    // The line that opens the test a failing line sits in, looking at the line itself and up to MaxTestLinesUp lines above; 0 when none does.
+    private static int TestStart(string[] lines, int line)
+    {
+        for (int index = line; index >= Math.Max(1, line - MaxTestLinesUp); index--)
+        {
+            if (TestOpener().IsMatch(lines[index - 1]))
+            {
+                return index;
+            }
+        }
+
+        return 0;
+    }
+
+    private static string TestBlock(string path, int first, int last, string[] lines)
+    {
+        var text = new StringBuilder($"- {path} lines {first}-{last} (the failing test as written):");
+        for (int index = first; index <= last; index++)
+        {
+            text.Append($"\n  {index}: {Cut(lines[index - 1].TrimEnd())}");
+        }
+
+        return text.ToString();
+    }
+
+    private static string SourceLine(string[] lines, int line) => Cut(lines[line - 1].Trim());
+
+    private static string Cut(string text) => text.Length > MaxLineCharacters ? text[..MaxLineCharacters] + " ..." : text;
+
+    // A frame into a dependency, the runtime or a link is not code of the project.
+    private static bool IsDependency(string path) =>
+        NotTheProject.Any(part => path.Contains(part, StringComparison.OrdinalIgnoreCase)) || path.StartsWith("node:", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// True when a line of check output is a stack frame (or any other text) that names a file of the project, not a dependency.
+    /// </summary>
+    internal static bool NamesProjectFile(string line) => Frames(line).Any(frame => !IsDependency(frame.Path));
 
     // The frames in the order the output gives them.
     private static IEnumerable<(string Path, int Line)> Frames(string output) =>
@@ -110,7 +209,7 @@ internal static partial class FailureLocation
             .OrderBy(match => match.Index)
             .Select(match => (match.Groups["path"].Value, int.TryParse(match.Groups["line"].Value, out int line) ? line : 0));
 
-    private static (string Path, int Line, string Text)? Read(string root, string path, int line)
+    private static (string Path, int Line, string[] Lines)? Read(string root, string path, int line)
     {
         string[] parts = path.Split(['\\', '/'], StringSplitOptions.RemoveEmptyEntries);
         if (line < 1 || parts.Any(part => part is ".." or "."))
@@ -145,23 +244,12 @@ internal static partial class FailureLocation
                 }
 
                 string[] lines = File.ReadAllLines(full);
-                if (line > lines.Length)
+                if (line > lines.Length || lines[line - 1].Trim().Length == 0)
                 {
                     return null;
                 }
 
-                string source = lines[line - 1].Trim();
-                if (source.Length == 0)
-                {
-                    return null;
-                }
-
-                if (source.Length > MaxLineCharacters)
-                {
-                    source = source[..MaxLineCharacters] + " ...";
-                }
-
-                return (string.Join('/', parts[start..]), line, source);
+                return (string.Join('/', parts[start..]), line, lines);
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {

@@ -1252,12 +1252,30 @@ internal sealed partial class PlanTools
 
         var summary = new StringBuilder();
         var seen = new HashSet<string>(StringComparer.Ordinal);
+        bool frameWanted = false;
         foreach (string line in result.Split('\n'))
         {
             string text = line.Trim();
-            if (text.Length is > 0 and <= 200 && !text.StartsWith("at ", StringComparison.Ordinal) &&
-                FailureOrTotalLine().IsMatch(text) && seen.Add(text) &&
-                summary.Length + text.Length < MaxCheckSummaryCharacters)
+            if (text.StartsWith("at ", StringComparison.Ordinal))
+            {
+                // The first project frame after a failure line is where that failure happened; the frames after it are its callers.
+                if (frameWanted && text.Length <= 200 && FailureLocation.NamesProjectFile(text) && seen.Add(text) &&
+                    summary.Length + text.Length < MaxCheckSummaryCharacters)
+                {
+                    summary.Append(text).Append('\n');
+                    frameWanted = false;
+                }
+
+                continue;
+            }
+
+            if (!FailureOrTotalLine().IsMatch(text))
+            {
+                continue;
+            }
+
+            frameWanted = true;
+            if (text.Length is > 0 and <= 200 && seen.Add(text) && summary.Length + text.Length < MaxCheckSummaryCharacters)
             {
                 summary.Append(text).Append('\n');
             }
