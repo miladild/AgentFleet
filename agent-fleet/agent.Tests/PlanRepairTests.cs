@@ -1213,6 +1213,24 @@ public sealed class PlanRepairLogicTests
     }
 
     [Fact]
+    public void A_follow_up_for_a_step_without_its_own_test_says_a_failing_expectation_means_the_rule_is_wrong()
+    {
+        var step = new PlanStep(1, "fix hours", "detail", ["src/hours.ts"], "npm test", "standard", StepStatus.Running, null, 1, null, null);
+        PlanRecord plan = new PlanRecord("0123456789abcdef0123456789abcdef", "t", "Fix the hours", PlanStatus.Running, null, [], [], [], null, null,
+            [step], DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null);
+
+        string message = RepairMessages.Build(plan, step, "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal", 2,
+            previousFailing: ["hours::a"], currentFailing: ["hours::a"], sameOutput: false, changedFiles: ["src/hours.ts"]);
+
+        int hint = message.IndexOf("the rule in your code is wrong", StringComparison.Ordinal);
+        Assert.True(hint >= 0, "the rule hint is present");
+        Assert.Equal(hint, message.LastIndexOf("the rule in your code is wrong", StringComparison.Ordinal));
+        Assert.True(hint > message.IndexOf("Since your last round:", StringComparison.Ordinal),
+            "the hint comes after the block about the last round");
+        Assert.DoesNotContain("the test can be the mistake", message);
+    }
+
+    [Fact]
     public void A_round_that_changed_nothing_is_told_so()
     {
         PlanRecord plan = PlanWithOneStep(out PlanStep step);

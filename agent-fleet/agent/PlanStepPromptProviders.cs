@@ -99,6 +99,17 @@ internal abstract class PlanStepPromptProvider(bool consumesContext = false) : M
                 "sets up and expects with this step's instructions before you change the code.";
         }
 
+        // Measured: a model whose test expected a value its code did not give kept suspecting the test, and went looking
+        // for an unrelated bug. For a step that writes no test, the expectation is the rule to fix.
+        if (!step.Files.Any(file => file.Contains("test", StringComparison.OrdinalIgnoreCase) || file.Contains("spec", StringComparison.OrdinalIgnoreCase)) &&
+            ShowsExpectedActualMismatch(failure))
+        {
+            yield return "A failing test that expects a result your code does not give means the rule in your code is wrong, not the test. " +
+                "Do not decide that the test makes no sense because it disagrees with your current logic. Work out which rule makes " +
+                "this test pass together with the tests that already pass (a result that differs between two inputs tells you where a " +
+                "boundary lies, and a date or time in a test is a real input to handle), then change that rule.";
+        }
+
         if (failure.Contains("too long to finish", StringComparison.OrdinalIgnoreCase))
         {
             yield return "Your last reply took too long to write and was lost. Write less in each call: one short file or a few " +
@@ -111,6 +122,12 @@ internal abstract class PlanStepPromptProvider(bool consumesContext = false) : M
                 "an open server or socket, a background thread, a watch mode. Find and remove or release that.";
         }
     }
+
+    // Test runners and assertion libraries print an expected and an actual value for a mismatch; these are the words
+    // they use for it. Case is ignored because runners differ in how they capitalise them.
+    private static bool ShowsExpectedActualMismatch(string failure) =>
+        new[] { "expected", "assertionerror", "!==", "to equal", "toBe(", "assert." }
+            .Any(word => failure.Contains(word, StringComparison.OrdinalIgnoreCase));
 }
 
 internal sealed class PlanEnvironmentContextProvider : PlanStepPromptProvider

@@ -51,6 +51,71 @@ public sealed class PlanPromptTests : PlanTestBase
     }
 
     [Fact]
+    public void A_retry_of_a_step_without_its_own_test_says_a_failing_expectation_means_the_rule_is_wrong()
+    {
+        PlanRecord plan = Store.Approve(NewPlan(new PlanStepInput("hours", "d", ["src/hours.ts"], "node --test", "heavy")).Id)!;
+
+        string prompt = PlanPromptComposition.BuildPrompt(plan, plan.Steps[0], 2,
+            "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal");
+
+        Assert.Single(Occurrences(prompt, "the rule in your code is wrong"));
+        Assert.DoesNotContain("the test can be the mistake", prompt);
+    }
+
+    [Fact]
+    public void A_retry_of_a_step_that_writes_its_own_test_does_not_add_the_rule_hint()
+    {
+        PlanRecord plan = Store.Approve(NewPlan(new PlanStepInput("hours", "d", ["src/hours.ts", "test/hours.test.ts"], "node --test", "heavy")).Id)!;
+
+        string prompt = PlanPromptComposition.BuildPrompt(plan, plan.Steps[0], 2,
+            "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal");
+
+        Assert.DoesNotContain("the rule in your code is wrong", prompt);
+        Assert.Contains("the test can be the mistake", prompt);
+    }
+
+    [Fact]
+    public void A_retry_without_a_comparison_in_the_failure_does_not_add_the_rule_hint()
+    {
+        PlanRecord plan = Store.Approve(NewPlan(new PlanStepInput("hours", "d", ["src/hours.ts"], "node --test", "heavy")).Id)!;
+
+        string prompt = PlanPromptComposition.BuildPrompt(plan, plan.Steps[0], 2, "Error: Cannot find module './x'");
+
+        Assert.DoesNotContain("the rule in your code is wrong", prompt);
+    }
+
+    [Theory]
+    [InlineData("expected 3 got 2")]
+    [InlineData("EXPECTED 3 GOT 2")]
+    [InlineData("AssertionError: boom")]
+    [InlineData("ASSERTIONERROR: boom")]
+    [InlineData("1 !== 2")]
+    [InlineData("received 1, to equal 2")]
+    [InlineData("TO EQUAL 2")]
+    [InlineData("expect(x).toBe(2)")]
+    [InlineData("EXPECT(X).TOBE(2)")]
+    [InlineData("assert.strictEqual(a, b)")]
+    [InlineData("ASSERT.STRICTEQUAL(a, b)")]
+    public void Each_comparison_word_in_a_failure_adds_the_rule_hint(string failure)
+    {
+        PlanRecord plan = Store.Approve(NewPlan(new PlanStepInput("hours", "d", ["src/hours.ts"], "node --test", "heavy")).Id)!;
+
+        string prompt = PlanPromptComposition.BuildPrompt(plan, plan.Steps[0], 2, failure);
+
+        Assert.Single(Occurrences(prompt, "the rule in your code is wrong"));
+    }
+
+    private static List<int> Occurrences(string text, string needle)
+    {
+        var found = new List<int>();
+        for (int at = text.IndexOf(needle, StringComparison.Ordinal); at >= 0; at = text.IndexOf(needle, at + needle.Length, StringComparison.Ordinal))
+        {
+            found.Add(at);
+        }
+        return found;
+    }
+
+    [Fact]
     public void A_retry_after_a_call_that_was_too_long_to_finish_says_to_write_less_per_call()
     {
         PlanRecord plan = NewApproved();
