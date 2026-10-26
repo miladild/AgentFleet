@@ -151,6 +151,18 @@ internal sealed class PlanEnvironmentContextProvider : PlanStepPromptProvider
                 string.Join(", ", documents) + ".");
         }
 
+        // A small model asked for a new test without an example of this project's tests wrote placeholders; naming
+        // the existing ones lets it copy their setup and their real assertions.
+        if (string.Equals(data.Step.Kind, "tests", StringComparison.Ordinal) && plan.WorkingDirectory is not null)
+        {
+            IReadOnlyList<string> existing = PlanExistingTests.Find(plan.WorkingDirectory, data.Step.Files);
+            if (existing.Count > 0)
+            {
+                text.AppendLine("Existing tests (read one with read_file and write the new test the same way: same imports, same setup, " +
+                    "calling the real code and asserting on its real result): " + string.Join(", ", existing) + ".");
+            }
+        }
+
         if (!workerWorkspace && plan.WorkingDirectory is not null)
         {
             text.AppendLine($"Project folder: {plan.WorkingDirectory}");
