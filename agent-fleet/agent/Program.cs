@@ -205,7 +205,7 @@ var sandbox = new SandboxHolder(
 
 HubShellOptions shellOptions = HubShellOptions.Load(builder.Configuration);
 Microsoft.Extensions.Logging.ILogger shellLogger = loggerFactory.CreateLogger("AgentFleet.Shell");
-var workerWorkspaces = new WorkerWorkspaceManager(fleetOptions, loggerFactory.CreateLogger("AgentFleet.WorkerWorkspace"), shellOptions.ExecutionTimeout);
+var workerWorkspaces = new WorkerWorkspaceManager(fleetOptions, loggerFactory.CreateLogger("AgentFleet.WorkerWorkspace"), shellOptions.ExecutionTimeout, planStore.PlansDirectory);
 
 [Description("""
     Runs code in a locked-down, throwaway Docker container and returns its combined

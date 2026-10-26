@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using Renci.SshNet;
@@ -62,13 +63,18 @@ internal interface IWorkerWorkspaceFileAccess
 }
 
 /// <summary>Creates isolated per-plan copies on a selected, explicitly configured worker.</summary>
-internal sealed class WorkerWorkspaceManager(FleetOptions fleet, ILogger logger, TimeSpan commandTimeout) : IWorkerWorkspaceManager
+internal sealed class WorkerWorkspaceManager(FleetOptions fleet, ILogger logger, TimeSpan commandTimeout, string? syncRecordDirectory = null) : IWorkerWorkspaceManager
 {
     // What each worker's copy of a plan held when it was last synced to the hub (file -> hash). A session lasts one round,
     // so this is how the next staging knows that a worker file nobody touched since that sync holds no unsynced work, even
     // when the hub has moved on (the runner rolled a round back, or the user edited the project).
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, IReadOnlyDictionary<string, string>> _lastSynced =
         new(StringComparer.OrdinalIgnoreCase);
+
+    // The same record, kept in a small file per plan and machine in the plans folder, so a backend restart (a deploy) does not
+    // leave a plan unable to stage. Null means no file: the record lives only in memory, as it always did.
+    private readonly string? _syncRecordDirectory = syncRecordDirectory;
+    private readonly object _syncRecordLock = new();
 
     // The test files every accepted tests step of the plan froze, in the order the steps were accepted.
     internal static IReadOnlyList<PlanFrozenTestFile> FrozenFilesOf(PlanRecord plan) =>
@@ -101,13 +107,12 @@ internal sealed class WorkerWorkspaceManager(FleetOptions fleet, ILogger logger,
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        string key = $"{plan.Id}|{machine}";
         var session = new WorkerWorkspaceSession(machine, config, Path.GetFullPath(plan.WorkingDirectory), logger, commandTimeout,
-            onSynced: hashes => _lastSynced[key] = hashes, frozenFiles: FrozenFilesOf(plan));
+            onSynced: hashes => RecordSynced(plan.Id, machine, hashes), frozenFiles: FrozenFilesOf(plan));
         try
         {
             session.Connect();
-            session.Stage(plan.Id, step, _lastSynced.GetValueOrDefault(key), cancellationToken);
+            session.Stage(plan.Id, step, LastSynced(plan.Id, machine), cancellationToken);
             logger.LogInformation("Staged plan {PlanId} on worker {Machine} at {Workspace}.", plan.Id, machine, session.RemoteRoot);
             await Task.CompletedTask;
             return session;
@@ -117,6 +122,70 @@ internal sealed class WorkerWorkspaceManager(FleetOptions fleet, ILogger logger,
             session.Dispose();
             throw;
         }
+    }
+
+    // Remembers what a worker's copy held after a sync, in memory and, when a folder is configured, on disk. A write failure is
+    // logged and ignored: the in-memory record still works for this run.
+    internal void RecordSynced(string planId, string machine, IReadOnlyDictionary<string, string> hashes)
+    {
+        _lastSynced[$"{planId}|{machine}"] = hashes;
+        if (_syncRecordDirectory is null || !FleetPlanStore.IsValidId(planId)) return;
+
+        string path = Path.Combine(_syncRecordDirectory, SyncRecordFileName(planId, machine));
+        string temporary = path + ".tmp";
+        try
+        {
+            string json = JsonSerializer.Serialize(new Dictionary<string, string>(hashes, StringComparer.OrdinalIgnoreCase));
+            lock (_syncRecordLock)
+            {
+                File.WriteAllText(temporary, json, new UTF8Encoding(false));
+                File.Move(temporary, path, overwrite: true);
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            logger.LogWarning(exception, "Could not save the last sync record of plan {PlanId} on worker {Machine}; it is kept in memory only.", planId, machine);
+        }
+    }
+
+    // The record of a worker's last sync: in memory if this run made it, otherwise read back from its file after a restart.
+    internal IReadOnlyDictionary<string, string>? LastSynced(string planId, string machine)
+    {
+        string key = $"{planId}|{machine}";
+        if (_lastSynced.TryGetValue(key, out IReadOnlyDictionary<string, string>? known)) return known;
+        IReadOnlyDictionary<string, string>? stored = ReadSyncRecord(planId, machine);
+        return stored is null ? null : _lastSynced.GetOrAdd(key, stored);
+    }
+
+    // A missing, empty or damaged file is no record at all; reading never throws.
+    private IReadOnlyDictionary<string, string>? ReadSyncRecord(string planId, string machine)
+    {
+        if (_syncRecordDirectory is null || !FleetPlanStore.IsValidId(planId)) return null;
+
+        string path = Path.Combine(_syncRecordDirectory, SyncRecordFileName(planId, machine));
+        try
+        {
+            if (!File.Exists(path)) return null;
+            Dictionary<string, string?>? stored = JsonSerializer.Deserialize<Dictionary<string, string?>>(File.ReadAllText(path));
+            return stored?
+                .Where(pair => !string.IsNullOrEmpty(pair.Key) && pair.Value is not null)
+                .ToDictionary(pair => pair.Key, pair => pair.Value!, StringComparer.OrdinalIgnoreCase);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or ArgumentException or NotSupportedException)
+        {
+            logger.LogWarning(exception, "The last sync record of plan {PlanId} on worker {Machine} is unreadable; treating it as no record.", planId, machine);
+            return null;
+        }
+    }
+
+    // One file per plan and machine. A machine name that is not a plain file name is made one, and a short hash of the original
+    // name keeps two names that would otherwise look alike apart. The extension is neither .json nor .lease, so the plan store never lists it.
+    internal static string SyncRecordFileName(string planId, string machine)
+    {
+        string safe = Regex.Replace(machine, "[^A-Za-z0-9_-]", "_");
+        if (!string.Equals(safe, machine, StringComparison.Ordinal))
+            safe += "-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(machine)))[..8].ToLowerInvariant();
+        return $"{planId}.{safe}.synced";
     }
 
     public async Task<WorkerWorkspaceResume> ResumeInterruptedAsync(

@@ -27,6 +27,9 @@ internal sealed partial class FleetPlanStore
 
     private readonly string _directory;
     private string WorkerBaselinesDirectory => Path.Combine(_directory, "worker-baselines");
+
+    // The folder the plan files live in; worker sync records are kept beside them.
+    internal string PlansDirectory => _directory;
     private readonly object _lock = new();
 
     public FleetPlanStore(IConfiguration configuration)
