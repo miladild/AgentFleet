@@ -11,6 +11,17 @@ internal sealed partial class PlanRunner
         ModelAttemptResult model, StepCompletion check, IReadOnlyList<string>? changedFiles)
     {
         TestFirstDecision decision = TestFirst.Evaluate(check.Output, changedFiles);
+        // A placeholder file is refused before the requirement check, so a refused step is never marked as covering a requirement.
+        if (decision.Accepted && changedFiles is not null)
+        {
+            IReadOnlyList<string> placeholders = TestFilesOf(plan, step, changedFiles)
+                .SelectMany(file => PlaceholderTests.Find(file.Path, file.Text)).ToArray();
+            if (placeholders.Count > 0)
+            {
+                decision = new TestFirstDecision("placeholder", decision.Executed, decision.Failing, PlaceholderFeedback(placeholders));
+            }
+        }
+
         IReadOnlyList<PlanRequirement>? covered = null;
         if (decision.Accepted && plan.Requirements is { Count: > 0 } requirements && IsLastTestsStep(plan, step))
         {
@@ -34,6 +45,11 @@ internal sealed partial class PlanRunner
         return new StepCompletion(decision.Accepted, decision.Feedback,
             decision.Accepted ? check.Output : decision.Feedback + "\n\n" + check.Output, check.Restored);
     }
+
+    private static string PlaceholderFeedback(IReadOnlyList<string> placeholders) =>
+        "These tests fail by construction and check nothing: " + string.Join("\n", placeholders.Take(5)) + ". " +
+        "Write each test so that it calls the code the step will add and checks its real result (the inputs it passes and the value it expects); " +
+        "it must fail now only because that behaviour is missing, and pass once it exists.";
 
     // Only the last tests step is held to the whole list: the tests of every tests step count toward it, and an earlier
     // tests step may cover a part of it.

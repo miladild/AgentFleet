@@ -9,7 +9,7 @@ namespace AgentFleet.Tests;
 public sealed partial class PlanRunnerTests
 {
     private const string LimitTestFile = "tests/LimitTests.cs";
-    private const string WrongTest = "public class LimitTests\n{\n    [Fact]\n    public void rejects_zero() { Assert.True(false); }\n}\n";
+    private const string WrongTest = "public class LimitTests\n{\n    [Fact]\n    public void rejects_zero() { Assert.Equal(1, Limit.Check(0)); }\n}\n";
     private const string CorrectedTest = "public class LimitTests\n{\n    [Fact]\n    public void rejects_zero() { Assert.True(true); } // CORRECTED\n}\n";
     private const string TestWrongRuling = "VERDICT: TEST-WRONG\nFILE: tests/LimitTests.cs\n```csharp\n" + CorrectedTest + "```";
     private const string CodeWrongRuling = "VERDICT: CODE-WRONG\nThe limit must refuse zero before it counts the call.";
@@ -124,7 +124,7 @@ public sealed partial class PlanRunnerTests
             string now = Sha256Upper(CorrectedTest);
             Assert.Contains(before, ruling.Detail);
             Assert.Contains(now, ruling.Detail);
-            Assert.Contains("- " + "    public void rejects_zero() { Assert.True(false); }", ruling.Detail);
+            Assert.Contains("- " + "    public void rejects_zero() { Assert.Equal(1, Limit.Check(0)); }", ruling.Detail);
             Assert.Contains("+ " + "    public void rejects_zero() { Assert.True(true); } // CORRECTED", ruling.Detail);
             Assert.Equal(now, Assert.Single(Assert.Single(after.FrozenTests!).Files).Sha256);
             Assert.Equal(1, budget.Calls);
@@ -577,7 +577,7 @@ public sealed partial class PlanRunnerTests
     public async Task A_frozen_file_changed_while_the_ruler_was_working_is_not_overwritten_by_the_correction()
     {
         string project = NewGitProject();
-        const string changedElsewhere = "public class LimitTests\n{\n    [Fact]\n    public void rejects_zero() { Assert.True(false); } // CHANGED ELSEWHERE\n}\n";
+        const string changedElsewhere = "public class LimitTests\n{\n    [Fact]\n    public void rejects_zero() { Assert.Equal(1, Limit.Check(0)); } // CHANGED ELSEWHERE\n}\n";
         try
         {
             var setup = DisputePlan(project, TestsStep(), ImplementationStep("dotnet test"));
