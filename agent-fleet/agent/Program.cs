@@ -1128,10 +1128,14 @@ app.MapGet("/api/plans/{id}/report", (string id) =>
         ? Results.Text(FleetPlanStore.ToReportMarkdown(plan), "text/markdown")
         : Results.NotFound());
 
-// The Live page resumes a blocked plan with a bare POST (no body, no content type), like its other plan buttons, so the
-// options are optional: left out, the plan keeps the settings it already has.
-app.MapPost("/api/plans/{id}/approve", (string id, [Microsoft.AspNetCore.Mvc.FromBody(EmptyBodyBehavior = Microsoft.AspNetCore.Mvc.ModelBinding.EmptyBodyBehavior.Allow)] PlanApprovalRequest? body) =>
+app.MapPost("/api/plans/{id}/approve", async (string id, HttpRequest http, CancellationToken cancellationToken) =>
 {
+    (PlanApprovalRequest? body, string? bodyError) = await PlanApprovalBody.ReadAsync(http, cancellationToken);
+    if (body is null)
+    {
+        return Results.BadRequest(new { error = bodyError });
+    }
+
     PlanRecord? plan = planStore.Get(id);
     if (plan is null)
     {
@@ -1143,10 +1147,9 @@ app.MapPost("/api/plans/{id}/approve", (string id, [Microsoft.AspNetCore.Mvc.Fro
         return Results.BadRequest(new { error = $"This plan is {plan.Status.Replace('-', ' ')}, so it cannot be approved." });
     }
 
-    PlanApprovalRequest request = body ?? new PlanApprovalRequest();
     try
     {
-        PlanRecord? approved = planStore.Approve(id, request.ExportToProject, request.RecoveryScope, request.HealChecks, autoRetries: request.AutoRetries, review: request.Review);
+        PlanRecord? approved = planStore.Approve(id, body.ExportToProject, body.RecoveryScope, body.HealChecks, autoRetries: body.AutoRetries, review: body.Review);
         return approved is null
             ? Results.NotFound()
             : Results.Json(approved);
