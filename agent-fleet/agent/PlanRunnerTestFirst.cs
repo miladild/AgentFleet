@@ -86,15 +86,20 @@ internal sealed partial class PlanRunner
 
     // Every frozen set whose implementation step is this step: the first ordinary step after its tests step that names a non-test
     // code file. Several tests steps can name the same implementation step, and each of their sets must then be proven.
-    private IReadOnlyList<PlanFrozenTestSet> ImplementationSetsFor(PlanRecord plan, PlanStep step)
+    internal IReadOnlyList<PlanFrozenTestSet> ImplementationSetsFor(PlanRecord plan, PlanStep step)
     {
         if (_testFirstMode != TestFirstMode.On || plan.FrozenTests is not { Count: > 0 }) return [];
-        return plan.FrozenTests.Where(set =>
-        {
-            PlanStep? implementation = plan.Steps.FirstOrDefault(candidate => candidate.Id > set.StepId && candidate.Kind != "tests" &&
-                candidate.Files.Any(path => !IsTestPath(path) && TestFirst.IsCodeFile(path)));
-            return implementation?.Id == step.Id;
-        }).ToArray();
+        return plan.FrozenTests.Where(set => ImplementationStepFor(plan.Steps, set)?.Id == step.Id).ToArray();
+    }
+
+    // A step whose own check runs the frozen tests proves them, so it is preferred; otherwise the first code step is held to them.
+    internal static PlanStep? ImplementationStepFor(IReadOnlyList<PlanStep> steps, PlanFrozenTestSet set)
+    {
+        List<PlanStep> candidates = steps.Where(candidate => candidate.Id > set.StepId && candidate.Kind != "tests" &&
+            candidate.Files.Any(path => !IsTestPath(path) && TestFirst.IsCodeFile(path))).ToList();
+        string command = set.Command.Trim();
+        return candidates.FirstOrDefault(candidate => string.Equals(candidate.Verify?.Trim(), command, StringComparison.Ordinal))
+            ?? candidates.FirstOrDefault();
     }
 
     // The test files a tests step was accepted with are fixed from now on. Their hashes come from the hub copy, which the
