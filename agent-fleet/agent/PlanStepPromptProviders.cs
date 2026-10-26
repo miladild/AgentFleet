@@ -143,6 +143,14 @@ internal sealed class PlanEnvironmentContextProvider : PlanStepPromptProvider
         text.AppendLine("Unattended plan capability rules: use only local project tools and checks. External web/HTTP, MCP/custom tools, remote commands, publishing/deploying, repository history changes, and commands that escape the workspace are blocked at execution time. Do not retry a blocked capability through another tool.");
         text.AppendLine();
         text.AppendLine($"Overall goal: {plan.Goal}");
+        // A worker that never learns the project keeps its own guess about the rules; naming the notes lets it check them.
+        IReadOnlyList<string> documents = PlanProjectDocuments.Find(plan.WorkingDirectory);
+        if (documents.Count > 0)
+        {
+            text.AppendLine("Project documents (read the part about this step with read_file before you change code; they may state rules the tests only sample): " +
+                string.Join(", ", documents) + ".");
+        }
+
         if (!workerWorkspace && plan.WorkingDirectory is not null)
         {
             text.AppendLine($"Project folder: {plan.WorkingDirectory}");
