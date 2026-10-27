@@ -7,7 +7,7 @@ namespace AgentFleet.Tests;
 /// and the repair ladder gives the step more rounds. The rule has exemptions: steps that name no files,
 /// the last step of a longer plan, and steps that had an earlier round with an edit tool call.
 /// </summary>
-public sealed class PlanNoChangeTests : PlanTestBase
+public sealed partial class PlanNoChangeTests : PlanTestBase
 {
     private static readonly FakeValidator Valid = new(code => new DiagramCheck(true, true, code, null));
 

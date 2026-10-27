@@ -1354,6 +1354,21 @@ internal sealed partial class PlanRunner
                     result = new StepCompletion(false, feedback, feedback, result.Restored);
                 }
 
+                // A passing check does not finish a step that left a file it lists as it was: the worker gets one more round in this
+                // conversation, once per attempt (see UntouchedListedFilesAsync). It comes before the review, so a step sent back
+                // for it is not reviewed first.
+                IReadOnlyList<string> untouched = result.Done
+                    ? await UntouchedListedFilesAsync(plan, step, attempt, isFinalValidation, cancellationToken)
+                    : [];
+                if (untouched.Count > 0)
+                {
+                    string note = UntouchedFilesMessage(untouched);
+                    _store.AddEvent(plan.Id, step.Id, attempt, UntouchedRoundKind, tier, node: model.ModelNode ?? model.Machine,
+                        detail: $"The check passed, but these listed files were not changed: {string.Join(", ", untouched)}. The worker gets one more round before the step is accepted.",
+                        modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round);
+                    result = new StepCompletion(false, note, note, result.Restored);
+                }
+
                 // A check that passes is not yet a step that is done: a model that did not write the code reads it against the step.
                 string? findings = !IsTestsStep(step) && result.Done
                     ? await ReviewAcceptedStepAsync(plan, step, attempt, tier, model, change.Files, rung, round, cancellationToken)

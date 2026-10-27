@@ -213,7 +213,9 @@ public sealed partial class PlanRunnerTests
         string project = NewGitProject();
         try
         {
-            var setup = WorkerPlan(project, CodeAndTestsStep());
+            // The step names only the test file: a step that also named a code file this model never wrote would be sent back for it.
+            var setup = WorkerPlan(project, new PlanStepInput("Write the rate limit tests", "Limit requests per client",
+                ["tests/LimitTests.cs"], "dotnet test", "standard"));
             var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []));
 
             await WorkerRunner(WritesTestsOnly(project), workspaces, setup.Options, setup.Health, FailFirstMode.Enforce)

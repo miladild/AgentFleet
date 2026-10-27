@@ -432,6 +432,9 @@ public sealed partial class PlanRunnerTests
             string written = "";
             var fake = CappedAgent(_ =>
             {
+                // The step also names its code file, which the model changes: only the frozen test is in question here.
+                Directory.CreateDirectory(Path.Combine(project, "src"));
+                File.WriteAllText(Path.Combine(project, "src", "limit.cs"), "class Limit { }\n");
                 written = WorkspaceTools.WriteFileAsync(test, ChangedTestText, default).GetAwaiter().GetResult();
                 return Task.FromResult("Done.");
             });
