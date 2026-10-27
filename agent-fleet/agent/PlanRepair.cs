@@ -314,6 +314,12 @@ internal static class RepairMessages
             text.AppendLine(hint);
         }
 
+        if (UndefinedNameHint.Hint(failure, plan.WorkingDirectory) is { } declared)
+        {
+            text.AppendLine();
+            text.AppendLine(declared);
+        }
+
         text.AppendLine();
         text.AppendLine("Look at what is on disk (read_file, list_directory), fix the cause this output shows, and change a file: a round that changes nothing cannot make the check pass. " +
                         (step.Verify is null

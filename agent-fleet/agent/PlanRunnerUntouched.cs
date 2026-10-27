@@ -1,3 +1,5 @@
+using System.Text.RegularExpressions;
+
 namespace AgentFleet;
 
 /// <summary>
@@ -15,11 +17,11 @@ internal sealed partial class PlanRunner
     /// wildcard that is not a folder, and that neither this run's snapshot of the step nor an earlier round recorded as changed.
     /// The run log is read too, because a round before a restart is not in the snapshot this run took.
     /// Empty when the rule does not apply: the tests step of test-first mode, the final check of a longer plan, a step that
-    /// lists no such file, a step that changed no file at all, a step that already had its extra round in this attempt, or a
-    /// project git cannot read.
+    /// lists no such file, a step that changed no file at all, or a project git cannot read. The caller decides what an
+    /// untouched file means: the extra round once per attempt, and after that the step is sent back (see UntouchedRoundGiven).
     /// </summary>
     private async Task<IReadOnlyList<string>> UntouchedListedFilesAsync(
-        PlanRecord plan, PlanStep step, int attempt, bool isFinalValidation, CancellationToken cancellationToken)
+        PlanRecord plan, PlanStep step, bool isFinalValidation, CancellationToken cancellationToken)
     {
         if (IsTestsStep(step) || (isFinalValidation && plan.Steps.Count > 1) || string.IsNullOrWhiteSpace(plan.WorkingDirectory))
         {
@@ -34,10 +36,6 @@ internal sealed partial class PlanRunner
         }
 
         PlanRunEvent[] events = (_store.Get(plan.Id)?.Events ?? []).ToArray();
-        if (events.Any(runEvent => runEvent.Kind == UntouchedRoundKind && runEvent.StepId == step.Id && runEvent.Attempt == attempt))
-        {
-            return [];
-        }
 
         // The start snapshot is the one the fail-first check keeps: the state before the step's first model call in this run.
         WorkChange since = await ChangedFilesSinceAsync(plan, start, cancellationToken);
@@ -85,4 +83,42 @@ internal sealed partial class PlanRunner
     private static string UntouchedFilesMessage(IReadOnlyList<string> files) =>
         $"The check passed, but these files listed for this step were not changed: {string.Join(", ", files)}. " +
         "Make the changes the step asks for in them, or say with report_blocker why they need no change.";
+
+    /// <summary>What the worker is told when the one extra round did not change a listed file either.</summary>
+    private static string StillUntouchedMessage(IReadOnlyList<string> files) =>
+        $"The check passed, but these files listed for this step are still unchanged after one more round: {string.Join(", ", files)}. " +
+        "Change them, or say with report_blocker why they need no change.";
+
+    /// <summary>Whether the step's one extra round for untouched listed files already ran in this attempt.</summary>
+    private bool UntouchedRoundGiven(PlanRecord plan, PlanStep step, int attempt) =>
+        (_store.Get(plan.Id)?.Events ?? []).Any(runEvent =>
+            runEvent.Kind == UntouchedRoundKind && runEvent.StepId == step.Id && runEvent.Attempt == attempt);
+
+    /// <summary>
+    /// The files that a report_blocker of the same round does not name. Its evidence is the file's name, as the tool asks, so a
+    /// file the evidence names (by its path as listed or by its file name) is accepted as left alone on purpose.
+    /// </summary>
+    internal static IReadOnlyList<string> NotNamedByBlocker(IReadOnlyList<string> files, ModelBlocker? blocker)
+    {
+        string evidence = blocker?.Evidence.Replace('\\', '/') ?? string.Empty;
+        return files.Where(file => !NamedIn(evidence, file)).ToArray();
+    }
+
+    private static bool NamedIn(string evidence, string relative)
+    {
+        if (evidence.Length == 0)
+        {
+            return false;
+        }
+
+        foreach (string name in new[] { relative, Path.GetFileName(relative) })
+        {
+            if (Regex.IsMatch(evidence, @"(?<![\w.-])" + Regex.Escape(name) + @"(?![\w-])", RegexOptions.IgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 }

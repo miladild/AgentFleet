@@ -1355,17 +1355,23 @@ internal sealed partial class PlanRunner
                 }
 
                 // A passing check does not finish a step that left a file it lists as it was: the worker gets one more round in this
-                // conversation, once per attempt (see UntouchedListedFilesAsync). It comes before the review, so a step sent back
-                // for it is not reviewed first.
+                // conversation, once per attempt. If a listed file is still untouched after that round, the step is sent back too,
+                // unless the round's report_blocker names the file (see UntouchedListedFilesAsync). It comes before the review, so a
+                // step sent back for it is not reviewed first.
                 IReadOnlyList<string> untouched = result.Done
-                    ? await UntouchedListedFilesAsync(plan, step, attempt, isFinalValidation, cancellationToken)
+                    ? await UntouchedListedFilesAsync(plan, step, isFinalValidation, cancellationToken)
                     : [];
-                if (untouched.Count > 0)
+                if (untouched.Count > 0 && !UntouchedRoundGiven(plan, step, attempt))
                 {
                     string note = UntouchedFilesMessage(untouched);
                     _store.AddEvent(plan.Id, step.Id, attempt, UntouchedRoundKind, tier, node: model.ModelNode ?? model.Machine,
                         detail: $"The check passed, but these listed files were not changed: {string.Join(", ", untouched)}. The worker gets one more round before the step is accepted.",
                         modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round);
+                    result = new StepCompletion(false, note, note, result.Restored);
+                }
+                else if (untouched.Count > 0 && NotNamedByBlocker(untouched, model.Blocker) is { Count: > 0 } stillUntouched)
+                {
+                    string note = StillUntouchedMessage(stillUntouched);
                     result = new StepCompletion(false, note, note, result.Restored);
                 }
 

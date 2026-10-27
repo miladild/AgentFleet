@@ -264,6 +264,11 @@ internal sealed class PlanContinuationContextProvider() : PlanStepPromptProvider
             {
                 text.AppendLine(hint);
             }
+
+            if (UndefinedNameHint.Hint(lastFailure, plan.WorkingDirectory) is { } declared)
+            {
+                text.AppendLine(declared);
+            }
         }
 
         if (!string.IsNullOrWhiteSpace(brief))
