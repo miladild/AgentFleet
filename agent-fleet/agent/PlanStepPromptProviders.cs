@@ -269,6 +269,11 @@ internal sealed class PlanContinuationContextProvider() : PlanStepPromptProvider
             {
                 text.AppendLine(declared);
             }
+
+            if (SharedTempFileHint.Hint(lastFailure, plan.WorkingDirectory) is { } shared)
+            {
+                text.AppendLine(shared);
+            }
         }
 
         if (!string.IsNullOrWhiteSpace(brief))

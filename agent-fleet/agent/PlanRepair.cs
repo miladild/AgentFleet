@@ -320,6 +320,12 @@ internal static class RepairMessages
             text.AppendLine(declared);
         }
 
+        if (SharedTempFileHint.Hint(failure, plan.WorkingDirectory) is { } shared)
+        {
+            text.AppendLine();
+            text.AppendLine(shared);
+        }
+
         text.AppendLine();
         text.AppendLine("Look at what is on disk (read_file, list_directory), fix the cause this output shows, and change a file: a round that changes nothing cannot make the check pass. " +
                         (step.Verify is null
