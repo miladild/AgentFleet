@@ -73,10 +73,14 @@ internal sealed class StepToolActivity
 
     public bool EditToolCalled { get; private set; }
 
+    /// <summary>Told of each tool call as the model makes it, in order. The runner uses it to see that a model call is still working.</summary>
+    public Action<string>? Observed { get; set; }
+
     public void Record(string toolName)
     {
         ToolCalls++;
         EditToolCalled |= IsEdit(toolName);
+        Observed?.Invoke(toolName);
     }
 
     public static bool IsEdit(string toolName) => toolName is "write_file" or "edit_file" or "move_file" or "delete_file";
@@ -242,6 +246,36 @@ internal sealed partial class PlanRunner
     /// stuck, the ladder is: a slow machine, 11 tokens a second, needs 20 minutes for a round that writes a test file.
     /// </summary>
     public static readonly TimeSpan DefaultAttemptTimeout = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// The longest a model call may stay silent, with no tool call, before its round is counted as a failed round. The silence
+    /// starts again at each tool call, so a round that keeps working is never cut short by it; the attempt timeout still bounds
+    /// the round as a whole. Thirty minutes matches the attempt timeout: a worker that writes a large file in one reply is quiet
+    /// for a long time, and a shorter silence would stop work that is going well.
+    /// </summary>
+    public static readonly TimeSpan DefaultStallLimit = TimeSpan.FromMinutes(30);
+
+    /// <summary>After a silent call is asked to stop, how long it has to return before the runner stops waiting for it.</summary>
+    public static readonly TimeSpan DefaultStallGrace = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// Run-log kinds that record an interrupted worker round's tool calls, so that a restart can tell whether the round could have
+    /// changed anything besides the worker's files: the round's mark is followed by no changing call only if it made none.
+    /// </summary>
+    internal const string ToolLoggedEvent = "tool-logged";
+    internal const string ChangingToolEvent = "changing-tool-called";
+
+    // The tools that only read. Any other tool call, however small, counts as one that may have changed something.
+    private static readonly HashSet<string> ReadOnlyTools = new(StringComparer.Ordinal)
+    {
+        "read_file", "list_directory", "find_files", "search_files", "project_overview", "get_plan", "search_context"
+    };
+
+    /// <summary>The silence after which a model call counts as stalled. Tests shorten it; production uses <see cref="DefaultStallLimit"/>.</summary>
+    internal TimeSpan StallLimit { get; set; } = DefaultStallLimit;
+
+    /// <summary>How long a silent call gets to return once it is asked to stop. Tests shorten it.</summary>
+    internal TimeSpan StallGrace { get; set; } = DefaultStallGrace;
 
     /// <summary>
     /// The most a step may work (its model calls and its checks, not the time it waits for a machine) before it stops with
@@ -1532,6 +1566,13 @@ internal sealed partial class PlanRunner
                         session = null;
                     }
                 }
+
+                // The call left behind by a stalled round may still be running in this conversation: the next round opens a new one.
+                if (model.Stalled)
+                {
+                    session = IsTestsStep(step) ? _agent.OpenSession(PlanRunnerToolPolicy.TestWriterRole) : _agent.OpenSession();
+                    conversation = session;
+                }
             }
 
             if (gaveUp)
@@ -1911,7 +1952,7 @@ internal sealed partial class PlanRunner
         {
             resumed.Session?.Dispose();
             _store.DeleteWorkerBaseline(plan.Id, step.Id, attempt);
-            if (!step.RetrySafe)
+            if (!step.RetrySafe && !RoundMadeNoChangingCall(_store.Get(plan.Id) ?? plan, step, attempt))
                 return $"Step {step.Id} has no worker edits to recover, but it is not marked safe to replay after an uncertain outcome. Review it before retrying.";
             _store.Update(plan.Id, current => FleetPlanStoreSteps.With(current, step.Id, currentStep => currentStep with
             {
@@ -1997,6 +2038,18 @@ internal sealed partial class PlanRunner
         {
             session.Dispose();
         }
+    }
+
+    // The run log is the only record of an interrupted round's tool calls. The round is known to have made no changing call only
+    // when its staging left the logged mark and no changing call was logged after that mark. A round without the mark is unknown
+    // (it ran before this record existed, or it never got as far as staging) and stays blocked for a step not marked safe to replay.
+    private static bool RoundMadeNoChangingCall(PlanRecord plan, PlanStep step, int attempt)
+    {
+        PlanRunEvent[] events = (plan.Events ?? [])
+            .Where(runEvent => runEvent.StepId == step.Id && runEvent.Attempt == attempt)
+            .ToArray();
+        int mark = Array.FindLastIndex(events, runEvent => runEvent.Kind == ToolLoggedEvent);
+        return mark >= 0 && !events.Skip(mark + 1).Any(runEvent => runEvent.Kind == ChangingToolEvent);
     }
 
     // A package manager's lock file or a build cache rewritten as a side effect is not progress on the step.
@@ -3049,6 +3102,17 @@ internal sealed partial class PlanRunner
         bool stagingWorkerWorkspace = false;
         ModelAttemptResult result = new(step.Id, string.Empty, null, ShouldVerify: false, Machine: machine, ModelNode: modelMachine);
         var activity = new StepToolActivity();
+        var stall = new ModelStallWatch(StallLimit, StallGrace);
+        activity.Observed = toolName =>
+        {
+            stall.Progress();
+            // Only a worker round is reconciled after a restart, so only a worker round's changing calls go to the run log.
+            if (worker is not null && !ReadOnlyTools.Contains(toolName))
+            {
+                _store.AddEvent(plan.Id, step.Id, attempt, ChangingToolEvent, tier, machine, toolName,
+                    modelNode: modelMachine, workspaceNode: machine, rung: conversation.Rung, round: conversation.Round);
+            }
+        };
         EditCheckGate? editCheck = null;
         string? editCheckNote = null;
         try
@@ -3079,6 +3143,10 @@ internal sealed partial class PlanRunner
                 }
                 _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.WorkspaceStaged, tier, machine,
                     "Staged the project on this worker. File tools and this step's verification command run in that worker workspace.",
+                    modelNode: modelMachine, workspaceNode: machine);
+                // The mark says this round's changing tool calls are logged from here on (see RoundMadeNoChangingCall).
+                _store.AddEvent(plan.Id, step.Id, attempt, ToolLoggedEvent, tier, machine,
+                    "Tool calls of this round are logged from here on, so a restart can tell whether the round changed anything.",
                     modelNode: modelMachine, workspaceNode: machine);
                 editCheck = CreateEditCheck(plan, step, worker);
             }
@@ -3119,7 +3187,7 @@ internal sealed partial class PlanRunner
                         contextId is not null, retryRoute, worker is not null, machine, worker?.Platform,
                         stepBrief, _stepGuidance)
                     : null);
-                reply = await conversation.Session.SendAsync(
+                Task<StepAgentReply> call = conversation.Session.SendAsync(
                     conversation.RepairMessage ??
                     BuildPrompt(plan, step, attempt, lastFailure, fileContext, parallelGroup,
                         durableContext: contextId is not null, retryRoute: retryRoute,
@@ -3128,6 +3196,7 @@ internal sealed partial class PlanRunner
                     tier,
                     modelMachine,
                     attemptCancellation.Token);
+                reply = await stall.WaitAsync(call, attemptCancellation, cancellationToken);
             }
             editCheckNote = await FinishEditCheckAsync(editCheck, plan, step, attempt);
             editCheck = null;
@@ -3158,6 +3227,19 @@ internal sealed partial class PlanRunner
                 modelNode: modelMachine, workspaceNode: machine, rung: conversation.Rung, round: conversation.Round);
             result = new ModelAttemptResult(step.Id, string.Empty, failure, ShouldVerify: true, Workspace: worker, Machine: machine,
                 ModelNode: modelMachine ?? _journal?.ActualNode, WorkBefore: work, TimedOut: true,
+                ToolCalls: activity.ToolCalls, EditToolCalled: activity.EditToolCalled);
+        }
+        catch (ModelStalledException stalled)
+        {
+            // A timed-out round like any other: its check runs and the ladder decides. The call that was left behind may still
+            // be running, so the conversation is not carried on (see the round loop).
+            _logger.LogWarning("Plan {PlanId} step {StepId} attempt {Attempt}: the model stopped answering for {Limit}.",
+                plan.Id, step.Id, attempt, stalled.Limit);
+            string failure = $"The model stopped answering for {Duration(stalled.Limit)}; this round is counted as failed.";
+            _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.TimedOut, tier, modelMachine ?? _journal?.ActualNode, failure,
+                modelNode: modelMachine, workspaceNode: machine, rung: conversation.Rung, round: conversation.Round);
+            result = new ModelAttemptResult(step.Id, string.Empty, failure, ShouldVerify: true, Workspace: worker, Machine: machine,
+                ModelNode: modelMachine ?? _journal?.ActualNode, WorkBefore: work, TimedOut: true, Stalled: true,
                 ToolCalls: activity.ToolCalls, EditToolCalled: activity.EditToolCalled);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
@@ -3239,7 +3321,8 @@ internal sealed partial class PlanRunner
             }
         }
 
-        return result with { Session = conversation.Session };
+        // A stalled round gives up its conversation: the call left behind must not be sent another message.
+        return result.Stalled ? result : result with { Session = conversation.Session };
     }
 
     /// <summary>
@@ -3378,7 +3461,8 @@ internal sealed partial class PlanRunner
         IStepSession? Session = null,
         ModelBlocker? Blocker = null,
         bool TimedOut = false,
-        TestDisputeCall? Dispute = null);
+        TestDisputeCall? Dispute = null,
+        bool Stalled = false);
 
     /// <summary>
     /// What is worth saying again to a model whose step failed, from the step and the failure: used by the first prompt of
