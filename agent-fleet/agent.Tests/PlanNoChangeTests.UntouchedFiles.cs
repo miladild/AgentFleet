@@ -212,7 +212,7 @@ public sealed partial class PlanNoChangeTests
     }
 
     [Fact]
-    public async Task A_step_that_lists_no_files_gets_no_extra_round_when_it_changes_another_file()
+    public async Task A_step_that_lists_no_files_gets_no_untouched_round_when_it_changes_another_file()
     {
         PlanRecord plan = OneStepPlan(StepNoFiles("write notes"));
         var agent = new FakeStepAgent((_, _, _) =>
@@ -224,8 +224,11 @@ public sealed partial class PlanNoChangeTests
         await RepairRunner(agent, _ => Pass("check")).RunPlanAsync(plan.Id, default);
 
         Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
-        Assert.Single(agent.Calls);
         Assert.Equal(0, UntouchedRounds(plan.Id));
+
+        // notes.txt is a file the plan does not name, so the extra round for unnamed files applies instead (it is not a listed file).
+        Assert.Equal(2, agent.Calls.Count);
+        Assert.Equal(1, UnlistedRounds(plan.Id));
     }
 
     [Fact]

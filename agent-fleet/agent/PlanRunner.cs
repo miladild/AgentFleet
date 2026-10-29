@@ -1409,6 +1409,20 @@ internal sealed partial class PlanRunner
                     result = new StepCompletion(false, note, note, result.Restored);
                 }
 
+                // Files the step left behind that the plan does not name get one extra round too, once per attempt (see
+                // UnlistedNewFiles). A step the untouched rule just sent back is not given a second message in the same round.
+                IReadOnlyList<string> unlisted = result.Done && !UnlistedRoundGiven(plan, step, attempt)
+                    ? UnlistedNewFiles(plan, step, isFinalValidation)
+                    : [];
+                if (unlisted.Count > 0)
+                {
+                    string note = UnlistedFilesMessage(unlisted);
+                    _store.AddEvent(plan.Id, step.Id, attempt, UnlistedRoundKind, tier, node: model.ModelNode ?? model.Machine,
+                        detail: $"The check passed, but these files were created and are not part of this step: {UnlistedNames(unlisted)}. The worker gets one more round before the step is accepted.",
+                        modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round, changedFiles: unlisted);
+                    result = new StepCompletion(false, note, note, result.Restored);
+                }
+
                 // A check that passes is not yet a step that is done: a model that did not write the code reads it against the step.
                 string? findings = !IsTestsStep(step) && result.Done
                     ? await ReviewAcceptedStepAsync(plan, step, attempt, tier, model, change.Files, rung, round, cancellationToken)
@@ -3293,7 +3307,7 @@ internal sealed partial class PlanRunner
 
                 if (work is not null)
                 {
-                    IReadOnlyList<string> restored = await _tools.RestoreDiscardedWorkAsync(_store.Get(plan.Id) ?? plan, work, CancellationToken.None);
+                    IReadOnlyList<string> restored = await _tools.RestoreDiscardedWorkAsync(_store.Get(plan.Id) ?? plan, EarlierWorkOnly(plan, step, work), CancellationToken.None);
                     if (restored.Count > 0)
                     {
                         string files = string.Join(", ", restored);
@@ -3352,7 +3366,8 @@ internal sealed partial class PlanRunner
     // Files a step created that no step of the plan names. Small models leave scratch files behind ("test-slug.js"
     // next to the real test) and a check such as `node --test` then picks them up. Reported, never deleted: the
     // fleet does not remove files it did not write.
-    private string[] StrayFiles(PlanRecord plan, PlanStep step)
+    // The notes name the first ten; the extra round for unnamed files asks for all of them, so it can say how many more there are.
+    private string[] StrayFiles(PlanRecord plan, PlanStep step, int limit = 10)
     {
         if (!_filesAtStart.TryGetValue($"{plan.Id}:{step.Id}", out HashSet<string>? before) || before.Count == 0 && !Directory.Exists(plan.WorkingDirectory ?? string.Empty))
         {
@@ -3365,7 +3380,7 @@ internal sealed partial class PlanRunner
         return FleetPlanContext.SnapshotFiles(plan.WorkingDirectory)
             .Where(file => !before.Contains(file) && !named.Any(declared => FleetPlanContext.Names(declared, file)))
             .OrderBy(file => file, StringComparer.OrdinalIgnoreCase)
-            .Take(10)
+            .Take(limit)
             .Select(file => Path.GetRelativePath(root, file))
             .ToArray();
     }
