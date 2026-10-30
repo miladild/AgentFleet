@@ -1403,6 +1403,10 @@ internal sealed partial class PlanRunner
                 // conversation, once per attempt. If a listed file is still untouched after that round, the step is sent back too,
                 // unless the round's report_blocker names the file (see UntouchedListedFilesAsync). It comes before the review, so a
                 // step sent back for it is not reviewed first.
+                // A step one of these rules sends back for its first (extra) round is not charged to the rung: the rounds the ladder counts
+                // are for a check that fails, and a worker that passed its check should not lose a repair round to a rule's one message.
+                bool checkPassed = result.Done;
+                bool chargedSendBack = false;
                 IReadOnlyList<string> untouched = result.Done
                     ? await UntouchedListedFilesAsync(plan, step, isFinalValidation, cancellationToken)
                     : [];
@@ -1417,6 +1421,7 @@ internal sealed partial class PlanRunner
                 else if (untouched.Count > 0 && NotNamedByBlocker(untouched, model.Blocker) is { Count: > 0 } stillUntouched)
                 {
                     string note = StillUntouchedMessage(stillUntouched);
+                    chargedSendBack = true;
                     result = new StepCompletion(false, note, note, result.Restored);
                 }
 
@@ -1457,6 +1462,8 @@ internal sealed partial class PlanRunner
                 {
                     result = result with { Restored = JoinNotes(result.Restored ?? string.Empty, $"Debug output still in: {DebugLocations(debugLines)}.") };
                 }
+
+                bool extraRound = checkPassed && !result.Done && !chargedSendBack;
 
                 // A check that passes is not yet a step that is done: a model that did not write the code reads it against the step.
                 string? findings = !IsTestsStep(step) && result.Done
@@ -1577,7 +1584,7 @@ internal sealed partial class PlanRunner
                         "Plan {PlanId} step {StepId} round {Round} left {Failing} failing, fewer than before: it does not use up the rung's rounds.",
                         plan.Id, step.Id, round, failingNow);
                 }
-                else
+                else if (!extraRound)
                 {
                     roundsInRung++;
                 }

@@ -114,6 +114,40 @@ public sealed partial class PlanNoChangeTests
     }
 
     [Fact]
+    public async Task The_runners_failing_tests_header_is_not_named_as_a_failing_test()
+    {
+        SeedFiles("a.txt", "b.txt", "c.txt");
+        PlanRecord plan = ThreeStepPlan(["c.txt"]);
+        var commands = new List<string>();
+        FakeStepAgent agent = ThreeStepAgent(breakText: "broken", repairText: "fixed");
+        const string withHeader = "Exit code: 1\n--- stdout ---\n✖ failing tests:\n✖ rejects zero (3 ms)\nFAIL test/old.test.ts\nTests: 1 failed";
+
+        await RepairRunner(agent, ThreeStepVerify(commands, withHeader)).RunPlanAsync(plan.Id, default);
+
+        PlanRunEvent round = Assert.Single(Store.Get(plan.Id)!.Events!, runEvent => runEvent.Kind == FinalCheckKind);
+        Assert.Contains("rejects zero", round.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("failing tests", round.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task The_extra_round_does_not_use_up_a_round_of_the_rung()
+    {
+        SeedFiles("a.txt", "b.txt", "c.txt");
+        PlanRecord plan = ThreeStepPlan(["c.txt"]);
+        var commands = new List<string>();
+        FakeStepAgent agent = ThreeStepAgent(breakText: "broken", repairText: "fixed");
+
+        // One round per rung: charged, the extra round would end the rung and the repair would continue in a new conversation.
+        await RepairRunner(agent, ThreeStepVerify(commands, BrokenOldTest), roundsPerRung: 1).RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.Equal(1, FinalCheckRounds(plan.Id));
+        Assert.Equal(2, agent.Sessions[1].Messages.Count);
+        Assert.Equal(1, after.Steps[1].Attempts);
+    }
+
+    [Fact]
     public async Task A_passing_whole_project_check_gives_no_round_and_the_last_step_runs_its_check_once()
     {
         SeedFiles("a.txt", "b.txt", "c.txt");

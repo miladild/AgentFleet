@@ -47,7 +47,7 @@ internal sealed partial class PlanRunner
                 return null;
             }
 
-            return new FinalCheckFailure(command, output, PlanFailure.FailingItems(output));
+            return new FinalCheckFailure(command, output, PlanFailure.FailureSignature(output).Items);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
