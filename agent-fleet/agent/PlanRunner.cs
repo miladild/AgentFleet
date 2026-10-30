@@ -1427,6 +1427,23 @@ internal sealed partial class PlanRunner
                     result = new StepCompletion(false, note, note, result.Restored);
                 }
 
+                // Debugging output the step left in its changed files gets one more round too, once per attempt (see DebugOutputLines).
+                // It comes after the two rules above, so a step either of them sent back is looked at on its next passing check. Lines
+                // still there after that round are named in the step-done note, which reads the completion's note.
+                IReadOnlyList<DebugLine> debugLines = result.Done ? DebugOutputLines(plan, step, change.Files) : [];
+                if (debugLines.Count > 0 && !DebugRoundGiven(plan, step, attempt))
+                {
+                    string note = DebugOutputMessage(debugLines);
+                    _store.AddEvent(plan.Id, step.Id, attempt, DebugOutputRoundKind, tier, node: model.ModelNode ?? model.Machine,
+                        detail: $"The check passed, but these lines print debugging output: {DebugLocations(debugLines)}. The worker gets one more round before the step is accepted.",
+                        modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round);
+                    result = new StepCompletion(false, note, note, result.Restored);
+                }
+                else if (debugLines.Count > 0)
+                {
+                    result = result with { Restored = JoinNotes(result.Restored ?? string.Empty, $"Debug output still in: {DebugLocations(debugLines)}.") };
+                }
+
                 // A check that passes is not yet a step that is done: a model that did not write the code reads it against the step.
                 string? findings = !IsTestsStep(step) && result.Done
                     ? await ReviewAcceptedStepAsync(plan, step, attempt, tier, model, change.Files, rung, round, cancellationToken)

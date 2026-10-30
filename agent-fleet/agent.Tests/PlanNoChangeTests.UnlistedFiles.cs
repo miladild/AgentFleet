@@ -188,8 +188,9 @@ public sealed partial class PlanNoChangeTests
     }
 
     [Fact]
-    public async Task A_file_an_earlier_failing_round_created_is_not_asked_about_again_once_the_check_passes()
+    public async Task A_file_an_earlier_failing_round_created_is_asked_about_once_the_check_passes()
     {
+        // The failing check's note named scratch.js, and the passing check still asks about it: a note is not a deletion.
         File.WriteAllText(Path.Combine(ProjectDirectory, "a.txt"), "old a");
         PlanRecord plan = OneStepPlan(StepListing("edit a", "a.txt"));
         int round = 0;
@@ -210,10 +211,12 @@ public sealed partial class PlanNoChangeTests
 
         await RepairRunner(agent, verify).RunPlanAsync(plan.Id, default);
 
-        Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
-        Assert.Equal(2, agent.Calls.Count);
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.Equal(3, agent.Calls.Count);
         Assert.Contains("scratch.js", agent.Calls[1].Prompt, StringComparison.Ordinal);
-        Assert.Equal(0, UnlistedRounds(plan.Id));
+        Assert.Equal(1, UnlistedRounds(plan.Id));
+        Assert.Contains("were created and are not part of this step: scratch.js", agent.Sessions[0].Messages[2].Text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -277,9 +280,9 @@ public sealed partial class PlanNoChangeTests
     }
 
     [Fact]
-    public async Task A_file_named_by_the_note_of_an_untouched_round_is_not_asked_about_again()
+    public async Task A_file_named_by_the_note_of_an_untouched_round_is_asked_about_once_the_check_passes()
     {
-        // The failing round's note already names scratch.js (the existing note), so the next passing check does not ask again.
+        // The untouched round's failing note names scratch.js too, and the next passing check still asks about it.
         File.WriteAllText(Path.Combine(ProjectDirectory, "a.txt"), "old a");
         File.WriteAllText(Path.Combine(ProjectDirectory, "b.txt"), "old b");
         PlanRecord plan = OneStepPlan(StepListing("edit both", "a.txt", "b.txt"));
@@ -301,10 +304,11 @@ public sealed partial class PlanNoChangeTests
         await RepairRunner(agent, _ => Pass("check")).RunPlanAsync(plan.Id, default);
 
         Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
-        Assert.Equal(2, agent.Calls.Count);
+        Assert.Equal(3, agent.Calls.Count);
         Assert.Equal(1, UntouchedRounds(plan.Id));
-        Assert.Equal(0, UnlistedRounds(plan.Id));
+        Assert.Equal(1, UnlistedRounds(plan.Id));
         Assert.DoesNotContain("were created and are not part of this step", agent.Sessions[0].Messages[1].Text, StringComparison.Ordinal);
+        Assert.Contains("were created and are not part of this step: scratch.js", agent.Sessions[0].Messages[2].Text, StringComparison.Ordinal);
     }
 
     [Fact]

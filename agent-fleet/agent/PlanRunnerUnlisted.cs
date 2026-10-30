@@ -16,8 +16,8 @@ internal sealed partial class PlanRunner
     /// <summary>
     /// The files this step created that the plan does not name and that a passing check would otherwise accept as they are. These
     /// are the files the step-done note reports (see StrayFiles), less the ones that are not leftovers: incidental files that a
-    /// package manager or a build rewrites, anything in the fleet's own folder or a dependency or version-control folder, and a file
-    /// that a failing check of this step already named (its note reported it, so the worker was told once). Paths are relative, with
+    /// package manager or a build rewrites, and anything in the fleet's own folder or a dependency or version-control folder. A file
+    /// that a failing check of this step named is still asked about: that note was a report, not a deletion. Paths are relative, with
     /// forward slashes. Empty when the rule does not apply: the tests step of test-first mode, the final check of a longer plan, and
     /// a plan without a project folder.
     /// </summary>
@@ -28,14 +28,8 @@ internal sealed partial class PlanRunner
             return [];
         }
 
-        // The record of a failing check holds the note that named the files then, so this does not depend on git showing them.
-        string[] failingRecords = (_store.Get(plan.Id)?.Events ?? [])
-            .Where(runEvent => runEvent.StepId == step.Id && runEvent.Kind is (RunEventKind.CheckFailed or RunEventKind.FinalValidationFailed))
-            .Select(runEvent => runEvent.Detail.Replace('\\', '/'))
-            .ToArray();
         return StrayFiles(plan, step, int.MaxValue)
-            .Where(file => !RepairLadder.IsIncidentalFile(file) && !IsFleetOrDependencyPath(file) &&
-                !failingRecords.Any(detail => NamedIn(detail, file)))
+            .Where(file => !RepairLadder.IsIncidentalFile(file) && !IsFleetOrDependencyPath(file))
             .Select(file => file.Replace('\\', '/'))
             .ToArray();
     }

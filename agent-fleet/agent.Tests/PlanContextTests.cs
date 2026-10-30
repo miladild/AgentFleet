@@ -428,9 +428,11 @@ public sealed class PlanContextTests : ContextTestBase
 
         await runner.RunPlanAsync(plan.Id, default);
 
-        Assert.Equal(2, agent.Calls.Count);
+        // The failing check named the file, and the passing check after it still asks about it: the extra round is the third call.
+        Assert.Equal(3, agent.Calls.Count);
         Assert.Contains("scratch-experiment.txt", agent.Calls[1].Prompt);
         Assert.Contains("does not name", agent.Calls[1].Prompt);
+        Assert.Contains("were created and are not part of this step: scratch-experiment.txt", agent.Calls[2].Prompt);
         PlanRecord after = Plans.Get(plan.Id)!;
         // The only step is the last one, so its check is the runner's final validation.
         Assert.Contains(after.Events!, e => e.Kind == RunEventKind.FinalValidationFailed && e.Detail.Contains("scratch-experiment.txt"));
