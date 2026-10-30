@@ -197,6 +197,25 @@ internal static partial class PlanFailure
                TestFileDidNotLoad(output);
     }
 
+    // The runners' own spellings of a failing test: FAIL/FAILED (jest, pytest), the symbols (node:test, TAP). FailedTestLine ignores case,
+    // so a lower-case or mixed-case "fail" is an ordinary word in build and install output and does not count.
+    private static readonly string[] RunnerFailureStarts = ["FAIL ", "FAILED ", "✖", "✗", "×"];
+
+    /// <summary>True when a check's output is a test run: a failing test line, or the count of tests node prints at its end.</summary>
+    internal static bool IsTestRunOutput(string? output)
+    {
+        if (string.IsNullOrWhiteSpace(output)) return false;
+        foreach (string line in AnsiEscape().Replace(output, string.Empty).Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (NodeTestCount().IsMatch(line)) return true;
+            if (FailedTestLine().IsMatch(line) && RunnerFailureStarts.Any(start => line.TrimStart().StartsWith(start, StringComparison.Ordinal))) return true;
+            // dotnet test prints a failing test with its duration in brackets: "Failed Namespace.Test [12 ms]".
+            if (XunitFailedLine().IsMatch(line) && line.Contains('[')) return true;
+        }
+
+        return false;
+    }
+
     private static bool NamesATest(string line) =>
         (FailedTestLine().IsMatch(line) || XunitFailedLine().IsMatch(line)) && !CompilerErrorCode().IsMatch(line);
 

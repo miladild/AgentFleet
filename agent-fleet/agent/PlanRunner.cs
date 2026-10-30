@@ -1328,17 +1328,21 @@ internal sealed partial class PlanRunner
                     _logger.LogError(exception, "Worker verification or sync failed for plan {PlanId} step {StepId} on {Machine}.", plan.Id, step.Id, model.Machine);
                     IWorkerWorkspaceSession workspace = model.Workspace;
                     bool commandTimedOut = false;
+                    string? partialOutput = null;
                     for (Exception? cause = exception; cause is not null; cause = cause.InnerException)
                     {
-                        if (cause is WorkerCommandTimeoutException) { commandTimedOut = true; break; }
+                        if (cause is WorkerCommandTimeoutException timedOut)
+                        {
+                            commandTimedOut = true;
+                            partialOutput = timedOut.PartialOutput;
+                            break;
+                        }
                     }
 
                     string failure;
                     if (commandTimedOut && await workspace.AnswersAsync(cancellationToken))
                     {
-                        failure = $"Error: command exceeded the {workspace.CommandTimeout.TotalSeconds:0}s timeout and was killed.\n\n" +
-                            "The check never finished. A program or test that never ends is usually an infinite loop " +
-                            "(for example while (true) without a limit) or a wait that never completes. Make it finish.";
+                        failure = TimedOutCheckFailure(workspace.CommandTimeout, partialOutput, plan.WorkingDirectory);
                     }
                     else
                     {
@@ -2707,6 +2711,26 @@ internal sealed partial class PlanRunner
         }
 
         return false;
+    }
+
+    private const string InfiniteLoopSentence = "A program or test that never ends is usually an infinite loop " +
+        "(for example while (true) without a limit) or a wait that never completes. Make it finish.";
+
+    private const string TestRunHint = "The test run did not end. A test that starts a server, a timer or a connection must close it in a finally block " +
+        "(or an after hook): when an assertion fails before the close, the open handle keeps the process alive and hides the failure. " +
+        "Close everything in finally, then fix the failing assertion shown above.";
+
+    // The failure of a check whose command was killed at the timeout. What it printed before the kill is the evidence: a test run
+    // prints its failing assertion before the process hangs, and the retry cannot see that unless the failure carries it.
+    internal static string TimedOutCheckFailure(TimeSpan timeout, string? partialOutput, string? projectRoot)
+    {
+        string failure = $"Error: command exceeded the {timeout.TotalSeconds:0}s timeout and was killed.\n\n";
+        if (string.IsNullOrWhiteSpace(partialOutput)) return failure + "The check never finished. " + InfiniteLoopSentence;
+
+        string printed = "\n\n--- output before it was killed ---\n" +
+            PlanTools.ShortenCheckOutput(FailureLocation.ProjectRelative(partialOutput, projectRoot));
+        if (PlanFailure.IsTestRunOutput(partialOutput)) return failure + "The check never finished." + printed + "\n\n" + TestRunHint;
+        return failure + "The check never finished. " + InfiniteLoopSentence + printed;
     }
 
     internal Task SyncToHubWithReconnectAsync(IWorkerWorkspaceSession worker, CancellationToken cancellationToken) =>

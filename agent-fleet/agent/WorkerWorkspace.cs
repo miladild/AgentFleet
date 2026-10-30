@@ -36,8 +36,12 @@ internal interface IWorkerWorkspaceSession : IDisposable
     Task<IReadOnlyList<string>> RestoreFrozenTestsAsync(CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<string>>([]);
 }
 
-internal sealed class WorkerCommandTimeoutException(string message, Exception innerException)
-    : TimeoutException(message, innerException);
+internal sealed class WorkerCommandTimeoutException(string message, Exception innerException, string? partialOutput = null)
+    : TimeoutException(message, innerException)
+{
+    // What the command printed before it was killed (the newest part, capped), or null when the transport did not keep it.
+    public string? PartialOutput { get; } = partialOutput;
+}
 
 internal sealed class WorkerPathRefusedException(string message) : Exception(message);
 
@@ -806,6 +810,42 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession, IEditChe
         }
     }
 
+    // The newest part of what a killed command printed is kept: a failing assertion is printed last, before the process hangs.
+    private const int MaxPartialOutputCharacters = 20_000;
+
+    // SSH.NET reads a command's output streams, which can stay open after a timeout; a read that waits on them must not hold up the failure.
+    private static readonly TimeSpan PartialOutputReadLimit = TimeSpan.FromSeconds(5);
+
+    internal static string? PartialOutputText(string? stdout, string? stderr)
+    {
+        var text = new StringBuilder();
+        if (!string.IsNullOrWhiteSpace(stdout)) text.Append(stdout);
+        if (!string.IsNullOrWhiteSpace(stderr))
+        {
+            if (text.Length > 0) text.Append('\n');
+            text.Append("--- stderr ---\n").Append(stderr);
+        }
+
+        if (text.Length == 0) return null;
+        string kept = text.Length <= MaxPartialOutputCharacters
+            ? text.ToString()
+            : text.ToString(text.Length - MaxPartialOutputCharacters, MaxPartialOutputCharacters);
+        return char.IsLowSurrogate(kept[0]) ? kept[1..] : kept;
+    }
+
+    // What a command printed before its timeout, or null when none can be read in time or it printed nothing.
+    private static async Task<string?> PartialOutputOfAsync(SshCommand command)
+    {
+        try
+        {
+            return await Task.Run(() => PartialOutputText(command.Result, command.Error)).WaitAsync(PartialOutputReadLimit);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
     public async Task<bool> AnswersAsync(CancellationToken cancellationToken)
     {
         try
@@ -833,7 +873,7 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession, IEditChe
         }
         catch (SshOperationTimeoutException exception)
         {
-            throw new WorkerCommandTimeoutException(exception.Message, exception);
+            throw new WorkerCommandTimeoutException(exception.Message, exception, await PartialOutputOfAsync(remote));
         }
         string stdout = remote.Result;
         string result = $"Exit code: {remote.ExitStatus}\n--- stdout ---\n{stdout}";
@@ -870,7 +910,7 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession, IEditChe
             try { await check.ExecuteAsync(cancellationToken); }
             catch (SshOperationTimeoutException exception)
             {
-                throw new WorkerCommandTimeoutException(exception.Message, exception);
+                throw new WorkerCommandTimeoutException(exception.Message, exception, await PartialOutputOfAsync(check));
             }
             timer.Stop();
             string outputText = $"Exit code: {check.ExitStatus}\n--- stdout ---\n{check.Result}";
