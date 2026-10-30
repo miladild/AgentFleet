@@ -1222,6 +1222,7 @@ internal sealed partial class PlanRunner
                 string? checkNote = null;
                 string? parkReason = null;
                 FailFirstResult? failFirst = null;
+                FinalCheckFailure? finalCheckFailure = null;
                 List<string> restoredNow = [];
                 List<string> frozenNow = [];
                 bool isFinalValidation = !IsTestsStep(step) && step.Id == plan.Steps.Max(candidate => candidate.Id);
@@ -1265,6 +1266,12 @@ internal sealed partial class PlanRunner
                         else RestoreHubFrozenTests(plan, restoredNow);
                         if (await FrozenTestsRefusalAsync(plan, frozenSets, cancellationToken) is { } frozenRefusal)
                             result = new StepCompletion(false, frozenRefusal, frozenRefusal, result.Restored);
+                    }
+
+                    // The plan's whole-project check runs on this step's changes before they are synced back (see PlanRunnerRegression).
+                    if (result.Done)
+                    {
+                        finalCheckFailure = await RunFinalCheckAsync(plan, step, isFinalValidation, cancellationToken);
                     }
 
                     if (model.Workspace is not null)
@@ -1427,8 +1434,15 @@ internal sealed partial class PlanRunner
                     result = new StepCompletion(false, note, note, result.Restored);
                 }
 
+                // A passing step whose whole-project check failed gets one round too, once per attempt (see PlanRunnerRegression).
+                // It comes before the review, so a step sent back for it is not reviewed first.
+                if (finalCheckFailure is not null)
+                {
+                    result = WithFinalCheckRound(plan, step, attempt, tier, model, rung, round, result, finalCheckFailure);
+                }
+
                 // Debugging output the step left in its changed files gets one more round too, once per attempt (see DebugOutputLines).
-                // It comes after the two rules above, so a step either of them sent back is looked at on its next passing check. Lines
+                // It comes after the rules above, so a step any of them sent back is looked at on its next passing check. Lines
                 // still there after that round are named in the step-done note, which reads the completion's note.
                 IReadOnlyList<DebugLine> debugLines = result.Done ? DebugOutputLines(plan, step, change.Files) : [];
                 if (debugLines.Count > 0 && !DebugRoundGiven(plan, step, attempt))

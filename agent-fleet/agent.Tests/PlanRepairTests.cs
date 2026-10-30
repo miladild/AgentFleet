@@ -272,6 +272,9 @@ public sealed partial class PlanRunnerTests
         await RepairRunner(agent, command => command switch
         {
             "check first" => SetAggressiveAndPass(mode),
+            // The last step's check also runs once the first step's own check passes, before the second step is written; this
+            // test is about the second step's rescue, so the first step is let through.
+            "check second" when agent.Calls.Count == 1 => Pass(command),
             "check second" when File.Exists(secondFile) && File.ReadAllText(secondFile) == "fixed" => Pass(command),
             _ => FailWith("widget::renders")
         }, options, health, roundsPerRung: 1, modeService: mode).RunPlanAsync(plan.Id, default);
