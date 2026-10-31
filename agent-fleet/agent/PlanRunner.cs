@@ -1223,6 +1223,7 @@ internal sealed partial class PlanRunner
                 string? parkReason = null;
                 FailFirstResult? failFirst = null;
                 FinalCheckFailure? finalCheckFailure = null;
+                string? typecheckNote = null;
                 List<string> restoredNow = [];
                 List<string> frozenNow = [];
                 bool isFinalValidation = !IsTestsStep(step) && step.Id == plan.Steps.Max(candidate => candidate.Id);
@@ -1272,6 +1273,11 @@ internal sealed partial class PlanRunner
                     if (result.Done)
                     {
                         finalCheckFailure = await RunFinalCheckAsync(plan, step, isFinalValidation, cancellationToken);
+                    }
+                    else if (parkReason is null)
+                    {
+                        // The check failed: type errors in the step's files may be the reason (see PlanRunnerTypecheck).
+                        typecheckNote = await TypecheckHintAsync(plan, step, attempt, tier, model, rung, round, cancellationToken);
                     }
 
                     if (model.Workspace is not null)
@@ -1507,6 +1513,10 @@ internal sealed partial class PlanRunner
                 if (checkNote is not null)
                 {
                     lastFailure = $"{lastFailure}\n\n{checkNote}";
+                }
+                if (typecheckNote is not null && !result.Done)
+                {
+                    lastFailure = $"{lastFailure}\n\n{typecheckNote}";
                 }
 
                 if (EnvironmentBlockReason(lastFailure) is { } environmentReason)
