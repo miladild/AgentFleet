@@ -112,7 +112,7 @@ internal sealed class WorkerWorkspaceManager(FleetOptions fleet, ILogger logger,
 
         cancellationToken.ThrowIfCancellationRequested();
         var session = new WorkerWorkspaceSession(machine, config, Path.GetFullPath(plan.WorkingDirectory), logger, commandTimeout,
-            onSynced: hashes => RecordSynced(plan.Id, machine, hashes), frozenFiles: FrozenFilesOf(plan));
+            onSynced: hashes => RecordSynced(plan.Id, machine, hashes), frozenFiles: FrozenFilesOf(plan), planStartedUtc: plan.ApprovedUtc ?? plan.CreatedUtc);
         try
         {
             session.Connect();
@@ -205,7 +205,7 @@ internal sealed class WorkerWorkspaceManager(FleetOptions fleet, ILogger logger,
         if (string.IsNullOrWhiteSpace(plan.WorkingDirectory) || !Directory.Exists(plan.WorkingDirectory))
             throw new InvalidOperationException("Worker workspace unavailable: the plan's project folder does not exist on the hub.");
         var session = new WorkerWorkspaceSession(baseline.Machine, node.Workspace,
-            Path.GetFullPath(plan.WorkingDirectory!), logger, commandTimeout, frozenFiles: FrozenFilesOf(plan));
+            Path.GetFullPath(plan.WorkingDirectory!), logger, commandTimeout, frozenFiles: FrozenFilesOf(plan), planStartedUtc: plan.ApprovedUtc ?? plan.CreatedUtc);
         try
         {
             session.Connect();
@@ -299,14 +299,16 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession, IEditChe
     private readonly Action<IReadOnlyDictionary<string, string>>? _onSynced;
     private readonly IWorkerWorkspaceFileAccess? _fileAccess;
     private readonly IReadOnlyList<PlanFrozenTestFile> _frozenFiles;
+    private readonly DateTimeOffset? _planStartedUtc;
     private SftpClient? _sftp;
     private SshClient? _ssh;
     private bool _disposed;
 
     internal WorkerWorkspaceSession(string machine, FleetWorkerWorkspaceConfig config, string hubRoot, ILogger logger, TimeSpan commandTimeout,
         Action<IReadOnlyDictionary<string, string>>? onSynced = null, IWorkerWorkspaceFileAccess? fileAccess = null,
-        IReadOnlyList<PlanFrozenTestFile>? frozenFiles = null)
+        IReadOnlyList<PlanFrozenTestFile>? frozenFiles = null, DateTimeOffset? planStartedUtc = null)
     {
+        _planStartedUtc = planStartedUtc;
         _onSynced = onSynced;
         _fileAccess = fileAccess;
         _frozenFiles = frozenFiles ?? [];
@@ -744,7 +746,7 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession, IEditChe
 
             // Propagate intentional workspace deletions, but only for files this manager staged and only inside
             // the original project. If SFTP could not enumerate the workspace, the guard above prevents deletion.
-            foreach (string relative in DeletionCandidates(_stagedFiles, remaining, _frozenFiles, _config.Platform, IsNamedByStep))
+            foreach (string relative in DeletionCandidates(_stagedFiles, remaining, _frozenFiles, _config.Platform, MayDeleteOnHub))
             {
                 string local = SafeHubPath(relative);
                 string? baseline = _baselineHashes.GetValueOrDefault(relative);
@@ -1349,6 +1351,14 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession, IEditChe
         try { return WorkerWorkspacePath.RelativeToProject(path, _hubRoot); }
         catch (WorkerPathRefusedException) { return string.Empty; }
     }
+
+    // A file the worker deleted may go from the hub when the step names it, or when it was created on the hub after the plan
+    // started: it is a leftover of this run (a scratch script the worker wrote and removed), not something the project had before.
+    private bool MayDeleteOnHub(string relative) =>
+        IsNamedByStep(relative) || CreatedSincePlanStarted(SafeHubPath(relative), _planStartedUtc);
+
+    internal static bool CreatedSincePlanStarted(string localPath, DateTimeOffset? planStartedUtc) =>
+        planStartedUtc is { } started && File.Exists(localPath) && new DateTimeOffset(File.GetCreationTimeUtc(localPath), TimeSpan.Zero) >= started;
 
     private bool IsNamedByStep(string relative)
     {

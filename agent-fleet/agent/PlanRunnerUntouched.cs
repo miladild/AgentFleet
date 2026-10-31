@@ -82,12 +82,12 @@ internal sealed partial class PlanRunner
     /// <summary>What the worker is told when a passing check is not taken as the step done yet.</summary>
     private static string UntouchedFilesMessage(IReadOnlyList<string> files) =>
         $"The check passed, but these files listed for this step were not changed: {string.Join(", ", files)}. " +
-        "Make the changes the step asks for in them, or say with report_blocker why they need no change.";
+        "Make the changes the step asks for in them. If a file needs no change, call the report_blocker tool with that file's name and the reason as its evidence; saying so in your reply does not count.";
 
     /// <summary>What the worker is told when the one extra round did not change a listed file either.</summary>
     private static string StillUntouchedMessage(IReadOnlyList<string> files) =>
         $"The check passed, but these files listed for this step are still unchanged after one more round: {string.Join(", ", files)}. " +
-        "Change them, or say with report_blocker why they need no change.";
+        "Change them. If a file needs no change, call the report_blocker tool now with that file's name and the reason as its evidence; saying so in your reply does not count.";
 
     /// <summary>Whether the step's one extra round for untouched listed files already ran in this attempt.</summary>
     private bool UntouchedRoundGiven(PlanRecord plan, PlanStep step, int attempt) =>
