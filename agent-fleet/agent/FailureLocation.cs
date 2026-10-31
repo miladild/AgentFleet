@@ -74,7 +74,7 @@ internal static partial class FailureLocation
     /// as written, when the line is inside a test; otherwise the source line the frame names. Null when the output names none. The paths
     /// in the output may be those of another machine: the longest tail of each that is a file of the project is used.
     /// </summary>
-    public static string? Describe(string? output, string? projectRoot)
+    public static string? Describe(string? output, string? projectRoot, Func<string, bool>? writtenHere = null)
     {
         if (string.IsNullOrWhiteSpace(output) || string.IsNullOrWhiteSpace(projectRoot) || !Directory.Exists(projectRoot))
         {
@@ -118,14 +118,14 @@ internal static partial class FailureLocation
         var entries = new List<Entry>();
         foreach ((string path, int start, int last, string[] lines) in groups)
         {
-            var single = new Entry($"- {path} line {last}: {SourceLine(lines, last)}", false);
+            var single = new Entry($"- {path} line {last}: {SourceLine(lines, last)}", false, null);
             if (start == 0)
             {
                 entries.Add(single);
                 continue;
             }
 
-            var block = new Entry(TestBlock(path, start, last, lines), true);
+            var block = new Entry(TestBlock(path, start, last, lines), true, writtenHere?.Invoke(path) == true ? path : null);
             entries.Add(block.Text.Length + Heading.Length + ReservedCharacters <= MaxTextCharacters ? block : single);
         }
 
@@ -143,7 +143,30 @@ internal static partial class FailureLocation
         return Compose(entries, shown);
     }
 
-    private sealed record Entry(string Text, bool IsTest);
+    /// <summary>One failing location. OwnPath is the test file when the step being worked on wrote it, otherwise null.</summary>
+    private sealed record Entry(string Text, bool IsTest, string? OwnPath);
+
+    /// <summary>
+    /// "Where it failed" for a step: as Describe, but a failing test in a file the step lists was written by this step's worker, so it
+    /// is not a rule the code has to meet and may be the part that is wrong.
+    /// </summary>
+    public static string? Describe(string? output, PlanRecord plan, PlanStep step)
+    {
+        string[] declared = FleetPlanContext.DeclaredPaths(plan, step).ToArray();
+        string? root = plan.WorkingDirectory;
+        return Describe(output, root, path =>
+        {
+            try
+            {
+                string full = Path.GetFullPath(Path.Combine(root!, path));
+                return declared.Any(candidate => FleetPlanContext.Names(candidate, full));
+            }
+            catch (Exception exception) when (exception is ArgumentException or NotSupportedException)
+            {
+                return false;
+            }
+        });
+    }
 
     private static string Compose(IReadOnlyList<Entry> entries, int shown)
     {
@@ -158,9 +181,18 @@ internal static partial class FailureLocation
             text.Append($"\n({entries.Count - shown} more failing locations not shown)");
         }
 
-        if (entries.Take(shown).Any(entry => entry.IsTest))
+        string[] own = entries.Take(shown).Where(entry => entry.OwnPath is not null).Select(entry => entry.OwnPath!).Distinct().ToArray();
+        if (own.Length > 0)
         {
-            text.Append("\nThe inputs and comments in these tests are the rules the code has to meet.");
+            text.Append($"\nYou wrote {string.Join(", ", own)} in this step. If a test asks for more than the step's text says, or contradicts " +
+                        "behaviour the project's older tests keep, the test is the wrong part: correct the test, not the code. Do not weaken a check the step's text asks for.");
+        }
+
+        if (entries.Take(shown).Any(entry => entry.IsTest && entry.OwnPath is null))
+        {
+            text.Append(own.Length > 0
+                ? "\nThe inputs and comments in the other tests are the rules the code has to meet."
+                : "\nThe inputs and comments in these tests are the rules the code has to meet.");
         }
 
         return text.ToString();

@@ -253,7 +253,7 @@ internal sealed class PlanContinuationContextProvider() : PlanStepPromptProvider
                 ? $"Attempt {attempt}. The previous attempt did not pass. What went wrong:"
                 : "This step was tried before and did not pass, and the plan stopped here; the user has asked for another go. What went wrong the last time:");
             text.AppendLine(lastFailure);
-            if (FailureLocation.Describe(lastFailure, plan.WorkingDirectory) is { } where)
+            if (FailureLocation.Describe(lastFailure, plan, step) is { } where)
             {
                 text.AppendLine(where);
             }

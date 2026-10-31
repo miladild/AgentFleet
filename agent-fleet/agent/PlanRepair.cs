@@ -258,7 +258,7 @@ internal static class RepairMessages
             ? $"Round {round}: the step is not finished yet. What went wrong:"
             : $"Round {round}: the approved check did not pass yet. The fleet runs it for you with `{step.Verify}`. What it printed:");
         text.AppendLine(string.IsNullOrWhiteSpace(failure) ? "(no output)" : failure);
-        if (FailureLocation.Describe(failure, plan.WorkingDirectory) is { } where)
+        if (FailureLocation.Describe(failure, plan, step) is { } where)
         {
             text.AppendLine();
             text.AppendLine(where);

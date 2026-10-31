@@ -299,6 +299,32 @@ public sealed class FailureLocationTests : IDisposable
     }
 
     [Fact]
+    public void A_test_the_step_wrote_is_not_called_the_rules_and_may_be_the_wrong_part()
+    {
+        WriteProjectFile(Path.Combine("test", "mine.test.js"), ["test('keeps quotes', () => {", "  assert.equal(state.quotes.length, 0);", "});"]);
+        WriteProjectFile(Path.Combine("test", "old.test.js"), ["test('old rule', () => {", "  assert.equal(old(), 1);", "});"]);
+        string output = "at TestContext.<anonymous> (test\\mine.test.js:2:3)\nat TestContext.<anonymous> (test\\old.test.js:2:3)";
+
+        string? where = FailureLocation.Describe(output, _root, path => path == "test/mine.test.js")?.Replace("\r\n", "\n");
+
+        Assert.NotNull(where);
+        Assert.Contains("You wrote test/mine.test.js in this step. If a test asks for more than the step's text says, or contradicts behaviour the project's older tests keep, the test is the wrong part: correct the test, not the code. Do not weaken a check the step's text asks for.", where);
+        Assert.Contains("The inputs and comments in the other tests are the rules the code has to meet.", where);
+    }
+
+    [Fact]
+    public void Without_a_test_the_step_wrote_the_closing_sentence_is_unchanged()
+    {
+        WriteProjectFile(Path.Combine("test", "old.test.js"), ["test('old rule', () => {", "  assert.equal(old(), 1);", "});"]);
+
+        string? where = FailureLocation.Describe("at TestContext.<anonymous> (test\\old.test.js:2:3)", _root, _ => false)?.Replace("\r\n", "\n");
+
+        Assert.NotNull(where);
+        Assert.EndsWith("\nThe inputs and comments in these tests are the rules the code has to meet.", where);
+        Assert.DoesNotContain("You wrote", where, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void A_failing_line_after_a_test_that_already_closed_is_not_shown_as_part_of_that_test()
     {
         string[] file =
