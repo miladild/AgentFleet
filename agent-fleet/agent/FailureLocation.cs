@@ -15,7 +15,7 @@ internal static partial class FailureLocation
     private const int MaxFrames = 6;
     private const int MaxLineCharacters = 200;
     private const int MaxTextCharacters = 3000;
-    private const int MaxTestLinesUp = 60;
+    private const int MaxTestLinesUp = 150;
     private const int ReservedCharacters = 200;
     private const long MaxFileBytes = 1_000_000;
 
@@ -118,7 +118,9 @@ internal static partial class FailureLocation
         var entries = new List<Entry>();
         foreach ((string path, int start, int last, string[] lines) in groups)
         {
-            var single = new Entry($"- {path} line {last}: {SourceLine(lines, last)}", false, null);
+            // A test file the step wrote may be the wrong part even when only its failing line can be shown.
+            string? own = writtenHere?.Invoke(path) == true && PlanRunner.IsTestPath(path) ? path : null;
+            var single = new Entry($"- {path} line {last}: {SourceLine(lines, last)}", false, own);
             if (start == 0)
             {
                 entries.Add(single);

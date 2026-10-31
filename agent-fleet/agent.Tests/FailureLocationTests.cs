@@ -266,14 +266,53 @@ public sealed class FailureLocationTests : IDisposable
     }
 
     [Fact]
-    public void A_failing_line_with_no_test_opener_in_the_sixty_lines_above_it_is_a_single_line()
+    public void A_failing_line_with_no_test_opener_in_the_hundred_and_fifty_lines_above_it_is_a_single_line()
     {
-        string[] file = [.. new[] { "test('far away', () => {" }, .. Enumerable.Range(0, 61).Select(step => $"  step{step}();"), "  const value = compute();"];
+        string[] file = [.. new[] { "test('far away', () => {" }, .. Enumerable.Range(0, 151).Select(step => $"  step{step}();"), "  const value = compute();"];
         WriteProjectFile(Path.Combine("test", "far.test.js"), file);
 
         string? where = FailureLocation.Describe($"at x (test\\far.test.js:{file.Length}:3)", _root)?.Replace("\r\n", "\n");
 
-        Assert.Equal(Heading + "\n- test/far.test.js line 63: const value = compute();", where);
+        Assert.Equal(Heading + "\n- test/far.test.js line 153: const value = compute();", where);
+    }
+
+    [Fact]
+    public void A_failing_line_eighty_lines_below_its_test_opener_shows_the_whole_test()
+    {
+        string[] file = [.. new[] { "test('long walk', async () => {" }, .. Enumerable.Range(0, 79).Select(step => $"  step{step}();"), "  assert.equal(done(), true);", "});"];
+        WriteProjectFile(Path.Combine("test", "walk.test.js"), file);
+
+        string? where = FailureLocation.Describe($"at x (test\\walk.test.js:{file.Length - 1}:3)", _root)?.Replace("\r\n", "\n");
+
+        Assert.NotNull(where);
+        Assert.Contains("- test/walk.test.js lines 1-81 (the failing test as written):\n  1: test('long walk', async () => {", where);
+    }
+
+    [Fact]
+    public void A_test_the_step_wrote_is_called_possibly_wrong_even_when_it_is_too_long_to_show_whole()
+    {
+        string[] file = [.. new[] { "test('huge', () => {" }, .. Enumerable.Range(0, 14).Select(line => $"  // {new string('h', 183)}"),
+                         "  assert.equal(huge(), true);"];
+        WriteProjectFile(Path.Combine("test", "huge.test.js"), file);
+
+        string? where = FailureLocation.Describe($"at x (test\\huge.test.js:{file.Length}:3)", _root, path => path == "test/huge.test.js")?.Replace("\r\n", "\n");
+
+        Assert.NotNull(where);
+        Assert.Contains("- test/huge.test.js line 16: assert.equal(huge(), true);", where);
+        Assert.Contains("You wrote test/huge.test.js in this step.", where);
+        Assert.Contains("the test is the wrong part", where);
+        Assert.DoesNotContain("are the rules the code has to meet", where);
+    }
+
+    [Fact]
+    public void A_source_file_the_step_wrote_is_not_called_a_test()
+    {
+        WriteProjectFile(Path.Combine("src", "alerts.js"), ["function fire() {", "  throw new Error('x');", "}"]);
+
+        string? where = FailureLocation.Describe("at fire (src\\alerts.js:2:9)", _root, path => path == "src/alerts.js")?.Replace("\r\n", "\n");
+
+        Assert.NotNull(where);
+        Assert.DoesNotContain("You wrote", where, StringComparison.Ordinal);
     }
 
     [Fact]
