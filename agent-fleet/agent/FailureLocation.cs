@@ -15,7 +15,7 @@ internal static partial class FailureLocation
     private const int MaxFrames = 6;
     private const int MaxLineCharacters = 200;
     private const int MaxTextCharacters = 3000;
-    private const int MaxTestLinesUp = 15;
+    private const int MaxTestLinesUp = 60;
     private const int ReservedCharacters = 200;
     private const long MaxFileBytes = 1_000_000;
 
@@ -38,6 +38,10 @@ internal static partial class FailureLocation
     // A line that opens a test: test(, it(, specify( and their .only, .skip and .each forms; Python def test_; a .NET test attribute.
     [GeneratedRegex(@"^\s*(?:(?:test|it|specify)(?:\.\w+)*\s*\(|(?:async\s+)?def test_|\[(?:Fact|Theory|Test|TestCase)\b)")]
     private static partial Regex TestOpener();
+
+    // A block that closes in the first column: "});", "}", ")" and the like.
+    [GeneratedRegex(@"^[})\]][)\]};,\s]*$")]
+    private static partial Regex ClosedBlock();
 
     /// <summary>
     /// The output of a check with the project's own folder taken off its paths, so a stack frame reads "src/semver.js:35:28" and the model
@@ -172,6 +176,12 @@ internal static partial class FailureLocation
             if (TestOpener().IsMatch(lines[index - 1]))
             {
                 return index;
+            }
+
+            // A block that closes in the first column ends the test above it: the failing line is not inside that test.
+            if (index < line && ClosedBlock().IsMatch(lines[index - 1]))
+            {
+                return 0;
             }
         }
 

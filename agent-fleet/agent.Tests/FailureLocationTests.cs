@@ -266,14 +266,54 @@ public sealed class FailureLocationTests : IDisposable
     }
 
     [Fact]
-    public void A_failing_line_with_no_test_opener_in_the_fifteen_lines_above_it_is_a_single_line()
+    public void A_failing_line_with_no_test_opener_in_the_sixty_lines_above_it_is_a_single_line()
     {
-        string[] file = [.. new[] { "test('far away', () => {" }, .. Enumerable.Range(0, 16).Select(step => $"  step{step}();"), "  const value = compute();"];
+        string[] file = [.. new[] { "test('far away', () => {" }, .. Enumerable.Range(0, 61).Select(step => $"  step{step}();"), "  const value = compute();"];
         WriteProjectFile(Path.Combine("test", "far.test.js"), file);
 
         string? where = FailureLocation.Describe($"at x (test\\far.test.js:{file.Length}:3)", _root)?.Replace("\r\n", "\n");
 
-        Assert.Equal(Heading + "\n- test/far.test.js line 18: const value = compute();", where);
+        Assert.Equal(Heading + "\n- test/far.test.js line 63: const value = compute();", where);
+    }
+
+    [Fact]
+    public void A_failing_line_twenty_lines_below_its_test_opener_shows_the_whole_test_with_its_setup()
+    {
+        string[] file =
+        [
+            "test('fires once', async () => {",
+            "  const provider = { getQuotes: async () => [quote(201)] };",
+            .. Enumerable.Range(0, 17).Select(step => $"  // step {step}"),
+            "  await service.pollOnce();",
+            "  assert.equal(service.getState().fired.length, 0);",
+            "});"
+        ];
+        WriteProjectFile(Path.Combine("test", "tall.test.js"), file);
+        int failing = LineOf(file, "assert.equal(service.getState().fired.length, 0)");
+
+        string? where = FailureLocation.Describe($"at TestContext.<anonymous> (test\\tall.test.js:{failing}:10)", _root)?.Replace("\r\n", "\n");
+
+        Assert.NotNull(where);
+        Assert.Contains($"- test/tall.test.js lines 1-{failing} (the failing test as written):\n  1: test('fires once', async () => {{", where);
+        Assert.Contains("  2:   const provider = { getQuotes: async () => [quote(201)] };", where);
+    }
+
+    [Fact]
+    public void A_failing_line_after_a_test_that_already_closed_is_not_shown_as_part_of_that_test()
+    {
+        string[] file =
+        [
+            "test('first', () => {",
+            "  assert.ok(true);",
+            "});",
+            "",
+            "assert.equal(helperResult(), 1);"
+        ];
+        WriteProjectFile(Path.Combine("test", "closed.test.js"), file);
+
+        string? where = FailureLocation.Describe("at x (test\\closed.test.js:5:1)", _root)?.Replace("\r\n", "\n");
+
+        Assert.Equal(Heading + "\n- test/closed.test.js line 5: assert.equal(helperResult(), 1);", where);
     }
 
     [Fact]
