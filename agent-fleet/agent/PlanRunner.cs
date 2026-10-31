@@ -1349,7 +1349,8 @@ internal sealed partial class PlanRunner
                     string failure;
                     if (commandTimedOut && await workspace.AnswersAsync(cancellationToken))
                     {
-                        failure = TimedOutCheckFailure(workspace.CommandTimeout, partialOutput, plan.WorkingDirectory);
+                        string? rerun = await RerunKilledTestRunAsync(plan, step, workspace, partialOutput, cancellationToken);
+                        failure = TimedOutCheckFailure(workspace.CommandTimeout, partialOutput, plan.WorkingDirectory, rerun);
                     }
                     else
                     {
@@ -2760,14 +2761,22 @@ internal sealed partial class PlanRunner
 
     // The failure of a check whose command was killed at the timeout. What it printed before the kill is the evidence: a test run
     // prints its failing assertion before the process hangs, and the retry cannot see that unless the failure carries it.
-    internal static string TimedOutCheckFailure(TimeSpan timeout, string? partialOutput, string? projectRoot)
+    internal static string TimedOutCheckFailure(TimeSpan timeout, string? partialOutput, string? projectRoot, string? rerunOutput = null)
     {
         string failure = $"Error: command exceeded the {timeout.TotalSeconds:0}s timeout and was killed.\n\n";
         if (string.IsNullOrWhiteSpace(partialOutput)) return failure + "The check never finished. " + InfiniteLoopSentence;
 
         string printed = "\n\n--- output before it was killed ---\n" +
             PlanTools.ShortenCheckOutput(FailureLocation.ProjectRelative(partialOutput, projectRoot));
-        if (PlanFailure.IsTestRunOutput(partialOutput)) return failure + "The check never finished." + printed + "\n\n" + TestRunHint;
+        if (PlanFailure.IsTestRunOutput(partialOutput))
+        {
+            string again = string.IsNullOrWhiteSpace(rerunOutput)
+                ? string.Empty
+                : "\n\n--- the same command run again with the test runner forced to exit, so the errors print ---\n" +
+                  PlanTools.ShortenCheckOutput(FailureLocation.ProjectRelative(rerunOutput, projectRoot));
+            return failure + "The check never finished." + printed + again + "\n\n" + TestRunHint;
+        }
+
         return failure + "The check never finished. " + InfiniteLoopSentence + printed;
     }
 

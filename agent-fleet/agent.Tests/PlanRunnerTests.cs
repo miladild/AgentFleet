@@ -170,9 +170,9 @@ public sealed partial class PlanRunnerTests : PlanTestBase
 
     private PlanRecord ApprovedPlan(params PlanStepInput[] steps) => Store.Approve(NewPlan(steps).Id, autoRetries: 0)!;
 
-    private PlanRecord InterruptedWorkerPlan(out WorkerWorkspaceBaseline baseline)
+    private PlanRecord InterruptedWorkerPlan(out WorkerWorkspaceBaseline baseline, string verify = "dotnet build")
     {
-        PlanRecord plan = NewPlan(new PlanStepInput("recover worker work", "detail", ["a.cs"], "dotnet build", "standard", RetrySafe: true));
+        PlanRecord plan = NewPlan(new PlanStepInput("recover worker work", "detail", ["a.cs"], verify, "standard", RetrySafe: true));
         plan = Store.SelectMachine(plan.Id, 1, "worker-a", out string? selectionError)!;
         Assert.Null(selectionError);
         plan = Store.Approve(plan.Id, autoRetries: 0)!;

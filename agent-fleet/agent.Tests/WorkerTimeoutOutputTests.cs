@@ -53,6 +53,68 @@ public sealed partial class PlanRunnerTests
     }
 
     [Theory]
+    [InlineData("node --import tsx --test test/a.test.ts", "node --import tsx --test --test-force-exit --test-timeout=20000 test/a.test.ts")]
+    [InlineData("node --test", "node --test --test-force-exit --test-timeout=20000")]
+    [InlineData("node --test --test-name-pattern=x test/a.test.js", "node --test --test-force-exit --test-timeout=20000 --test-name-pattern=x test/a.test.js")]
+    [InlineData("node --test --test-force-exit test/a.test.js", null)]
+    [InlineData("node --test-name-pattern=x app.js", null)]
+    [InlineData("npm test", null)]
+    [InlineData("npm run typecheck && node --test test/a.test.js", null)]
+    [InlineData("node app.js | node --test", null)]
+    [InlineData("dotnet test", null)]
+    [InlineData("", null)]
+    [InlineData(null, null)]
+    public void A_node_test_command_gets_the_force_exit_flags_and_anything_else_is_left_alone(string? command, string? expected) =>
+        Assert.Equal(expected, PlanRunner.ForcedExitCommand(command));
+
+    [Fact]
+    public void A_killed_test_run_shows_the_errors_the_forced_exit_rerun_printed()
+    {
+        string failure = PlanRunner.TimedOutCheckFailure(TimeSpan.FromSeconds(120), "✖ create an alert (4 ms)\n",
+            null, "✖ create an alert (4 ms)\n  TypeError: fetch failed\n");
+
+        Assert.Contains("--- the same command run again with the test runner forced to exit, so the errors print ---\n", failure, StringComparison.Ordinal);
+        Assert.Contains("TypeError: fetch failed", failure, StringComparison.Ordinal);
+        Assert.EndsWith(TestRunHint, failure, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_killed_node_test_check_is_run_again_with_the_force_exit_flags_and_the_retry_sees_its_errors()
+    {
+        PlanRecord plan = InterruptedWorkerPlan(out _, verify: "node --test test/a.test.js");
+        var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], [])) { WorkerAnswers = true };
+        var agent = Agent("I will fix the test.");
+        var commands = new List<string>();
+        Exception timeout = new WorkerCommandTimeoutException("Operation has timed out.",
+            new Renci.SshNet.Common.SshOperationTimeoutException("Operation has timed out."), "✖ create an alert (4 ms)\n");
+
+        string Verify(string command)
+        {
+            commands.Add(command);
+            if (command == "node --test test/a.test.js" && commands.Count == 1) throw timeout;
+            if (command.Contains("--test-force-exit", StringComparison.Ordinal))
+                return "Exit code: 1\n--- stdout ---\n✖ create an alert (4 ms)\n  TypeError: fetch failed (ECONNREFUSED)\n";
+            return Pass(command);
+        }
+
+        await Runner(agent, Verify, workerWorkspaces: workspaces).RunPlanAsync(plan.Id, default);
+
+        string retry = string.Join('\n', agent.Calls.Skip(1).Select(call => call.Prompt));
+        Assert.Contains("node --test --test-force-exit --test-timeout=20000 test/a.test.js", commands);
+        Assert.Contains("TypeError: fetch failed (ECONNREFUSED)", retry, StringComparison.Ordinal);
+        Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+    }
+
+    [Fact]
+    public async Task A_killed_check_that_is_not_a_node_test_command_is_not_run_again()
+    {
+        (string retry, PlanRecord after) = await RunWithKilledCheck("✖ create a new alert\n");
+
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.DoesNotContain("run again with the test runner forced to exit", retry, StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData(null)]
     [InlineData("")]
     [InlineData("  \n")]
