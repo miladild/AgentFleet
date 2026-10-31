@@ -154,6 +154,46 @@ public sealed partial class PlanNoChangeTests
     }
 
     [Fact]
+    public async Task The_final_check_of_a_longer_plan_still_gets_a_round_for_a_file_a_shell_redirect_made()
+    {
+        const string artifact = "$null";
+        File.WriteAllText(Path.Combine(ProjectDirectory, "setup.json"), "");
+        File.WriteAllText(Path.Combine(ProjectDirectory, "a.txt"), "old a");
+        PlanRecord plan = Store.Approve(Store.Create("Two-step plan", "goal", ProjectDirectory, ["a"], ["q?"], ["r"], null, null,
+            [
+                StepNamed("setup", "setup.json"),
+                StepListing("validate", "a.txt")
+            ]).Id)!;
+        int validations = 0;
+        var agent = new FakeStepAgent((prompt, _, _) =>
+        {
+            if (prompt.Contains("(1 of 2)"))
+            {
+                File.WriteAllText(Path.Combine(ProjectDirectory, "setup.json"), "{}");
+                return Task.FromResult("Set it up.");
+            }
+
+            File.WriteAllText(Path.Combine(ProjectDirectory, "a.txt"), $"new {++validations}");
+            if (validations == 1)
+            {
+                WriteProjectFile(artifact);
+            }
+            else
+            {
+                File.Delete(Path.Combine(ProjectDirectory, artifact));
+            }
+
+            return Task.FromResult("Validated.");
+        });
+
+        await RepairRunner(agent, _ => Pass("check")).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+        Assert.Equal(3, agent.Calls.Count);
+        Assert.Equal(1, UnlistedRounds(plan.Id));
+    }
+
+    [Fact]
     public async Task The_tests_step_of_test_first_mode_gets_no_extra_round_for_a_file_it_did_not_name()
     {
         PlanRecord plan = OneStepPlan(new PlanStepInput("Write limits tests", "Reject zero", ["tests/LimitTests.cs"], "dotnet test", "standard",

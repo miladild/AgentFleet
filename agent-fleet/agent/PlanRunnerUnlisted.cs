@@ -23,16 +23,26 @@ internal sealed partial class PlanRunner
     /// </summary>
     private IReadOnlyList<string> UnlistedNewFiles(PlanRecord plan, PlanStep step, bool isFinalValidation)
     {
-        if (IsTestsStep(step) || (isFinalValidation && plan.Steps.Count > 1) || string.IsNullOrWhiteSpace(plan.WorkingDirectory))
+        if (IsTestsStep(step) || string.IsNullOrWhiteSpace(plan.WorkingDirectory))
         {
             return [];
         }
 
+        // The final check of a longer plan only validates, and running it may leave files of its own, so it is asked about nothing
+        // except a file no check or tool writes on purpose.
+        bool onlyShellArtifacts = isFinalValidation && plan.Steps.Count > 1;
         return StrayFiles(plan, step, int.MaxValue)
-            .Where(file => !RepairLadder.IsIncidentalFile(file) && !IsFleetOrDependencyPath(file))
+            .Where(file => !RepairLadder.IsIncidentalFile(file) && !IsFleetOrDependencyPath(file) && (!onlyShellArtifacts || IsShellRedirectArtifact(file)))
             .Select(file => file.Replace('\\', '/'))
             .ToArray();
     }
+
+    /// <summary>
+    /// A file a shell made out of a redirect aimed at a name that shell does not know: "> $null" typed into cmd or sh makes a file
+    /// called $null. No step wants it.
+    /// </summary>
+    private static bool IsShellRedirectArtifact(string relative) =>
+        relative.Replace('\\', '/').Split('/')[^1].Equals("$null", StringComparison.Ordinal);
 
     /// <summary>Whether the extra round for files the plan does not name already ran in this attempt.</summary>
     private bool UnlistedRoundGiven(PlanRecord plan, PlanStep step, int attempt) =>
