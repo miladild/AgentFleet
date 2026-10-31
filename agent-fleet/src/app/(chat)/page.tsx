@@ -448,9 +448,12 @@ export default function AgentFleetPage() {
       <ChatFeatures />
       <HelpPanel />
       <LogPanel />
-      <ConfigPanel />
-      <PlansPanel />
-      <ContextPanel />
+      {/* One row for the top buttons, so a button that grows (a badge, a longer label) pushes its neighbours instead of covering them. */}
+      <div className="absolute top-4 left-40 flex items-center gap-2">
+        <ConfigPanel />
+        <PlansPanel />
+        <ContextPanel />
+      </div>
       <FleetModeToggle />
       <PlanModeToggle />
       <StatusPanel />

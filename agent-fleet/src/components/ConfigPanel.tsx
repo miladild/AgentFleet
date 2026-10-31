@@ -818,7 +818,7 @@ export function ConfigPanel() {
         type="button"
         onClick={() => setOpen(true)}
         title="Machines, models, tools and routing"
-        className="absolute top-4 left-40 rounded-full px-4 py-2 text-sm font-medium bg-neutral-800 text-neutral-300 border border-neutral-700 hover:bg-neutral-700 transition-colors"
+        className="rounded-full px-4 py-2 text-sm font-medium bg-neutral-800 text-neutral-300 border border-neutral-700 hover:bg-neutral-700 transition-colors"
       >
         Config
       </button>

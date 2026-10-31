@@ -195,7 +195,7 @@ export function ContextPanel() {
           setOpen(true);
         }}
         title="The durable record of this chat: pinned decisions, handoffs, files, and what each agent was given"
-        className="absolute top-4 left-[21.25rem] rounded-full px-4 py-2 text-sm font-medium bg-neutral-800 text-neutral-300 border border-neutral-700 hover:bg-neutral-700 transition-colors"
+        className="rounded-full px-4 py-2 text-sm font-medium bg-neutral-800 text-neutral-300 border border-neutral-700 hover:bg-neutral-700 transition-colors"
       >
         Context
       </button>

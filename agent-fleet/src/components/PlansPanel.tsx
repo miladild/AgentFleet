@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { PlanCard } from "./PlanCard";
 import { planEvidenceClass, planEvidenceLabel, type PlanEvidence } from "./planEvidence";
+import { mergeNotifications, notificationBadge, rememberDismissed } from "./planNotifications";
 
 type PlanSummary = {
   id: string;
@@ -31,13 +32,17 @@ type PlanNotification = PlanSummary & {
 const NOTIFICATION_STORAGE_KEY = "agent-fleet.seen-plan-notifications.v1";
 const NOTIFICATION_MAX_AGE_MS = 36 * 60 * 60 * 1000;
 
-function readSeenNotifications(): Set<string> {
+function readSeenList(): string[] {
   try {
     const stored = JSON.parse(localStorage.getItem(NOTIFICATION_STORAGE_KEY) ?? "[]");
-    return new Set(Array.isArray(stored) ? stored.filter((value): value is string => typeof value === "string") : []);
+    return Array.isArray(stored) ? stored.filter((value): value is string => typeof value === "string") : [];
   } catch {
-    return new Set();
+    return [];
   }
+}
+
+function readSeenNotifications(): Set<string> {
+  return new Set(readSeenList());
 }
 
 const DOT: Record<string, string> = {
@@ -56,6 +61,24 @@ export function PlansPanel() {
   const [plans, setPlans] = useState<PlanSummary[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [notifications, setNotifications] = useState<PlanNotification[]>([]);
+  const [bellOpen, setBellOpen] = useState(false);
+  const bellRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!bellOpen) return;
+    const closeOutside = (event: MouseEvent) => {
+      if (bellRef.current && !bellRef.current.contains(event.target as Node)) setBellOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setBellOpen(false);
+    };
+    document.addEventListener("mousedown", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [bellOpen]);
 
   useEffect(() => {
     let stopped = false;
@@ -78,10 +101,7 @@ export function PlansPanel() {
           })));
           const recent = [...results, ...parked]
             .filter((plan) => !seen.has(plan.notificationKey));
-          setNotifications((current) => {
-            const existing = new Set(current.map((notice) => notice.notificationKey));
-            return [...current, ...recent.filter((notice) => !existing.has(notice.notificationKey))];
-          });
+          setNotifications((current) => mergeNotifications(current, recent));
         })
         .catch(() => {});
 
@@ -111,20 +131,22 @@ export function PlansPanel() {
 
   const waiting = plans.filter((p) => p.status === "awaiting-approval").length;
 
-  const dismissNotification = (notice: PlanNotification) => {
+  const dismissNotifications = (dismissed: PlanNotification[]) => {
     try {
-      const seen = readSeenNotifications();
-      seen.add(notice.notificationKey);
-      localStorage.setItem(NOTIFICATION_STORAGE_KEY, JSON.stringify(Array.from(seen).slice(-100)));
+      localStorage.setItem(NOTIFICATION_STORAGE_KEY, JSON.stringify(rememberDismissed(readSeenList(), dismissed.map((notice) => notice.notificationKey))));
     } catch {
-      // The notice can still be dismissed for this page even if browser storage is disabled.
+      // The notices can still be dismissed for this page even if browser storage is disabled.
     }
-    setNotifications((current) => current.filter((item) => item.notificationKey !== notice.notificationKey));
+    const keys = new Set(dismissed.map((notice) => notice.notificationKey));
+    setNotifications((current) => current.filter((item) => !keys.has(item.notificationKey)));
   };
+
+  const dismissNotification = (notice: PlanNotification) => dismissNotifications([notice]);
+  const badge = notificationBadge(notifications.length);
 
   return (
     <>
-      <div className="absolute top-4 left-[15.5rem] flex items-center gap-2">
+      <div className="flex items-center gap-2">
         <button
           type="button"
           onClick={() => setOpen(true)}
@@ -147,14 +169,45 @@ export function PlansPanel() {
         >
           ◉ Live
         </a>
-      </div>
+        <div ref={bellRef} className="relative">
+          <button
+            type="button"
+            onClick={() => setBellOpen((current) => !current)}
+            aria-label={badge ? `Notifications, ${notifications.length} new` : "Notifications"}
+            aria-expanded={bellOpen}
+            title="Plan results and parked steps you have not looked at yet"
+            className="relative rounded-full w-9 h-9 flex items-center justify-center bg-neutral-800 text-neutral-300 border border-neutral-700 hover:bg-neutral-700 transition-colors"
+          >
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+              <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+            </svg>
+            {badge && (
+              <span className="absolute -top-1 -right-1 min-w-4 rounded-full bg-amber-500 text-neutral-950 text-[10px] font-semibold leading-4 px-1 text-center">
+                {badge}
+              </span>
+            )}
+          </button>
 
-      {notifications.length > 0 && (
-        <aside
-          aria-live="polite"
-          aria-label="Recent plan results"
-          className="fixed top-16 left-4 z-[1301] w-[min(26rem,calc(100vw-2rem))] space-y-2"
-        >
+          {bellOpen && (
+            <aside
+              aria-live="polite"
+              aria-label="Recent plan results"
+              className="absolute top-full left-0 mt-2 z-[1301] w-[min(26rem,calc(100vw-2rem))] max-h-[70vh] overflow-y-auto rounded-lg border border-neutral-700 bg-neutral-900 p-3 shadow-xl space-y-2"
+            >
+              <div className="flex items-center justify-between px-1">
+                <p className="text-xs font-semibold uppercase tracking-wide text-neutral-400">Notifications</p>
+                {notifications.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => dismissNotifications(notifications)}
+                    className="text-xs text-neutral-300 hover:text-neutral-100 underline underline-offset-2"
+                  >
+                    Clear all
+                  </button>
+                )}
+              </div>
+              {notifications.length === 0 && <p className="px-1 py-2 text-sm text-neutral-500">Nothing new.</p>}
           {notifications.map((notice) => (
             <div key={notice.notificationKey} className="rounded-lg border border-neutral-700 bg-neutral-900 p-4 text-neutral-100 shadow-xl">
               <div className="flex items-start justify-between gap-3">
@@ -187,6 +240,7 @@ export function PlansPanel() {
                 type="button"
                 onClick={() => {
                   dismissNotification(notice);
+                  setBellOpen(false);
                   setSelected(notice.id);
                   setOpen(true);
                 }}
@@ -196,8 +250,10 @@ export function PlansPanel() {
               </button>
             </div>
           ))}
-        </aside>
-      )}
+            </aside>
+          )}
+        </div>
+      </div>
 
       {open && (
         <div
