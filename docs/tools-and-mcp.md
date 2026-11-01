@@ -136,6 +136,16 @@ In `fleet.config.json`:
 }
 ```
 
+### Example: check whether a model fits a machine
+
+`fleet.config.example.json` ships a `model_fit` tool that wraps [llmfit](https://github.com/AlexsJones/llmfit)
+(`uv tool install llmfit`). The model passes a model id from llmfit's catalog, a context length, and, to score a
+machine other than the one the backend runs on, that machine's graphics memory, RAM and core count
+(`16G`, `64G`, `32`). llmfit answers with the memory the model needs and an estimated speed for running on the GPU, with
+part on the CPU, and on the CPU alone. These are estimates from a memory-bandwidth formula, not measurements; the Model
+Lab's fit probe measures the real split on a node. If `llmfit` is not on the backend's PATH, put its full path at the
+start of the command. The tool is read-only, so it stays available while a plan waits for approval.
+
 ## MCP servers: add tools without writing code
 
 [MCP](https://modelcontextprotocol.io) (Model Context Protocol) is a standard way for a program to offer tools to an AI.

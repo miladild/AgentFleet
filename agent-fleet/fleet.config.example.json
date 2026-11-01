@@ -74,6 +74,21 @@
       "timeoutSeconds": 300,
       "readOnly": false,
       "enabled": true
+    },
+    "model_fit": {
+      "description": "Estimates whether a model fits a machine and how fast it would run (llmfit plan). Pass the machine's graphics memory, RAM and CPU cores, and a model id from the llmfit catalog; leave the machine out to score this host. Needs llmfit installed (https://github.com/AlexsJones/llmfit); give the full path to llmfit in the command if it is not on the backend's PATH.",
+      "command": "llmfit --memory={vram} --ram={ram} --cpu-cores={cores} plan {model} --context={context} --quant={quant} --json",
+      "parameters": [
+        { "name": "model", "description": "Model id from the llmfit catalog, for example Qwen/Qwen3-Coder-30B-A3B-Instruct", "required": true },
+        { "name": "vram", "description": "The machine's graphics memory with a unit, for example 16G", "required": false },
+        { "name": "ram", "description": "The machine's system memory with a unit, for example 64G", "required": false },
+        { "name": "cores", "description": "The machine's CPU core count, for example 16", "required": false },
+        { "name": "context", "description": "Context length in tokens to plan for, for example 16384", "required": true },
+        { "name": "quant", "description": "Quantization, for example Q4_K_M", "required": false }
+      ],
+      "timeoutSeconds": 60,
+      "readOnly": true,
+      "enabled": true
     }
   },
   "sandbox": {

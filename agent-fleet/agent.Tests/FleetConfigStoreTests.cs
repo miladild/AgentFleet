@@ -103,6 +103,39 @@ public sealed class FleetConfigStoreTests : IDisposable
         Assert.Contains("microsoft-learn", config.McpServerMap.Keys);
     }
 
+    [Fact]
+    public void The_example_config_has_a_model_fit_tool_that_asks_llmfit_about_one_machine_and_one_model()
+    {
+        string? directory = AppContext.BaseDirectory;
+        while (directory is not null && !File.Exists(Path.Combine(directory, "fleet.config.example.json")))
+        {
+            directory = Path.GetDirectoryName(directory);
+        }
+
+        Assert.NotNull(directory);
+        File.Copy(Path.Combine(directory, "fleet.config.example.json"), ConfigPath);
+
+        FleetCustomToolConfig tool = Open().Current.CustomToolMap["model_fit"];
+
+        Assert.True(tool.ReadOnly);
+        var all = new Dictionary<string, string?>
+        {
+            ["vram"] = "16G", ["ram"] = "64G", ["cores"] = "32", ["model"] = "Qwen/Qwen3-Coder-30B-A3B-Instruct", ["context"] = "16384", ["quant"] = "Q4_K_M"
+        };
+        (string program, IReadOnlyList<string> arguments, _, string? error) = CustomToolRunner.Prepare(tool, all);
+        Assert.Null(error);
+        Assert.Equal("llmfit", program);
+        Assert.Equal(["--memory=16G", "--ram=64G", "--cpu-cores=32", "plan", "Qwen/Qwen3-Coder-30B-A3B-Instruct", "--context=16384", "--quant=Q4_K_M", "--json"], arguments);
+
+        // Only the model and the context are required (llmfit plan refuses to run without a context): a machine whose numbers are
+        // unknown is scored as the host, and the optional options drop out.
+        (_, IReadOnlyList<string> required, _, string? requiredError) = CustomToolRunner.Prepare(tool,
+            new Dictionary<string, string?> { ["model"] = "Qwen/Qwen3-Coder-30B-A3B-Instruct", ["context"] = "8192" });
+        Assert.Null(requiredError);
+        Assert.Equal(["plan", "Qwen/Qwen3-Coder-30B-A3B-Instruct", "--context=8192", "--json"], required);
+        Assert.StartsWith("Error: context is required", CustomToolRunner.Prepare(tool, new Dictionary<string, string?> { ["model"] = "x" }).Error);
+    }
+
     [Theory]
     [InlineData("http://192.0.2.20:11434", "http://192.0.2.20:11434/v1")]
     [InlineData("http://host:11434/", "http://host:11434/v1")]
