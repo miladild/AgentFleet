@@ -620,8 +620,10 @@ int planRoundsPerRung = int.TryParse(builder.Configuration["FLEET_PLAN_ROUNDS_PE
     ? roundsPerRung
     : RepairLadder.DefaultRoundsPerRung;
 
+// The switches of the repair-loop hardening (FLEET_HARNESS_*): each part is on unless a setting turns it off, and a run's log names them.
+var harnessOptions = HarnessOptions.FromSettings(name => builder.Configuration[name]);
 var invoker = new FleetFunctionInvoker(contextJournal, planModeService, planStore, readOnlyTools, planTools, toolLoopLogger, planStepToolRounds,
-    chatApprovals, () => fleetConfigStore.Current.ChatApprovalSettings.Mode!);
+    chatApprovals, () => fleetConfigStore.Current.ChatApprovalSettings.Mode!, harnessOptions);
 IChatClient agentClient = FleetHarness.BuildAgentClient(fleetClient, toolRegistry, contextJournal, planModeService, invoker, loggerFactory,
     string.Equals(builder.Configuration["FLEET_CHAT_RECOVERY_NOTE"], "on", StringComparison.OrdinalIgnoreCase));
 
@@ -747,7 +749,8 @@ var planRunner = new PlanRunner(
     fitProbes: fitProbeService,
     failFirst: failFirstMode,
     testFirst: testFirstMode, testWriterNode: () => fleetConfigStore.Current.Plan?.TestWriterNode,
-    editCheck: editCheckSettings);
+    editCheck: editCheckSettings,
+    harness: harnessOptions);
 planStore.Approved += planRunner.Enqueue;
 app.Lifetime.ApplicationStarted.Register(() => planRunner.Start(app.Lifetime.ApplicationStopping));
 

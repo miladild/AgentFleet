@@ -90,7 +90,12 @@ internal sealed class NodeTelemetryChatClient(IChatClient inner, string? nodeNam
     {
         IReadOnlyList<ChatMessage> list = messages as IReadOnlyList<ChatMessage> ?? messages.ToList();
         SetTags(list, options);
-        try { return await base.GetResponseAsync(list, options, cancellationToken); }
+        try
+        {
+            ChatResponse response = await base.GetResponseAsync(list, options, cancellationToken);
+            RecordTiming(options, OllamaTimings.From(response.RawRepresentation));
+            return response;
+        }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             SetFailure(exception);
@@ -111,6 +116,7 @@ internal sealed class NodeTelemetryChatClient(IChatClient inner, string? nodeNam
             throw;
         }
 
+        OllamaCallTiming? timing = null;
         await using (updates)
         {
             while (true)
@@ -122,9 +128,24 @@ internal sealed class NodeTelemetryChatClient(IChatClient inner, string? nodeNam
                     SetFailure(exception);
                     throw;
                 }
-                if (!hasUpdate) yield break;
+                if (!hasUpdate)
+                {
+                    RecordTiming(options, timing);
+                    yield break;
+                }
+
+                timing = OllamaTimings.From(updates.Current.RawRepresentation) ?? timing;
                 yield return updates.Current;
             }
+        }
+    }
+
+    // A plan step's round adds up what Ollama reported for each of its calls (see StepToolActivity.DescribeModelCalls).
+    private static void RecordTiming(ChatOptions? options, OllamaCallTiming? timing)
+    {
+        if (timing is { } reported && options?.AdditionalProperties?.TryGetValue(StepToolActivity.Key, out object? activity) == true && activity is StepToolActivity counter)
+        {
+            counter.RecordModelCall(reported);
         }
     }
 

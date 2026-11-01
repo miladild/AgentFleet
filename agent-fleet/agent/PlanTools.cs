@@ -1239,6 +1239,30 @@ internal sealed partial class PlanTools
     }
 
     /// <summary>
+    /// The project folder and the files named by the plan step a conversation carries out (the running steps of the plan its prompt
+    /// names; every step when none is marked running), for the file guard. Null when the conversation carries no plan marker.
+    /// </summary>
+    public (string? WorkingDirectory, IReadOnlyList<string> DeclaredPaths)? RunningStepScope(IEnumerable<Microsoft.Extensions.AI.ChatMessage> messages)
+    {
+        foreach (Microsoft.Extensions.AI.ChatMessage message in messages)
+        {
+            if (message.Role == Microsoft.Extensions.AI.ChatRole.User && FleetPlanStore.FindMarkerId(message.Text) is { } id)
+            {
+                if (_store.Get(id) is not { } plan)
+                {
+                    return null;
+                }
+
+                PlanStep[] running = plan.Steps.Where(step => step.Status == StepStatus.Running).ToArray();
+                IEnumerable<PlanStep> scope = running.Length > 0 ? running : plan.Steps;
+                return (plan.WorkingDirectory, scope.SelectMany(step => FleetPlanContext.DeclaredPaths(plan, step)).Distinct().ToArray());
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// A long check output as the next attempt sees it. Only the end fits, but the end of a test run is the detail of
     /// its last failure: with four holiday tests failing, the retry was shown one of them and fixed only that. So the
     /// lines that name failures and totals, from the whole output, come before the end.

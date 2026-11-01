@@ -19,7 +19,8 @@ internal sealed class FleetFunctionInvoker(
     ILogger toolLoopLogger,
     int planStepToolRounds,
     ChatApprovals? chatApprovals = null,
-    Func<string>? chatApprovalsOn = null)
+    Func<string>? chatApprovalsOn = null,
+    HarnessOptions? harness = null)
 {
     internal static readonly IReadOnlySet<string> RiskyTools = new HashSet<string>(StringComparer.Ordinal)
     {
@@ -61,6 +62,20 @@ internal sealed class FleetFunctionInvoker(
         }
     }
 
+    private static readonly HarnessOptions DefaultHarness = new();
+
+    private string? GuardDenial(FunctionInvocationContext context, string toolName, string? command)
+    {
+        if (toolName == "run_command")
+        {
+            return FileGuard.CommandDenial(command);
+        }
+
+        // A conversation with no plan marker still gets the protection: nothing it could name makes a protected file writable.
+        (string? WorkingDirectory, IReadOnlyList<string> DeclaredPaths)? scope = planTools.RunningStepScope(context.Messages);
+        return FileGuard.FileToolDenial(toolName, context.Arguments, scope?.WorkingDirectory, scope?.DeclaredPaths ?? []);
+    }
+
     private async ValueTask<(object? Result, string Outcome)> InvokeCoreAsync(FunctionInvocationContext context, CancellationToken cancellationToken)
     {
         string toolName = context.Function.Name;
@@ -83,6 +98,14 @@ internal sealed class FleetFunctionInvoker(
                 context.Terminate = true;
                 RecordToolCall(context, toolName, refusal, isError: true);
                 return (refusal, "refused");
+            }
+
+            // A denial from the file guard goes back as the tool's result and the round goes on (the model can do something else).
+            if ((harness ?? DefaultHarness).EnableFileGuard && (FleetRoutingChatClient.RunnerRole(context.Options) is null or PlanRunnerToolPolicy.TestWriterRole) &&
+                GuardDenial(context, toolName, command) is { } denial)
+            {
+                RecordToolCall(context, toolName, denial, isError: true);
+                return (denial, "refused");
             }
         }
         if (toolName != PlanGate.BlockedToolName && !fromRunner)

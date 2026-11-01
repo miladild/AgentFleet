@@ -38,6 +38,8 @@ public sealed class PlanRunLogTests : PlanTestBase
         Assert.Equal(
             [
                 RunEventKind.RunStarted,
+                // The options the run used are written right after it starts.
+                "harness-options",
                 RunEventKind.AttemptStarted, RunEventKind.AttemptEnded, RunEventKind.RoundClassified, RunEventKind.CheckPassed, RunEventKind.StepDone,
                 // The last step's check is the runner's final validation, and the log says so.
                 RunEventKind.AttemptStarted, RunEventKind.AttemptEnded, RunEventKind.FinalValidationStarted,
@@ -45,7 +47,7 @@ public sealed class PlanRunLogTests : PlanTestBase
                 RunEventKind.PlanDone
             ],
             events.Select(e => e.Kind));
-        Assert.Equal([null, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, null], events.Select(e => e.StepId));
+        Assert.Equal([null, null, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, null], events.Select(e => e.StepId));
         Assert.All(events.Where(e => e.Kind == RunEventKind.AttemptEnded), e => Assert.Equal("worker1", e.Node));
         Assert.Contains("Wrote it.", events.First(e => e.Kind == RunEventKind.AttemptEnded).Detail);
     }

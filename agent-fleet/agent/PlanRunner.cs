@@ -73,6 +73,38 @@ internal sealed class StepToolActivity
 
     public bool EditToolCalled { get; private set; }
 
+    /// <summary>How many model calls the round made, and the sum of what Ollama reported for them (see OllamaTimings).</summary>
+    public int ModelCalls { get; private set; }
+
+    private OllamaCallTiming _total;
+
+    public void RecordModelCall(OllamaCallTiming timing)
+    {
+        lock (this)
+        {
+            ModelCalls++;
+            _total = new OllamaCallTiming(_total.PromptTokens + timing.PromptTokens, _total.PromptEvalSeconds + timing.PromptEvalSeconds,
+                _total.EvalTokens + timing.EvalTokens, _total.EvalSeconds + timing.EvalSeconds, _total.LoadSeconds + timing.LoadSeconds, _total.TotalSeconds + timing.TotalSeconds);
+        }
+    }
+
+    /// <summary>One sentence for the run log: the calls, the prompt tokens and the time to read them, the answer tokens and the time to write them. Null when no call reported timings.</summary>
+    public string? DescribeModelCalls()
+    {
+        lock (this)
+        {
+            if (ModelCalls == 0)
+            {
+                return null;
+            }
+
+            static string Rate(long tokens, double seconds) => seconds > 0 ? $"{tokens / seconds:0.0} tokens/s" : "no time reported";
+            System.Globalization.CultureInfo c = System.Globalization.CultureInfo.InvariantCulture;
+            return string.Create(c, $"{ModelCalls} model call{(ModelCalls == 1 ? string.Empty : "s")}: prompt {_total.PromptTokens} tokens in {_total.PromptEvalSeconds:0.0} s ({Rate(_total.PromptTokens, _total.PromptEvalSeconds)}), " +
+                $"answer {_total.EvalTokens} tokens in {_total.EvalSeconds:0.0} s ({Rate(_total.EvalTokens, _total.EvalSeconds)}), model load {_total.LoadSeconds:0.0} s, total {_total.TotalSeconds:0.0} s.");
+        }
+    }
+
     /// <summary>Told of each tool call as the model makes it, in order. The runner uses it to see that a model call is still working.</summary>
     public Action<string>? Observed { get; set; }
 
@@ -330,6 +362,7 @@ internal sealed partial class PlanRunner
     private readonly ConcurrentDictionary<string, bool> _testFirstSnapshotAttempts = new(StringComparer.Ordinal);
     private readonly Func<string?>? _testWriterNode;
     private readonly EditCheckSettings _editCheck;
+    private readonly HarnessOptions _harness;
 
     public PlanRunner(
         FleetPlanStore store,
@@ -355,7 +388,8 @@ internal sealed partial class PlanRunner
         FailFirstMode failFirst = FailFirstMode.Off,
         TestFirstMode testFirst = TestFirstMode.Off,
         Func<string?>? testWriterNode = null,
-        EditCheckSettings? editCheck = null)
+        EditCheckSettings? editCheck = null,
+        HarnessOptions? harness = null)
     {
         _notifier = notifier;
         _stepGuidance = stepGuidance;
@@ -364,6 +398,7 @@ internal sealed partial class PlanRunner
         _testFirstMode = testFirst;
         _testWriterNode = testWriterNode;
         _editCheck = editCheck ?? new EditCheckSettings();
+        _harness = harness ?? new HarnessOptions();
         _roundsPerRung = Math.Max(1, roundsPerRung);
         _stepClock = stepClock is { } clock && clock > TimeSpan.Zero ? clock : DefaultStepClock;
         _transientDelay = transientDelay ?? DefaultTransientDelay;
@@ -537,6 +572,7 @@ internal sealed partial class PlanRunner
                 detail: continuing
                     ? $"Continuing after {plan.Steps.Count(step => step.Status == StepStatus.Done)} finished step(s)."
                     : $"{plan.Steps.Count} step(s), working in {plan.WorkingDirectory ?? "the default folder"}. Run deadline: {plan.RunDeadlineUtc:O}.");
+            LogHarnessOptions(planId);
 
             // The plan lives in one durable context; every step and handoff is written into it.
             if (_recorder?.ResolveContext(_store.Get(planId) ?? plan) is { } contextId)
@@ -3300,6 +3336,12 @@ internal sealed partial class PlanRunner
             _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.AttemptEnded, tier, modelMachine ?? ViaNode(summary) ?? _journal?.ActualNode,
                 $"Model finished after {(int)stopwatch.Elapsed.TotalSeconds} s: {Summarize(summary)}{(editCheckNote is null ? string.Empty : " " + editCheckNote)}",
                 modelNode: modelMachine ?? ViaNode(summary), workspaceNode: machine, rung: conversation.Rung, round: conversation.Round);
+            if (activity.DescribeModelCalls() is { } modelTimings)
+            {
+                _store.AddEvent(plan.Id, step.Id, attempt, ModelTimingsKind, tier, modelMachine ?? ViaNode(summary) ?? _journal?.ActualNode, modelTimings,
+                    modelNode: modelMachine ?? ViaNode(summary), workspaceNode: machine, rung: conversation.Rung, round: conversation.Round);
+            }
+
             result = new ModelAttemptResult(step.Id, summary, null, ShouldVerify: true, Workspace: worker, Machine: machine,
                 ModelNode: modelMachine ?? ViaNode(summary) ?? _journal?.ActualNode, ToolCalls: reply.ToolCalls,
                 EditToolCalled: reply.EditToolCalled, LoopGuardNotes: reply.LoopGuardNotes, WorkBefore: work,
