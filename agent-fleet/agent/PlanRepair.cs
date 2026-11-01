@@ -235,6 +235,7 @@ internal static class RepairMessages
     /// <param name="changedFiles">The files the last round changed; null when that could not be told.</param>
     /// <param name="handover">Said first when a more capable model has just taken over the conversation.</param>
     /// <param name="rollback">Said instead of the comparison with the round before when that round was undone.</param>
+    /// <param name="packet">The context packet (see ContextPacket): said first, with the check's output in its last section and the undone round in its note.</param>
     public static string Build(
         PlanRecord plan,
         PlanStep step,
@@ -245,7 +246,8 @@ internal static class RepairMessages
         bool sameOutput,
         IReadOnlyList<string>? changedFiles,
         string? handover = null,
-        RollbackNote? rollback = null)
+        RollbackNote? rollback = null,
+        string? packet = null)
     {
         var text = new StringBuilder();
         if (!string.IsNullOrWhiteSpace(handover))
@@ -254,10 +256,22 @@ internal static class RepairMessages
             text.AppendLine();
         }
 
-        text.AppendLine(step.Verify is null
-            ? $"Round {round}: the step is not finished yet. What went wrong:"
-            : $"Round {round}: the approved check did not pass yet. The fleet runs it for you with `{step.Verify}`. What it printed:");
-        text.AppendLine(string.IsNullOrWhiteSpace(failure) ? "(no output)" : failure);
+        if (!string.IsNullOrWhiteSpace(packet))
+        {
+            text.AppendLine(packet.TrimEnd());
+            text.AppendLine();
+            text.AppendLine(step.Verify is null
+                ? $"Round {round}: the step is not finished yet. What went wrong is in the last section above."
+                : $"Round {round}: the approved check did not pass yet. The fleet runs it for you with `{step.Verify}`. What it printed is in the last section above.");
+        }
+        else
+        {
+            text.AppendLine(step.Verify is null
+                ? $"Round {round}: the step is not finished yet. What went wrong:"
+                : $"Round {round}: the approved check did not pass yet. The fleet runs it for you with `{step.Verify}`. What it printed:");
+            text.AppendLine(string.IsNullOrWhiteSpace(failure) ? "(no output)" : failure);
+        }
+
         if (FailureLocation.Describe(failure, plan, step) is { } where)
         {
             text.AppendLine();
@@ -390,6 +404,31 @@ internal static class RepairMessages
 
         text.AppendLine("Find the root cause first, then fix it. Do not repeat an approach that already failed: read the failing test or check and the code it exercises before you edit anything.");
         return text.ToString();
+    }
+
+    /// <summary>
+    /// One short line per earlier round of the step, oldest first, for the packet's list of what was tried: the files it
+    /// changed, what the check then failed on, and whether the runner undid it. Empty when no round has run.
+    /// </summary>
+    public static IReadOnlyList<string> TriedLines(IReadOnlyList<PlanRunEvent> stepEvents)
+    {
+        PlanRunEvent[] all = stepEvents.Where(RepairLadder.IsVerdictRound).ToArray();
+        var lines = new List<string>();
+        for (int index = 0; index < all.Length; index++)
+        {
+            PlanRunEvent round = all[index];
+            string files = round.ChangedFiles is { Count: > 0 }
+                ? $"changed {List(round.ChangedFiles)}"
+                : round.FilesChanged is > 0 ? $"changed {round.FilesChanged} file(s)" : "changed no file";
+            IReadOnlyList<string> names = FailingNames(round.FailureSignature);
+            string result = names.Count > 0 ? $"the check then failed on {List(names)}" : "the check then failed";
+            bool undone = stepEvents.Any(runEvent => runEvent.Kind == RunEventKind.RoundRolledBack &&
+                string.Equals(runEvent.FailureClass, "RolledBack", StringComparison.Ordinal) &&
+                runEvent.Attempt == round.Attempt && runEvent.Rung == round.Rung && runEvent.Round == round.Round);
+            lines.Add($"round {index + 1} {files}; {result}{(undone ? "; it was undone" : string.Empty)}");
+        }
+
+        return lines;
     }
 
     // Three rounds with the same failures, no round of the conversation having touched a test file and at least two having changed something.

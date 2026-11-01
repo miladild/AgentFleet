@@ -344,6 +344,8 @@ internal sealed partial class PlanRunner
     private readonly ConcurrentDictionary<string, Dictionary<int, string>> _lastFailures = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string[]> _filesToCreate = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, HashSet<string>> _filesAtStart = new(StringComparer.Ordinal);
+    // The text of the files a step lists, as they were when it first started: the repair packet says what changed since.
+    private readonly ConcurrentDictionary<string, IReadOnlyDictionary<string, string>> _contentAtStart = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, PlanTools.WorkSnapshot> _failFirstSnapshots = new(StringComparer.Ordinal);
     private readonly Channel<string> _queue = Channel.CreateUnbounded<string>();
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _active = new(StringComparer.Ordinal);
@@ -1097,7 +1099,7 @@ internal sealed partial class PlanRunner
                 }
                 else if (RepairMessages.Brief(StepEventsSinceRetry(plan.Id, step.Id)) is { Length: > 0 } earlierRounds)
                 {
-                    brief = earlierRounds;
+                    brief = ContextPacketFor(plan, step, lastFailure, rollback) is { } packet ? packet + "\n" + earlierRounds : earlierRounds;
                 }
 
                 handover = null;
@@ -1885,7 +1887,29 @@ internal sealed partial class PlanRunner
             : PlanFailure.FailureSignature(failure).Items;
         IReadOnlyList<string> previous = last is null ? [] : RepairMessages.FailingNames(last.PreviousSignature);
         return RepairMessages.Build(plan, step, failure ?? string.Empty, round, previous, current, last?.SameAsPrevious ?? false,
-            last is { FilesKnown: true } ? last.ChangedFiles : null, handover, rollback);
+            last is { FilesKnown: true } ? last.ChangedFiles : null, handover, rollback, ContextPacketFor(plan, step, failure, rollback));
+    }
+
+    // The packet for a repair round (null when it is switched off, or the project folder or the check's output is not there to read).
+    private string? ContextPacketFor(PlanRecord plan, PlanStep step, string? failure, RollbackNote? rollback)
+    {
+        if (!_harness.EnableContextPacket || string.IsNullOrWhiteSpace(failure) || string.IsNullOrWhiteSpace(plan.WorkingDirectory))
+        {
+            return null;
+        }
+
+        string key = $"{plan.Id}:{step.Id}";
+        try
+        {
+            return RepairPacket.Build(plan, step, failure, _filesAtStart.GetValueOrDefault(key) ?? [],
+                _contentAtStart.GetValueOrDefault(key) ?? new Dictionary<string, string>(), _harness.EnableRevertNotes ? rollback : null,
+                RepairMessages.TriedLines(StepEventsSinceRetry(plan.Id, step.Id)), _harness.MaxPacketTokens);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(exception, "Plan {PlanId} step {StepId}: the repair packet could not be read; the round goes on without it.", plan.Id, step.Id);
+            return null;
+        }
     }
 
     /// <summary>The best state the step's project has been in, as the approved check saw it, and the files as they were then.</summary>
@@ -3483,6 +3507,11 @@ internal sealed partial class PlanRunner
     private void SnapshotFilesToCreate(PlanRecord plan, PlanStep step)
     {
         _filesAtStart.TryAdd($"{plan.Id}:{step.Id}", FleetPlanContext.SnapshotFiles(plan.WorkingDirectory));
+        if (_harness.EnableContextPacket)
+        {
+            _contentAtStart.TryAdd($"{plan.Id}:{step.Id}", RepairPacket.ReadStepFiles(plan, step));
+        }
+
         SnapshotRequiredFiles(plan, step);
     }
 

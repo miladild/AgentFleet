@@ -145,6 +145,31 @@ internal static partial class FailureLocation
         return Compose(entries, shown);
     }
 
+    /// <summary>
+    /// The project files a check's stack frames name, with the line, in the order the output gives them (each file and line once, at most
+    /// MaxFrames * 3): the packet shows those test files whole and marks these lines. Paths are relative to the project, with "/".
+    /// </summary>
+    public static IReadOnlyList<(string Path, int Line)> ProjectFrames(string? output, string? projectRoot)
+    {
+        if (string.IsNullOrWhiteSpace(output) || string.IsNullOrWhiteSpace(projectRoot) || !Directory.Exists(projectRoot))
+        {
+            return [];
+        }
+
+        string root = Path.GetFullPath(projectRoot);
+        string frames = string.Join('\n', output.Split('\n').Where(line => !line.TrimStart().StartsWith("test at ", StringComparison.Ordinal)));
+        var found = new List<(string Path, int Line)>();
+        foreach ((string path, int line) in Frames(frames))
+        {
+            if (!IsDependency(path) && found.Count < MaxFrames * 3 && Read(root, path, line) is { } frame && !found.Contains((frame.Path, frame.Line)))
+            {
+                found.Add((frame.Path, frame.Line));
+            }
+        }
+
+        return found;
+    }
+
     /// <summary>One failing location. OwnPath is the test file when the step being worked on wrote it, otherwise null.</summary>
     private sealed record Entry(string Text, bool IsTest, string? OwnPath);
 

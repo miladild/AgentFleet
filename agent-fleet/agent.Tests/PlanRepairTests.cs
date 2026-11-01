@@ -49,10 +49,10 @@ public sealed partial class PlanRunnerTests
         FleetHealthMonitor? health = null, int roundsPerRung = RepairLadder.DefaultRoundsPerRung,
         Func<DateTimeOffset>? utcNow = null, TimeSpan? stepClock = null, TimeSpan? attemptTimeout = null, IPlanNotifier? notifier = null,
         Func<int, TimeSpan>? transientDelay = null, Func<TimeSpan, CancellationToken, Task>? delayAsync = null,
-        FleetModeService? modeService = null) =>
+        FleetModeService? modeService = null, HarnessOptions? harness = null) =>
         new(Store, RepairTools(verify), agent, NullLogger.Instance, attemptTimeout: attemptTimeout, fleetOptions: options, healthMonitor: health,
             transientDelay: transientDelay ?? (_ => TimeSpan.Zero), delayAsync: delayAsync ?? ((_, _) => Task.CompletedTask), utcNow: utcNow,
-            roundsPerRung: roundsPerRung, stepClock: stepClock, notifier: notifier, modeService: modeService);
+            roundsPerRung: roundsPerRung, stepClock: stepClock, notifier: notifier, modeService: modeService, harness: harness);
 
     private FleetModeService ModeService(FleetMode mode)
     {
@@ -119,6 +119,46 @@ public sealed partial class PlanRunnerTests
         Assert.All(rounds, runEvent => Assert.Equal(1, runEvent.Rung));
         Assert.Equal(["a.cs"], rounds[0].ChangedFiles);
         Assert.Equal("Passed", rounds[1].FailureClass);
+    }
+
+    private async Task<string> SecondRoundMessage(HarnessOptions? harness)
+    {
+        PlanRecord plan = RepairPlan(machine: null, PlanRecoveryScope.WorkerOnly);
+        int calls = 0;
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            File.WriteAllText(SourceFile, ++calls == 1 ? "first try" : "fixed");
+            return Task.FromResult("Worked on it.");
+        });
+
+        await RepairRunner(agent, _ => File.ReadAllText(SourceFile).Contains("fixed", StringComparison.Ordinal)
+            ? Pass("check")
+            : FailWith("widget::renders", "widget::clicks"), harness: harness).RunPlanAsync(plan.Id, default);
+
+        return Assert.Single(agent.Sessions).Messages[1].Text;
+    }
+
+    [Fact]
+    public async Task A_repair_round_starts_with_the_packet_and_keeps_the_checks_output_whole()
+    {
+        string message = await SecondRoundMessage(null);
+
+        Assert.StartsWith("STEP", message, StringComparison.Ordinal);
+        Assert.Contains("FILES YOU MAY WRITE", message, StringComparison.Ordinal);
+        Assert.Contains("ALREADY TRIED", message, StringComparison.Ordinal);
+        Assert.Contains("CHECK OUTPUT (as printed):", message, StringComparison.Ordinal);
+        Assert.Contains("FAILED widget::renders", message, StringComparison.Ordinal);
+        Assert.Contains("Round 2: the approved check did not pass yet", message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task With_the_packet_switched_off_the_repair_message_is_what_it_was()
+    {
+        string message = await SecondRoundMessage(new HarnessOptions(EnableContextPacket: false));
+
+        Assert.StartsWith("Round 2:", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("FILES YOU MAY WRITE", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("CHECK OUTPUT", message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -789,6 +829,7 @@ public sealed partial class PlanRunnerTests
         string message = Assert.Single(agent.Sessions).Messages[2].Text;
         Assert.Contains("Round 2 made the check worse, so the fleet undid it", message);
         Assert.Contains("It broke: t3, t4.", message);
+        Assert.Contains("NOTE: your edits to a.cs were reverted because failures increased from 2 failing to 4 failing. The files are back to the content shown above.", message);
         Assert.Contains("read them again before you edit", message);
         Assert.Contains("FAILED t1", message);
         Assert.DoesNotContain("FAILED t4", message);
