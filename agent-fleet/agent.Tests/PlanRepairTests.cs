@@ -1327,6 +1327,50 @@ public sealed class PlanRepairLogicTests
         Assert.EndsWith("before you edit anything.\n", brief.Replace("\r\n", "\n"));
         Assert.Equal(string.Empty, RepairMessages.Brief([Round(1, 1, null, "Infra")]));
     }
+
+    [Fact]
+    public void The_brief_says_the_test_may_be_the_wrong_part_after_three_code_only_rounds_with_the_same_failures()
+    {
+        PlanRunEvent[] events =
+        [
+            Round(1, 1, 1, signature: "widget::a", files: ["src/a.ts"]),
+            Round(1, 1, 2, signature: "widget::a", files: ["src/a.ts"]),
+            Round(1, 1, 3, "Stall", signature: "widget::a"),
+            Round(1, 3, 1, signature: "widget::a", files: ["src/b.ts"])
+        ];
+
+        string brief = RepairMessages.Brief(events);
+
+        Assert.Contains("In the last 3 rounds only code changed and the same tests still fail.", brief);
+        Assert.Contains("a test you wrote in this step may be the wrong part", brief);
+        Assert.Contains("change the test, not the code", brief);
+    }
+
+    [Fact]
+    public void The_brief_does_not_doubt_the_test_when_a_round_changed_a_test_or_the_failures_changed()
+    {
+        PlanRunEvent[] withTestEdit =
+        [
+            Round(1, 1, 1, signature: "widget::a", files: ["test/a.test.ts"]),
+            Round(1, 1, 2, signature: "widget::a", files: ["src/a.ts"]),
+            Round(1, 1, 3, signature: "widget::a", files: ["src/a.ts"])
+        ];
+        PlanRunEvent[] progress =
+        [
+            Round(1, 1, 1, signature: "widget::a\nwidget::b", files: ["src/a.ts"]),
+            Round(1, 1, 2, signature: "widget::a", files: ["src/a.ts"]),
+            Round(1, 1, 3, signature: "widget::b", files: ["src/a.ts"])
+        ];
+        PlanRunEvent[] tooFew =
+        [
+            Round(1, 1, 1, signature: "widget::a", files: ["src/a.ts"]),
+            Round(1, 1, 2, signature: "widget::a", files: ["src/a.ts"])
+        ];
+
+        Assert.DoesNotContain("may be the wrong part", RepairMessages.Brief(withTestEdit));
+        Assert.DoesNotContain("may be the wrong part", RepairMessages.Brief(progress));
+        Assert.DoesNotContain("may be the wrong part", RepairMessages.Brief(tooFew));
+    }
 }
 
 public sealed class FleetStepSessionTests

@@ -381,8 +381,29 @@ internal static class RepairMessages
             text.AppendLine($"Files changed so far: {List(touched)}.");
         }
 
+        if (OnlyCodeChangedWhileTheSameTestsFailed(rounds))
+        {
+            text.AppendLine("In the last 3 rounds only code changed and the same tests still fail. Do not change the code a fourth time before you check the test: " +
+                            "a test you wrote in this step may be the wrong part (it asks for more than the step's text says, or contradicts what the older tests keep). " +
+                            "If so, change the test, not the code.");
+        }
+
         text.AppendLine("Find the root cause first, then fix it. Do not repeat an approach that already failed: read the failing test or check and the code it exercises before you edit anything.");
         return text.ToString();
+    }
+
+    // Three rounds with the same failures, no round of the conversation having touched a test file and at least two having changed something.
+    // Measured: workers bent the code through ten and more rounds to satisfy a wrong assertion they had written themselves.
+    private static bool OnlyCodeChangedWhileTheSameTestsFailed(PlanRunEvent[] rounds)
+    {
+        if (rounds.Length < 3 || rounds.Any(round => round.ChangedFiles?.Any(PlanRunner.IsTestPath) == true))
+        {
+            return false;
+        }
+
+        PlanRunEvent[] last = rounds[^3..];
+        return last.All(round => round.FailureSignature is { Length: > 0 } signature && signature == last[0].FailureSignature) &&
+               last.Count(round => round.ChangedFiles is { Count: > 0 }) >= 2;
     }
 
     private static string RollbackSentence(RollbackNote rollback)
