@@ -62,6 +62,42 @@ internal static partial class FileGuard
         return null;
     }
 
+    /// <summary>
+    /// Whether a file tool call writes one of the files the step lists, or a file under a folder it lists. A scratch file next to
+    /// the code is not the step's work. With no step scope known, every write counts.
+    /// </summary>
+    public static bool WritesDeclaredFile(string toolName, IReadOnlyDictionary<string, object?> arguments, string? workingDirectory, IReadOnlyList<string>? declaredPaths)
+    {
+        if (declaredPaths is null)
+        {
+            return true;
+        }
+
+        string key = toolName == "move_file" ? "destination" : "path";
+        if (!arguments.TryGetValue(key, out object? raw) || CustomToolRunner.ValueOf(raw) is not { Length: > 0 } given)
+        {
+            return false;
+        }
+
+        string full;
+        try
+        {
+            string inProject = FailureLocation.ProjectRelative(given, workingDirectory);
+            full = Path.GetFullPath(Path.IsPathRooted(inProject) ? inProject : Path.Combine(workingDirectory ?? string.Empty, inProject));
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+
+        StringComparison comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        return declaredPaths.Any(path =>
+        {
+            string declared = path.IndexOfAny(['*', '?']) >= 0 ? path : Path.GetFullPath(path);
+            return NamedExactly(declared, full) || full.StartsWith(Path.TrimEndingDirectorySeparator(declared) + Path.DirectorySeparatorChar, comparison);
+        });
+    }
+
     private static bool IsProtected(string full)
     {
         string[] parts = full.Split(['\\', '/'], StringSplitOptions.RemoveEmptyEntries);

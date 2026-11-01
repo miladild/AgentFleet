@@ -207,7 +207,11 @@ internal sealed class FleetFunctionInvoker(
             if (fromRunner && RepairRound(context) is { } round)
             {
                 HarnessOptions limits = harness ?? DefaultHarness;
-                int reads = round.CountRead(toolName, !ToolLoopGuard.IsError(result?.ToString() ?? string.Empty));
+                // Only a write to the step's own files starts the count again: a model that writes scratch scripts to try things is still looking.
+                bool worked = !ToolLoopGuard.IsError(result?.ToString() ?? string.Empty) &&
+                    (!StepToolActivity.IsEdit(toolName) || planTools.RunningStepScope(context.Messages) is not { } scope ||
+                     FileGuard.WritesDeclaredFile(toolName, context.Arguments, scope.WorkingDirectory, scope.DeclaredPaths));
+                int reads = round.CountRead(toolName, worked);
                 if (reads >= limits.EndAfterReads)
                 {
                     result = $"{result}\n\n[HARNESS] You have made {reads} consecutive read calls without an edit. This round ends now.";

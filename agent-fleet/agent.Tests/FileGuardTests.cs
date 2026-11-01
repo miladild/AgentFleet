@@ -12,6 +12,19 @@ public sealed class FileGuardTests
         FileGuard.FileToolDenial(tool, new Dictionary<string, object?> { ["path"] = path }, Root, declared.Select(file => Path.Combine(Root, file)));
 
     [Theory]
+    [InlineData("src/server/quoteService.ts", true)]
+    [InlineData("test/new/extra.test.ts", true)]
+    [InlineData("tmp_debug.ts", false)]
+    [InlineData("src/server/debug_quote.ts", false)]
+    public void Only_a_write_to_a_listed_file_or_under_a_listed_folder_is_the_steps_work(string path, bool expected)
+    {
+        string[] declared = [Path.Combine(Root, "src/server/quoteService.ts"), Path.Combine(Root, "test", "new")];
+
+        Assert.Equal(expected, FileGuard.WritesDeclaredFile("write_file", new Dictionary<string, object?> { ["path"] = path }, Root, declared));
+        Assert.True(FileGuard.WritesDeclaredFile("write_file", new Dictionary<string, object?> { ["path"] = path }, Root, null));
+    }
+
+    [Theory]
     [InlineData("write_file", "package.json")]
     [InlineData("edit_file", "package.json")]
     [InlineData("delete_file", "package.json")]
