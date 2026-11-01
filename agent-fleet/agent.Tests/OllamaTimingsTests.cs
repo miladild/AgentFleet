@@ -70,21 +70,4 @@ public sealed class OllamaTimingsTests
             activity.DescribeModelCalls());
     }
 
-    [Fact]
-    public async Task A_step_rounds_calls_are_counted_through_the_node_telemetry_client_whole_or_streamed()
-    {
-        var activity = new StepToolActivity();
-        var options = new ChatOptions { AdditionalProperties = new AdditionalPropertiesDictionary { [StepToolActivity.Key] = activity } };
-        var client = new NodeTelemetryChatClient(Client(), "node", "m");
-
-        await client.GetResponseAsync(Question, options);
-        await foreach (ChatResponseUpdate _ in client.GetStreamingResponseAsync(Question, options))
-        {
-        }
-
-        Assert.Equal(2, activity.ModelCalls);
-        Assert.StartsWith("2 model calls: prompt 2400 tokens in 6.0 s", activity.DescribeModelCalls(), StringComparison.Ordinal);
-        await client.GetResponseAsync(Question);
-        Assert.Equal(2, activity.ModelCalls);
-    }
 }

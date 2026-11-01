@@ -109,6 +109,7 @@ internal sealed class FleetRoutingChatClient : IChatClient
         // Non-streaming path isn't used by the AG-UI chat flow today, so it doesn't get
         // the "answered by" footer that GetStreamingResponseAsync appends.
         (FleetRouteTarget target, string routeReason) = await SelectTargetWithJournalAsync(messageList, gate, runnerTier, runnerMachine, cancellationToken);
+        StepToolActivity? stepRound = StepRound(options);
         options = StripRunnerKey(options);
         (IReadOnlyList<ChatMessage> sendMessages, ChatOptions? sendOptions) = ApplyPlanMode(messageList, options, gate);
         RecordRoute(target, gate, runnerTier, routeReason);
@@ -117,6 +118,7 @@ internal sealed class FleetRoutingChatClient : IChatClient
         try
         {
             response = await target.Client.GetResponseAsync(sendMessages, StripToolsIfVision(target, sendOptions), cancellationToken);
+            RecordTiming(stepRound, OllamaTimings.From(response.RawRepresentation));
         }
         catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
         {
@@ -157,6 +159,8 @@ internal sealed class FleetRoutingChatClient : IChatClient
             : new PlanGateResult(PlanPhase.Off, null);
         (FleetRouteTarget target, string routeReason) = await SelectTargetWithJournalAsync(messageList, gate, runnerTier, runnerMachine, cancellationToken);
         string route = target.Node.Name;
+        StepToolActivity? stepRound = StepRound(options);
+        OllamaCallTiming? timing = null;
         options = StripRunnerKey(options);
 
         (IReadOnlyList<ChatMessage> sendMessages, ChatOptions? sendOptions) = ApplyPlanMode(messageList, options, gate);
@@ -196,6 +200,7 @@ internal sealed class FleetRoutingChatClient : IChatClient
                     }
 
                     update = stream.Current;
+                    timing = OllamaTimings.From(update.RawRepresentation) ?? timing;
                 }
                 catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
                 {
@@ -254,6 +259,7 @@ internal sealed class FleetRoutingChatClient : IChatClient
             }
         }
 
+        RecordTiming(stepRound, timing);
         string servedBy = _journal?.ActualNode ?? route;
         _journal?.RecordAssistantOutput(servedBy, outputText.ToString(), toolCallCount);
 
@@ -495,6 +501,19 @@ internal sealed class FleetRoutingChatClient : IChatClient
         options?.AdditionalProperties is { } properties &&
         properties.TryGetValue(RunnerDisputeKey, out object? value) &&
         value is true;
+
+    // The plan step's round, if this call is part of one: it adds up what Ollama reports for each call (see StepToolActivity.DescribeModelCalls).
+    // Read here because the key is taken off the options before the node sees them.
+    private static StepToolActivity? StepRound(ChatOptions? options) =>
+        options?.AdditionalProperties?.TryGetValue(StepToolActivity.Key, out object? activity) == true ? activity as StepToolActivity : null;
+
+    private static void RecordTiming(StepToolActivity? stepRound, OllamaCallTiming? timing)
+    {
+        if (stepRound is not null && timing is { } reported)
+        {
+            stepRound.RecordModelCall(reported);
+        }
+    }
 
     // The key is for this class only; do not pass it on to the model's API.
     private static ChatOptions? StripRunnerKey(ChatOptions? options)

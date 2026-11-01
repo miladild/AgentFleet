@@ -113,7 +113,8 @@ internal sealed class ToolCallRescueChatClient : DelegatingChatClient
                     yield return new ChatResponseUpdate(update.Role, carry)
                     {
                         ResponseId = update.ResponseId,
-                        MessageId = update.MessageId
+                        MessageId = update.MessageId,
+                        RawRepresentation = update.RawRepresentation
                     };
                     carry = "";
                 }
@@ -138,7 +139,8 @@ internal sealed class ToolCallRescueChatClient : DelegatingChatClient
                     yield return new ChatResponseUpdate(update.Role, safePrefix)
                     {
                         ResponseId = update.ResponseId,
-                        MessageId = update.MessageId
+                        MessageId = update.MessageId,
+                        RawRepresentation = update.RawRepresentation
                     };
                 }
 
@@ -159,7 +161,8 @@ internal sealed class ToolCallRescueChatClient : DelegatingChatClient
             yield return new ChatResponseUpdate(update.Role, toForward)
             {
                 ResponseId = update.ResponseId,
-                MessageId = update.MessageId
+                MessageId = update.MessageId,
+                RawRepresentation = update.RawRepresentation
             };
         }
 
@@ -170,7 +173,8 @@ internal sealed class ToolCallRescueChatClient : DelegatingChatClient
                 yield return new ChatResponseUpdate(lastUpdate?.Role, carry)
                 {
                     ResponseId = lastUpdate?.ResponseId,
-                    MessageId = lastUpdate?.MessageId
+                    MessageId = lastUpdate?.MessageId,
+                    RawRepresentation = lastUpdate?.RawRepresentation
                 };
             }
 
@@ -188,7 +192,8 @@ internal sealed class ToolCallRescueChatClient : DelegatingChatClient
             yield return new ChatResponseUpdate(lastUpdate?.Role, rawTail)
             {
                 ResponseId = lastUpdate?.ResponseId,
-                MessageId = lastUpdate?.MessageId
+                MessageId = lastUpdate?.MessageId,
+                RawRepresentation = lastUpdate?.RawRepresentation
             };
             yield break;
         }
@@ -198,6 +203,7 @@ internal sealed class ToolCallRescueChatClient : DelegatingChatClient
         {
             ResponseId = lastUpdate?.ResponseId,
             MessageId = lastUpdate?.MessageId,
+            RawRepresentation = lastUpdate?.RawRepresentation,
             FinishReason = ChatFinishReason.ToolCalls
         };
     }
