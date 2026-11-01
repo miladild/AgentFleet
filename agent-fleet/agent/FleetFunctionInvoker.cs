@@ -64,6 +64,14 @@ internal sealed class FleetFunctionInvoker(
 
     private static readonly HarnessOptions DefaultHarness = new();
 
+    // The counter of a repair round when the read budget is on, or null.
+    private StepToolActivity? RepairRound(FunctionInvocationContext context) =>
+        (harness ?? DefaultHarness).EnableBudgetFilter &&
+        context.Options?.AdditionalProperties?.TryGetValue(StepToolActivity.Key, out object? activity) == true &&
+        activity is StepToolActivity { RepairRound: true } round
+            ? round
+            : null;
+
     private string? GuardDenial(FunctionInvocationContext context, string toolName, string? command)
     {
         if (toolName == "run_command")
@@ -191,6 +199,30 @@ internal sealed class FleetFunctionInvoker(
             if (fromRunner && EditCheckContext.Current is { StopRequested: true })
             {
                 context.Terminate = true;
+            }
+
+            // A repair round already holds the step's files, so reading on is not work: after a few reads in a row the result says
+            // to write, and after a few more the round ends. The note goes in the tool's result, never as a message of its own, so
+            // the turns stay in the order the model's chat template expects.
+            if (fromRunner && RepairRound(context) is { } round)
+            {
+                HarnessOptions limits = harness ?? DefaultHarness;
+                int reads = round.CountRead(toolName, !ToolLoopGuard.IsError(result?.ToString() ?? string.Empty));
+                if (reads >= limits.EndAfterReads)
+                {
+                    result = $"{result}\n\n[HARNESS] You have made {reads} consecutive read calls without an edit. This round ends now.";
+                    round.EndedForReads = true;
+                    context.Terminate = true;
+                }
+                else if (reads >= limits.NudgeAfterReads)
+                {
+                    result = $"{result}\n\n[HARNESS] You have made {reads} consecutive read calls. Your next call MUST be edit_file, write_file, or report_blocker.";
+                }
+
+                if (round.ToolCalls >= limits.MaxCallsRepair)
+                {
+                    context.Terminate = true;
+                }
             }
 
             // The model is told how many rounds are left in the last few, so it can leave the project in a working state.

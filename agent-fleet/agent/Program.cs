@@ -789,7 +789,10 @@ app.MapPost("/api/fleet-mode", (FleetModeRequest request) =>
         return Results.BadRequest(new { error = "mode must be 'conservative' or 'aggressive'." });
     }
 
+    FleetMode before = modeService.Mode;
     modeService.SetMode(parsed);
+    // A running plan logs the change at its next round; this line says when and from where it came.
+    app.Logger.LogInformation("Hub mode set from {Before} to {After} through the web UI or API.", before, parsed);
     return Results.Json(new { mode = modeService.Mode.ToString().ToLowerInvariant() });
 });
 

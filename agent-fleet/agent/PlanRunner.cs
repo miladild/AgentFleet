@@ -116,6 +116,38 @@ internal sealed class StepToolActivity
     }
 
     public static bool IsEdit(string toolName) => toolName is "write_file" or "edit_file" or "move_file" or "delete_file";
+
+    /// <summary>Whether this is a repair round: one that starts with the step's files in its message (see HarnessOptions.EnableBudgetFilter).</summary>
+    public bool RepairRound { get; init; }
+
+    /// <summary>Whether the round was ended because the model kept reading without writing.</summary>
+    public bool EndedForReads { get; set; }
+
+    private int _consecutiveReads;
+
+    /// <summary>
+    /// Counts a finished call: a write that worked starts the count again, a call that only looks (a read, a search, a command) adds
+    /// one. Returns the reads in a row so far.
+    /// </summary>
+    public int CountRead(string toolName, bool worked)
+    {
+        lock (this)
+        {
+            if (IsEdit(toolName))
+            {
+                if (worked) _consecutiveReads = 0;
+            }
+            else if (IsLook(toolName))
+            {
+                _consecutiveReads++;
+            }
+
+            return _consecutiveReads;
+        }
+    }
+
+    private static bool IsLook(string toolName) =>
+        toolName is "read_file" or "list_directory" or "find_files" or "search_files" or "project_overview" or "run_command" or "run_git_command";
 }
 
 /// <summary>
@@ -1455,7 +1487,17 @@ internal sealed partial class PlanRunner
                 IReadOnlyList<string> untouched = result.Done
                     ? await UntouchedListedFilesAsync(plan, step, isFinalValidation, cancellationToken)
                     : [];
-                if (untouched.Count > 0 && !UntouchedRoundGiven(plan, step, attempt))
+                // A worker told this many times that keeps passing its check is not sent round the ladder again: the step is taken
+                // and the files it left are named, so a file that needed no change does not cost the whole ladder.
+                if (untouched.Count > 0 && UntouchedSendBacksGiven(plan, step) >= _harness.UntouchedSendBacks &&
+                    NotNamedByBlocker(untouched, model.Blocker) is { Count: > 0 } leftAlone)
+                {
+                    _store.AddEvent(plan.Id, step.Id, attempt, UntouchedAcceptedKind, tier, node: model.ModelNode ?? model.Machine,
+                        detail: $"The check passed again and these listed files are still unchanged after {_harness.UntouchedSendBacks} send-backs: {string.Join(", ", leftAlone)}. The step is accepted with them named.",
+                        modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round);
+                    result = result with { Restored = JoinNotes(result.Restored ?? string.Empty, $"Listed files left unchanged: {string.Join(", ", leftAlone)}.") };
+                }
+                else if (untouched.Count > 0 && !UntouchedRoundGiven(plan, step, attempt))
                 {
                     string note = UntouchedFilesMessage(untouched);
                     _store.AddEvent(plan.Id, step.Id, attempt, UntouchedRoundKind, tier, node: model.ModelNode ?? model.Machine,
@@ -1466,6 +1508,9 @@ internal sealed partial class PlanRunner
                 else if (untouched.Count > 0 && NotNamedByBlocker(untouched, model.Blocker) is { Count: > 0 } stillUntouched)
                 {
                     string note = StillUntouchedMessage(stillUntouched);
+                    _store.AddEvent(plan.Id, step.Id, attempt, UntouchedSentBackKind, tier, node: model.ModelNode ?? model.Machine,
+                        detail: $"Still unchanged after the extra round: {string.Join(", ", stillUntouched)}. The step is sent back.",
+                        modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round);
                     chargedSendBack = true;
                     result = new StepCompletion(false, note, note, result.Restored);
                 }
@@ -3246,6 +3291,7 @@ internal sealed partial class PlanRunner
             }
         }
 
+        LogFleetModeChange(plan.Id, step.Id, attempt);
         _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.AttemptStarted, tier, node: modelMachine, detail: attemptDetail,
             modelNode: modelMachine, workspaceNode: machine, rung: conversation.Rung, round: conversation.Round);
 
@@ -3256,7 +3302,8 @@ internal sealed partial class PlanRunner
         IWorkerWorkspaceSession? worker = null;
         bool stagingWorkerWorkspace = false;
         ModelAttemptResult result = new(step.Id, string.Empty, null, ShouldVerify: false, Machine: machine, ModelNode: modelMachine);
-        var activity = new StepToolActivity();
+        // A round that goes on from a failed check, or a fresh conversation with a brief, is a repair round (see StepToolActivity.RepairRound).
+        var activity = new StepToolActivity { RepairRound = conversation.RepairMessage is not null || !string.IsNullOrEmpty(conversation.Brief) };
         var stall = new ModelStallWatch(StallLimit, StallGrace);
         activity.Observed = toolName =>
         {
@@ -3363,6 +3410,13 @@ internal sealed partial class PlanRunner
             if (activity.DescribeModelCalls() is { } modelTimings)
             {
                 _store.AddEvent(plan.Id, step.Id, attempt, ModelTimingsKind, tier, modelMachine ?? ViaNode(summary) ?? _journal?.ActualNode, modelTimings,
+                    modelNode: modelMachine ?? ViaNode(summary), workspaceNode: machine, rung: conversation.Rung, round: conversation.Round);
+            }
+
+            if (activity.EndedForReads)
+            {
+                _store.AddEvent(plan.Id, step.Id, attempt, ReadBudgetKind, tier, modelMachine ?? ViaNode(summary),
+                    $"The round was ended after {_harness.EndAfterReads} read calls in a row without an edit.",
                     modelNode: modelMachine ?? ViaNode(summary), workspaceNode: machine, rung: conversation.Rung, round: conversation.Round);
             }
 

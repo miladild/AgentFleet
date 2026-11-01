@@ -233,6 +233,30 @@ public sealed partial class PlanRunnerTests
     }
 
     [Fact]
+    public async Task The_run_log_names_the_hub_mode_at_the_start_and_when_it_changes_during_the_run()
+    {
+        PlanRecord plan = RepairPlan("worker-a", PlanRecoveryScope.AllowHubRescue);
+        FleetModeService mode = ModeService(FleetMode.Aggressive);
+        int calls = 0;
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            // Someone switches the mode while the first round runs.
+            if (++calls == 1) mode.SetMode(FleetMode.Conservative);
+            File.WriteAllText(SourceFile, calls == 1 ? "partial" : "fixed");
+            return Task.FromResult("Tried.");
+        });
+
+        await RepairRunner(agent, _ => File.ReadAllText(SourceFile) == "fixed" ? Pass("check") : FailWith("widget::renders"),
+            modeService: mode).RunPlanAsync(plan.Id, default);
+
+        PlanRunEvent[] logged = Store.Get(plan.Id)!.Events!.Where(runEvent => runEvent.Kind == "fleet-mode").ToArray();
+        Assert.Equal(2, logged.Length);
+        Assert.Contains("Hub mode at the start of the run: aggressive", logged[0].Detail, StringComparison.Ordinal);
+        Assert.Contains("Hub mode changed from aggressive to conservative", logged[1].Detail, StringComparison.Ordinal);
+        Assert.NotNull(logged[1].StepId);
+    }
+
+    [Fact]
     public async Task Aggressive_mode_keeps_the_hub_rung_available()
     {
         (FleetOptions options, FleetHealthMonitor health) = HubFleet();

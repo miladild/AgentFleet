@@ -3,7 +3,8 @@ namespace AgentFleet.Tests;
 /// <summary>
 /// A passing check does not finish a step that lists files and left one of them as it was. The worker gets one more round
 /// in the same conversation. If a listed file is still untouched after that round, the step is not done either, unless the
-/// round's report_blocker names the file; the step is sent back and climbs the repair ladder like any failed check.
+/// round's report_blocker names the file; the step is sent back and climbs the repair ladder like any failed check, until the
+/// send-backs the options allow have run out and the passing step is taken with the untouched files named.
 /// </summary>
 public sealed partial class PlanNoChangeTests
 {
@@ -75,6 +76,35 @@ public sealed partial class PlanNoChangeTests
     }
 
     [Fact]
+    public async Task A_listed_file_still_untouched_after_the_send_backs_the_options_allow_is_accepted_and_named()
+    {
+        File.WriteAllText(Path.Combine(ProjectDirectory, "a.txt"), "old a");
+        File.WriteAllText(Path.Combine(ProjectDirectory, "b.txt"), "old b");
+        PlanRecord plan = OneStepPlan(StepListing("edit both", "a.txt", "b.txt"));
+        int round = 0;
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            round++;
+            if (round == 1)
+            {
+                File.WriteAllText(Path.Combine(ProjectDirectory, "a.txt"), "new a");
+                return Task.FromResult("Changed a.");
+            }
+
+            return Task.FromResult("b.txt needs no change.");
+        });
+
+        await RepairRunner(agent, _ => Pass("check")).RunPlanAsync(plan.Id, default);
+
+        // The extra round, then two send-backs (the default), then the passing check is taken with the file named.
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.Equal(4, agent.Calls.Count);
+        Assert.Contains(after.Events!, e => e.Kind == "untouched-files-accepted" && e.Detail.Contains("b.txt", StringComparison.Ordinal));
+        Assert.Contains(after.Events!, e => e.Kind == RunEventKind.StepDone && e.Detail.Contains("Listed files left unchanged: b.txt.", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task A_listed_file_that_stays_untouched_keeps_the_step_from_being_done()
     {
         File.WriteAllText(Path.Combine(ProjectDirectory, "a.txt"), "old a");
@@ -93,7 +123,7 @@ public sealed partial class PlanNoChangeTests
             return Task.FromResult("Looked again, nothing else to change.");
         });
 
-        await RepairRunner(agent, _ => Pass("check")).RunPlanAsync(plan.Id, default);
+        await RepairRunner(agent, _ => Pass("check"), harness: new HarnessOptions(UntouchedSendBacks: 50)).RunPlanAsync(plan.Id, default);
 
         PlanRecord after = Store.Get(plan.Id)!;
         Assert.NotEqual(PlanStatus.Done, after.Status);
@@ -158,7 +188,7 @@ public sealed partial class PlanNoChangeTests
             CallsOf = _ => round == 2 ? Blocker("the check is fine as it is") : []
         };
 
-        await RepairRunner(agent, _ => Pass("check")).RunPlanAsync(plan.Id, default);
+        await RepairRunner(agent, _ => Pass("check"), harness: new HarnessOptions(UntouchedSendBacks: 50)).RunPlanAsync(plan.Id, default);
 
         Assert.NotEqual(PlanStatus.Done, Store.Get(plan.Id)!.Status);
         Assert.True(agent.Calls.Count > 2, "the step is sent back again rather than accepted");

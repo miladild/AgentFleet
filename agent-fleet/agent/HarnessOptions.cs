@@ -28,7 +28,8 @@ internal sealed record HarnessOptions(
     int MaxActRoundsPerStep = 6,
     int MaxPacketTokens = 24000,
     int OllamaNumCtx = 32768,
-    double StructuredCallTemperature = 0)
+    double StructuredCallTemperature = 0,
+    int UntouchedSendBacks = 2)
 {
     private const string Prefix = "FLEET_HARNESS_";
 
@@ -61,7 +62,8 @@ internal sealed record HarnessOptions(
             Number("OLLAMA_NUM_CTX", defaults.OllamaNumCtx, 2048, 1048576),
             double.TryParse(setting(Prefix + "STRUCTURED_CALL_TEMPERATURE"), NumberStyles.Float, CultureInfo.InvariantCulture, out double temperature) && temperature is >= 0 and <= 2
                 ? temperature
-                : defaults.StructuredCallTemperature);
+                : defaults.StructuredCallTemperature,
+            Number("UNTOUCHED_SEND_BACKS", defaults.UntouchedSendBacks, 1, 50));
     }
 
     /// <summary>One line for the run log: every option and its value.</summary>
@@ -75,6 +77,7 @@ internal sealed record HarnessOptions(
             (nameof(EndAfterReads), EndAfterReads), (nameof(TestFixMaxCalls), TestFixMaxCalls),
             (nameof(NoProgressRoundsBeforeReset), NoProgressRoundsBeforeReset), (nameof(MaxActRoundsPerStep), MaxActRoundsPerStep),
             (nameof(MaxPacketTokens), MaxPacketTokens), (nameof(OllamaNumCtx), OllamaNumCtx),
-            (nameof(StructuredCallTemperature), StructuredCallTemperature.ToString(CultureInfo.InvariantCulture))
+            (nameof(StructuredCallTemperature), StructuredCallTemperature.ToString(CultureInfo.InvariantCulture)),
+            (nameof(UntouchedSendBacks), UntouchedSendBacks)
         }.Select(option => $"{option.Name}={(option.Value is bool flag ? (flag ? "on" : "off") : option.Value)}"));
 }

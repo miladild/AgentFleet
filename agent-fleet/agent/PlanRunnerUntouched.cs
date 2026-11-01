@@ -18,7 +18,8 @@ internal sealed partial class PlanRunner
     /// The run log is read too, because a round before a restart is not in the snapshot this run took.
     /// Empty when the rule does not apply: the tests step of test-first mode, the final check of a longer plan, a step that
     /// lists no such file, a step that changed no file at all, or a project git cannot read. The caller decides what an
-    /// untouched file means: the extra round once per attempt, and after that the step is sent back (see UntouchedRoundGiven).
+    /// untouched file means: the extra round once per attempt, after that the step is sent back (see UntouchedRoundGiven), and
+    /// once the send-backs the options allow have run out the step is taken with the files named (see UntouchedSendBacksGiven).
     /// </summary>
     private async Task<IReadOnlyList<string>> UntouchedListedFilesAsync(
         PlanRecord plan, PlanStep step, bool isFinalValidation, CancellationToken cancellationToken)
@@ -88,6 +89,16 @@ internal sealed partial class PlanRunner
     private static string StillUntouchedMessage(IReadOnlyList<string> files) =>
         $"The check passed, but these files listed for this step are still unchanged after one more round: {string.Join(", ", files)}. " +
         "Change them. If a file needs no change, call the report_blocker tool now with that file's name and the reason as its evidence; saying so in your reply does not count.";
+
+    /// <summary>The run-log kind of a send-back for listed files still untouched after the extra round.</summary>
+    private const string UntouchedSentBackKind = "untouched-files-again";
+
+    /// <summary>The run-log kind of a step taken with listed files untouched once its send-backs ran out (HarnessOptions.UntouchedSendBacks).</summary>
+    private const string UntouchedAcceptedKind = "untouched-files-accepted";
+
+    /// <summary>How many times the step was sent back for still-untouched listed files since it was last retried by hand.</summary>
+    private int UntouchedSendBacksGiven(PlanRecord plan, PlanStep step) =>
+        StepEventsSinceRetry(plan.Id, step.Id).Count(runEvent => runEvent.Kind == UntouchedSentBackKind);
 
     /// <summary>Whether the step's one extra round for untouched listed files already ran in this attempt.</summary>
     private bool UntouchedRoundGiven(PlanRecord plan, PlanStep step, int attempt) =>

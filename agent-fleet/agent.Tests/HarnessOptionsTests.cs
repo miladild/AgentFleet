@@ -13,6 +13,8 @@ public sealed class HarnessOptionsTests
         Assert.Equal((25, 10, 4, 6, 10, 2, 6, 24000, 32768, 0d),
             (options.MaxCallsInitial, options.MaxCallsRepair, options.NudgeAfterReads, options.EndAfterReads, options.TestFixMaxCalls,
              options.NoProgressRoundsBeforeReset, options.MaxActRoundsPerStep, options.MaxPacketTokens, options.OllamaNumCtx, options.StructuredCallTemperature));
+        Assert.Equal(2, options.UntouchedSendBacks);
+        Assert.Equal(5, HarnessOptions.FromSettings(name => name == "FLEET_HARNESS_UNTOUCHED_SEND_BACKS" ? "5" : null).UntouchedSendBacks);
     }
 
     [Fact]

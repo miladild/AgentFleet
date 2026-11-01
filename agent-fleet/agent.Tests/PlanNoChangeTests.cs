@@ -40,9 +40,9 @@ public sealed partial class PlanNoChangeTests : PlanTestBase
     }
 
     private PlanRunner RepairRunner(FakeStepAgent agent, Func<string, string> verify,
-        int roundsPerRung = RepairLadder.DefaultRoundsPerRung) =>
+        int roundsPerRung = RepairLadder.DefaultRoundsPerRung, HarnessOptions? harness = null) =>
         new(Store, RepairTools(verify), agent, NullLogger.Instance, roundsPerRung: roundsPerRung,
-            transientDelay: _ => TimeSpan.Zero, delayAsync: (_, _) => Task.CompletedTask);
+            transientDelay: _ => TimeSpan.Zero, delayAsync: (_, _) => Task.CompletedTask, harness: harness);
 
     // A project git cannot read: every git command fails, so the runner cannot tell which files a round changed.
     private PlanRunner NoGitRunner(FakeStepAgent agent, Func<string, string> verify) =>
