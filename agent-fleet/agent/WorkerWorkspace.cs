@@ -250,6 +250,14 @@ internal static class WorkerWorkspaceContext
         return new Restore(previous);
     }
 
+    /// <summary>Leaves the worker scope until disposed, so a command runs on the hub's copy of the project.</summary>
+    public static IDisposable Suspend()
+    {
+        WorkerWorkspaceSession? previous = CurrentSession.Value;
+        CurrentSession.Value = null;
+        return new Restore(previous);
+    }
+
     private sealed class Restore(WorkerWorkspaceSession? previous) : IDisposable
     {
         public void Dispose() => CurrentSession.Value = previous;

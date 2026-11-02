@@ -92,6 +92,50 @@ public sealed partial class PlanRunnerTests
     }
 
     [Fact]
+    public async Task The_rulers_file_tools_read_a_project_relative_path_from_the_project_folder()
+    {
+        string project = NewGitProject();
+        try
+        {
+            var setup = DisputePlan(project, StepWithItsOwnTest());
+            var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []));
+            string? resolved = null;
+            string? read = null;
+            var budget = new RulingBudget(1, _ =>
+            {
+                // The prompt names files relative to the project; a read in the ruler's session must find them there.
+                resolved = HubFileSystemTools.Resolve(LimitTestFile);
+                read = HubFileSystemTools.ReadFileAsync(LimitTestFile, null, null, default).GetAwaiter().GetResult();
+                return new StepAgentReply(TestWrongRuling, 0, false);
+            });
+            var fake = WritesItsOwnTest(project, budget);
+            await OwnTestRunner(new RulingAgent(fake), workspaces, setup.Options, setup.Health, CheckReadsTheTestFile(project, "CORRECTED"))
+                .RunPlanAsync(setup.Plan.Id, default).WaitAsync(DisputeTimeLimit);
+
+            Assert.Equal(Path.GetFullPath(Path.Combine(project, LimitTestFile)), resolved);
+            Assert.Equal(WrongTest, read);
+            Assert.NotEqual(Path.GetFullPath(Path.Combine(project, LimitTestFile)), HubFileSystemTools.Resolve(LimitTestFile));
+        }
+        finally { FailFirstTests.DeleteTree(project); }
+    }
+
+    [Fact]
+    public void A_project_folder_scope_roots_relative_paths_and_leaves_absolute_ones_and_ends_with_its_scope()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "fleet-root-test");
+        string absolute = Path.Combine(Path.GetTempPath(), "elsewhere", "a.txt");
+        string before = HubFileSystemTools.Resolve("src/a.ts");
+
+        using (HubProjectFolderScope.Push(root))
+        {
+            Assert.Equal(Path.GetFullPath(Path.Combine(root, "src/a.ts")), HubFileSystemTools.Resolve("src/a.ts"));
+            Assert.Equal(absolute, HubFileSystemTools.Resolve(absolute));
+        }
+
+        Assert.Equal(before, HubFileSystemTools.Resolve("src/a.ts"));
+    }
+
+    [Fact]
     public async Task A_ruling_that_the_code_is_wrong_is_fed_back_and_the_test_is_left_as_it_is()
     {
         string project = NewGitProject();

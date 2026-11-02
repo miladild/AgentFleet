@@ -336,6 +336,69 @@ public sealed partial class PlanNoChangeTests
         Assert.Equal(0, FinalCheckRounds(plan.Id));
     }
 
+    private const string ToolMissing = "Exit code: 127\n--- stdout ---\n> app@0.1.0 typecheck\n> tsc --noEmit\n--- stderr ---\nsh: 1: tsc: not found";
+
+    [Theory]
+    [InlineData(ToolMissing, true)]
+    [InlineData("Exit code: 1\n--- stderr ---\n'tsc' is not recognized as an internal or external command,\noperable program or batch file.", true)]
+    [InlineData("Exit code: 9009\n--- stderr ---\nnothing", true)]
+    [InlineData(BrokenOldTest, false)]
+    [InlineData("Exit code: 1\n--- stdout ---\n✖ reports not found for an unknown symbol (2ms)", false)]
+    public void A_check_whose_command_is_missing_is_told_apart_from_a_failing_one(string output, bool missing) =>
+        Assert.Equal(missing, PlanRunner.CommandMissing(output));
+
+    [Fact]
+    public async Task A_whole_project_check_whose_tool_is_missing_on_the_worker_runs_again_on_the_hub_copy()
+    {
+        SeedFiles("a.txt", "b.txt", "c.txt");
+        PlanRecord plan = ThreeStepPlan(["c.txt"]);
+        var commands = new List<string>();
+        var onHub = new List<string>();
+        FakeStepAgent agent = ThreeStepAgent(breakText: "broken", repairText: "fixed");
+        Func<string, string> hubOnly = ThreeStepVerify(commands, BrokenOldTest);
+        // The worker cannot run the whole-project command at all; the hub copy (synced before the check) can.
+        Func<string, string> verify = command =>
+        {
+            bool broken = File.ReadAllText(Path.Combine(ProjectDirectory, "b.txt")).Contains("broken", StringComparison.Ordinal);
+            if (command == FinalCheckCommand && broken && WorkerWorkspaceContext.Current is not null) return ToolMissing;
+            if (command == FinalCheckCommand && broken) onHub.Add(command);
+            return hubOnly(command);
+        };
+        var config = new FleetWorkerWorkspaceConfig("worker.example.test", "fleet-test", "C:/fleet-test/key", "SHA256:test",
+            "/fleet-test/workspace", "linux");
+        using var worker = new WorkerWorkspaceSession("worker-test", config, ProjectDirectory, NullLogger.Instance, TimeSpan.FromSeconds(1));
+
+        using (WorkerWorkspaceContext.Push(worker))
+        {
+            await RepairRunner(agent, verify).RunPlanAsync(plan.Id, default);
+        }
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.Equal(1, FinalCheckRounds(plan.Id));
+        Assert.Contains("rejects zero", Assert.Single(after.Events!, runEvent => runEvent.Kind == FinalCheckKind).Detail, StringComparison.Ordinal);
+        Assert.Contains(after.Events!, runEvent => runEvent.Kind == "final-check-moved" && runEvent.StepId == 2 &&
+            runEvent.Detail.Contains("tsc: not found", StringComparison.Ordinal));
+        Assert.NotEmpty(onHub);
+    }
+
+    [Fact]
+    public async Task A_whole_project_check_whose_tool_is_missing_everywhere_gives_no_round_and_says_so()
+    {
+        SeedFiles("a.txt", "b.txt", "c.txt");
+        PlanRecord plan = ThreeStepPlan(["c.txt"]);
+        var commands = new List<string>();
+        FakeStepAgent agent = ThreeStepAgent(breakText: "broken", repairText: "fixed");
+
+        await RepairRunner(agent, ThreeStepVerify(commands, ToolMissing)).RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(0, FinalCheckRounds(plan.Id));
+        Assert.Contains(after.Events!, runEvent => runEvent.Kind == "final-check-unavailable" && runEvent.StepId == 2 &&
+            runEvent.Detail.Contains("tsc: not found", StringComparison.Ordinal));
+        Assert.DoesNotContain(agent.Calls, call => call.Prompt.Contains("project's final check", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task A_whole_project_check_that_cannot_run_neither_fails_the_step_nor_gives_a_round()
     {

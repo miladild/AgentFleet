@@ -219,6 +219,7 @@ internal sealed partial class PlanRunner
             {
                 using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 limit.CancelAfter(AuditTimeLimit);
+                using IDisposable? folder = HubProjectFolderScope.For(plan);
                 reply = await session.SendAsync(message, auditTier, auditMachine, limit.Token);
             }
             catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)

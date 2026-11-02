@@ -1344,7 +1344,7 @@ internal sealed partial class PlanRunner
                     // The plan's whole-project check runs on this step's changes before they are synced back (see PlanRunnerRegression).
                     if (result.Done)
                     {
-                        finalCheckFailure = await RunFinalCheckAsync(plan, step, isFinalValidation, cancellationToken);
+                        finalCheckFailure = await RunFinalCheckAsync(plan, step, isFinalValidation, attempt, tier, model, rung, round, cancellationToken);
                     }
                     else if (parkReason is null)
                     {

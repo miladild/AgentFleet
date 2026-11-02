@@ -9,6 +9,34 @@ namespace AgentFleet;
 /// unrestricted (no path allowlist) per explicit user choice; the only limit is
 /// whatever the backend process's own OS-level permissions allow.
 /// </summary>
+/// <summary>
+/// The project folder that relative paths of the hub file tools resolve against while a plan session that only reads (a ruler, a
+/// reviewer, a check auditor) runs on the hub. Its prompt names files relative to the project; without this they resolved against
+/// the backend's own folder, and a ruler in a live run read the fleet's own files instead of the plan's.
+/// </summary>
+internal static class HubProjectFolderScope
+{
+    private static readonly AsyncLocal<string?> CurrentFolder = new();
+
+    public static string? Current => CurrentFolder.Value;
+
+    public static IDisposable Push(string projectFolder)
+    {
+        string? previous = CurrentFolder.Value;
+        CurrentFolder.Value = Path.GetFullPath(projectFolder);
+        return new Restore(previous);
+    }
+
+    /// <summary>The scope for a plan's folder, or null when the plan has none.</summary>
+    public static IDisposable? For(PlanRecord plan) =>
+        string.IsNullOrWhiteSpace(plan.WorkingDirectory) ? null : Push(plan.WorkingDirectory);
+
+    private sealed class Restore(string? previous) : IDisposable
+    {
+        public void Dispose() => CurrentFolder.Value = previous;
+    }
+}
+
 internal static class HubFileSystemTools
 {
     private const int MaxReadCharacters = 50_000;
@@ -369,8 +397,8 @@ internal static class HubFileSystemTools
             : header + body;
     }
 
-    // Relative paths resolve against FLEET_FILES_ROOT if set, otherwise the backend's
-    // own working directory - absolute paths are used exactly as given either way.
+    // Relative paths resolve against the project folder of a plan session that reads on the hub (HubProjectFolderScope), else
+    // FLEET_FILES_ROOT if set, otherwise the backend's own working directory - absolute paths are used exactly as given either way.
     private static string ResolvePath(string path)
     {
         if (Path.IsPathRooted(path))
@@ -378,7 +406,7 @@ internal static class HubFileSystemTools
             return path;
         }
 
-        string root = Environment.GetEnvironmentVariable("FLEET_FILES_ROOT") ?? Directory.GetCurrentDirectory();
+        string root = HubProjectFolderScope.Current ?? Environment.GetEnvironmentVariable("FLEET_FILES_ROOT") ?? Directory.GetCurrentDirectory();
         return Path.Combine(root, path);
     }
 

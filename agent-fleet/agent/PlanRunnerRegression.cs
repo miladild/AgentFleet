@@ -13,8 +13,24 @@ internal sealed partial class PlanRunner
     /// <summary>The run-log kind of the one extra round a passing step is given when the whole-project check fails.</summary>
     private const string FinalCheckRoundKind = "final-check-round";
 
+    /// <summary>The run-log kind of a whole-project check moved from a worker that cannot run it to the hub's copy.</summary>
+    private const string FinalCheckMovedKind = "final-check-moved";
+
+    /// <summary>The run-log kind of a whole-project check that could not run anywhere, so it did not hold the step.</summary>
+    private const string FinalCheckUnavailableKind = "final-check-unavailable";
+
     /// <summary>How many failing test names the run log names.</summary>
     private const int FinalCheckNamesShown = 5;
+
+    /// <summary>How much of a check's output the moved and unavailable events keep.</summary>
+    private const int FinalCheckDetailCharacters = 400;
+
+    // The shell's word for a program it cannot find: 127 from sh and bash, 9009 from cmd, and cmd's own sentence.
+    [GeneratedRegex(@"\AExit code: (?:127|9009)\b|is not recognized as an internal or external command")]
+    private static partial Regex MissingCommand();
+
+    /// <summary>Whether a command's output says its program could not be found, as opposed to a check that ran and failed.</summary>
+    internal static bool CommandMissing(string output) => MissingCommand().IsMatch(output);
 
     /// <summary>A failing whole-project check: the command, its trimmed output and the failing item names the output printed.</summary>
     private sealed record FinalCheckFailure(string Command, string Output, IReadOnlyList<string> FailingItems);
@@ -29,9 +45,12 @@ internal sealed partial class PlanRunner
     /// test-first mode, the last step itself, a plan of one step, a last step without a usable Verify, a last step whose Verify
     /// is this step's, and a plan without a project folder. A failure that names a file a later step lists is expected until that
     /// step is written, so it is not a failure here. A command that cannot run (a timeout, a worker that cannot be reached) is
-    /// logged and treated as a pass: the check must never fail a step by itself.
+    /// logged and treated as a pass: the check must never fail a step by itself. A command whose program is missing on the worker
+    /// (measured: "tsc: not found" on one worker, so a step that broke an old test was taken and the plan blocked at its last step)
+    /// runs again on the hub's copy, which holds the step's changes; missing there too, it is logged and treated as a pass.
     /// </summary>
-    private async Task<FinalCheckFailure?> RunFinalCheckAsync(PlanRecord plan, PlanStep step, bool isFinalValidation, CancellationToken cancellationToken)
+    private async Task<FinalCheckFailure?> RunFinalCheckAsync(PlanRecord plan, PlanStep step, bool isFinalValidation, int attempt, string tier,
+        ModelAttemptResult model, int rung, int round, CancellationToken cancellationToken)
     {
         if (!FinalCheckRuleApplies(plan, step, isFinalValidation))
         {
@@ -42,6 +61,25 @@ internal sealed partial class PlanRunner
         try
         {
             (bool passed, string output) = await _tools.RunRepairCommandAsync(plan, command, cancellationToken);
+            if (!passed && CommandMissing(output) && WorkerWorkspaceContext.Current is { } worker)
+            {
+                _store.AddEvent(plan.Id, step.Id, attempt, FinalCheckMovedKind, tier, node: model.ModelNode ?? model.Machine,
+                    detail: $"`{command}` cannot run on {worker.Machine}, so it runs on the hub's copy of the project: {Cut(output, FinalCheckDetailCharacters)}",
+                    modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round);
+                using (WorkerWorkspaceContext.Suspend())
+                {
+                    (passed, output) = await _tools.RunRepairCommandAsync(plan, command, cancellationToken);
+                }
+            }
+
+            if (!passed && CommandMissing(output))
+            {
+                _store.AddEvent(plan.Id, step.Id, attempt, FinalCheckUnavailableKind, tier, node: model.ModelNode ?? model.Machine,
+                    detail: $"`{command}` cannot run, so the whole project was not checked after this step: {Cut(output, FinalCheckDetailCharacters)}",
+                    modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round);
+                return null;
+            }
+
             if (passed || NamesLaterStepFile(plan, step, output))
             {
                 return null;
