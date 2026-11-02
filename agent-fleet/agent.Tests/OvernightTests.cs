@@ -149,6 +149,104 @@ public sealed class OvernightTests
         });
     }
 
+    // Answers, and keeps the messages it was sent.
+    private sealed class Recording(string answer) : IChatClient
+    {
+        public List<ChatMessage[]> Sent { get; } = [];
+
+        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+        {
+            Sent.Add(messages.ToArray());
+            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, answer)));
+        }
+
+        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+            IEnumerable<ChatMessage> messages, ChatOptions? options = null, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            Sent.Add(messages.ToArray());
+            await Task.Yield();
+            yield return new ChatResponseUpdate(ChatRole.Assistant, answer);
+        }
+
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+        public void Dispose() { }
+    }
+
+    // Streams one word, then breaks.
+    private sealed class BreaksAfterFirstWord : IChatClient
+    {
+        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+            IEnumerable<ChatMessage> messages, ChatOptions? options = null, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            await Task.Yield();
+            yield return new ChatResponseUpdate(ChatRole.Assistant, "half");
+            throw new HttpRequestException("dropped");
+        }
+
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+        public void Dispose() { }
+    }
+
+    [Fact]
+    public async Task A_failed_request_goes_to_the_fallback_with_a_note_and_the_machine_rests()
+    {
+        var hub = new Recording("from the hub");
+        (ResilientChatClient client, FleetHealthMonitor health) = Resilient(new FailingFirst(new HttpRequestException("connection refused")), hub);
+
+        ChatResponse response = await client.GetResponseAsync([new ChatMessage(ChatRole.User, "hi")]);
+
+        Assert.Equal("from the hub", response.Text);
+        ChatMessage[] sent = Assert.Single(hub.Sent);
+        Assert.Contains(sent, message => message.Text.Contains("Fleet failover note", StringComparison.Ordinal) &&
+                                         message.Text.Contains("connection refused", StringComparison.Ordinal));
+        Assert.Contains(sent, message => message.Text == "hi");
+        Assert.False((await health.GetNodeAsync("hub")).Ready);
+    }
+
+    [Fact]
+    public async Task A_model_that_cannot_use_tools_is_not_sent_to_the_fallback()
+    {
+        var hub = new Recording("wrong");
+        (ResilientChatClient client, _) = Resilient(
+            new FailingFirst(new OllamaSharp.Models.Exceptions.ModelDoesNotSupportToolsException("does not support tools")), hub);
+
+        await Assert.ThrowsAsync<OllamaSharp.Models.Exceptions.ModelDoesNotSupportToolsException>(() =>
+            client.GetResponseAsync([new ChatMessage(ChatRole.User, "hi")]));
+        Assert.Empty(hub.Sent);
+    }
+
+    [Fact]
+    public async Task A_stream_that_breaks_after_its_first_word_is_not_repeated_on_the_fallback()
+    {
+        var hub = new Recording("wrong");
+        (ResilientChatClient client, _) = Resilient(new BreaksAfterFirstWord(), hub);
+
+        var words = new List<string>();
+        await Assert.ThrowsAsync<HttpRequestException>(async () =>
+        {
+            await foreach (ChatResponseUpdate update in client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "hi")]))
+            {
+                words.Add(update.Text);
+            }
+        });
+        Assert.Equal(["half"], words);
+        Assert.Empty(hub.Sent);
+    }
+
+    [Fact]
+    public async Task An_empty_stream_marks_the_machine_as_failing()
+    {
+        (ResilientChatClient client, FleetHealthMonitor health) = Resilient(new Answers(), new Recording("wrong"));
+
+        Assert.Empty(await Collect(client));
+        NodeHealthSnapshot after = await health.GetNodeAsync("hub");
+        Assert.False(after.Ready);
+        Assert.Equal("empty_response", after.Failure);
+    }
+
     [Fact]
     public async Task A_healthy_machine_streams_as_before() =>
         Assert.Equal("a b", string.Concat(await Collect(Resilient(new Answers("a", " b"), new Answers("wrong")).Client)));
