@@ -91,9 +91,9 @@ public sealed class FleetHarnessTests : ContextTestBase
             }
         }
 
-        // The actual order from the built client is: WorkerPlatformChatClient -> DynamicToolsChatClient -> FunctionInvokingChatClient -> fleetClient
+        // The actual order from the built client is: DynamicToolsChatClient -> FunctionInvokingChatClient -> fleetClient
         // (The ChatClientBuilder applies .Use() in reverse order: last added is innermost)
-        Assert.Equal(["WorkerPlatformChatClient", "DynamicToolsChatClient", "FunctionInvokingChatClient", "RecordingChatClient"], types);
+        Assert.Equal(["DynamicToolsChatClient", "FunctionInvokingChatClient", "RecordingChatClient"], types);
     }
 
     [Fact]
@@ -102,7 +102,7 @@ public sealed class FleetHarnessTests : ContextTestBase
         var fake = new RecordingChatClient();
         IChatClient client = FleetHarness.BuildAgentClient(fake, CreateRegistry(), Journal, PlanMode(false), NewInvoker(), NullLoggerFactory.Instance, recoveryNoteEnabled: true);
 
-        Assert.Equal(["ChatRecoveryNoteClient", "WorkerPlatformChatClient", "DynamicToolsChatClient", "FunctionInvokingChatClient", "RecordingChatClient"], ChainTypes(client));
+        Assert.Equal(["ChatRecoveryNoteClient", "DynamicToolsChatClient", "FunctionInvokingChatClient", "RecordingChatClient"], ChainTypes(client));
     }
 
     [Fact]

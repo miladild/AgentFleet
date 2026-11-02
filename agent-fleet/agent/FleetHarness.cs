@@ -32,9 +32,7 @@ internal static class FleetHarness
         }
 
         return builder
-            // A plan step on a worker is told about the worker's machine, not the hub's (see WorkerPlatformChatClient).
-            .Use(inner => new WorkerPlatformChatClient(inner))
-            // Next: the current tool list goes onto the request before anything looks for a tool by name.
+            // The current tool list goes onto the request before anything looks for a tool by name.
             .Use(inner => new DynamicToolsChatClient(inner, toolRegistry, (messages, options, toolName) =>
                 PlanRunnerToolPolicy.Offers(
                     toolName,

@@ -15,11 +15,12 @@ public sealed class WorkerPlatformPipelineTests
     public async Task The_agent_sends_worker_instructions_inside_the_scope_and_hub_instructions_afterwards(string platform, bool streaming)
     {
         var recorder = new RecordingClient();
-        using IChatClient pipeline = new ChatClientBuilder(recorder)
-            .Use(inner => new WorkerPlatformChatClient(inner))
-            .UseFunctionInvocation()
-            .Build();
-        var agent = new ChatClientAgent(pipeline, instructions: "You are a local coding assistant.\n\n" + HubPlatform.PathInstructions);
+        using IChatClient pipeline = new ChatClientBuilder(recorder).UseFunctionInvocation().Build();
+        AIAgent agent = new ChatClientAgent(pipeline, new ChatClientAgentOptions
+        {
+            ChatOptions = new ChatOptions { Instructions = "You are a local coding assistant." },
+            AIContextProviders = [new MachinePathContextProvider()]
+        });
         var config = new FleetWorkerWorkspaceConfig("worker.example.test", "fleet-test", "C:/fleet-test/key", "SHA256:test",
             platform == "linux" ? "/fleet-test/workspace" : "C:/fleet-test/workspace", platform);
         using var worker = new WorkerWorkspaceSession("worker-test", config, "C:/fleet-test/project", NullLogger.Instance, TimeSpan.FromSeconds(1));
@@ -36,11 +37,11 @@ public sealed class WorkerPlatformPipelineTests
 
             RecordingClient.Request request = Assert.Single(recorder.Requests);
             Assert.Equal(platform, request.Platform);
+            Assert.Contains("You are a local coding assistant.", request.Instructions);
             Assert.Contains(platform == "linux" ? "Linux worker" : "Windows worker", request.Instructions);
             Assert.DoesNotContain(HubPlatform.PathInstructions, request.Instructions);
             Assert.Contains("Use project-relative paths", request.Instructions);
             Assert.Equal("light", request.Tier);
-            Assert.Contains(HubPlatform.PathInstructions, agent.Instructions);
         }
 
         Assert.Null(WorkerWorkspaceContext.Current);
@@ -52,7 +53,17 @@ public sealed class WorkerPlatformPipelineTests
         Assert.DoesNotContain("During this plan step", recorder.Requests[1].Instructions);
     }
 
-    private static async Task RunAsync(ChatClientAgent agent, bool streaming, ChatClientAgentRunOptions? options)
+    [Fact]
+    public void Each_machine_gets_its_own_paragraph()
+    {
+        Assert.Equal(HubPlatform.PathInstructions, MachinePathContextProvider.Paragraph(null));
+        Assert.Contains("Linux worker", MachinePathContextProvider.Paragraph("linux"));
+        Assert.Contains("/dev/null", MachinePathContextProvider.Paragraph("linux"));
+        Assert.Contains("Windows worker", MachinePathContextProvider.Paragraph("Windows"));
+        Assert.Contains("PowerShell 5.1", MachinePathContextProvider.Paragraph("windows"));
+    }
+
+    private static async Task RunAsync(AIAgent agent, bool streaming, ChatClientAgentRunOptions? options)
     {
         AgentSession session = await agent.CreateSessionAsync();
         if (streaming)
