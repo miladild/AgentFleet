@@ -225,4 +225,86 @@ public sealed class FleetHarnessTests : ContextTestBase
         Assert.Single(fake.LastOptions.Tools, t => t.Name == "read_file");
         Assert.DoesNotContain(fake.LastOptions.Tools, t => t.Name == "run_command");
     }
+
+    // Asks for one web search, then answers.
+    private sealed class SearchingModel : IChatClient
+    {
+        public List<string[]> OfferedTools { get; } = [];
+        public string? ToolResult { get; private set; }
+
+        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+        {
+            ChatMessage[] list = messages.ToArray();
+            OfferedTools.Add(options?.Tools?.Select(tool => tool.Name).ToArray() ?? []);
+            if (list.SelectMany(message => message.Contents).OfType<FunctionResultContent>().FirstOrDefault() is { } result)
+            {
+                ToolResult = result.Result?.ToString();
+                return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "done")));
+            }
+
+            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant,
+                [new FunctionCallContent("w1", "web_search", new Dictionary<string, object?> { ["query"] = "node test server close" })])));
+        }
+
+        public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+        public void Dispose() { }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_stuck_steps_model_is_offered_web_search_and_each_query_is_reported(bool offered)
+    {
+        var model = new SearchingModel();
+        string dir = Path.Combine(Path.GetTempPath(), "fleet-harness-registry-web-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var config = new FleetConfigStore(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["FLEET_CONFIG_PATH"] = Path.Combine(dir, "fleet.config.json") })
+            .Build());
+        var registry = new FleetToolRegistry(config, ["read_file", "web_search"], new SwappableNameSet(["read_file"]), NullLoggerFactory.Instance);
+        IChatClient client = FleetHarness.BuildAgentClient(model, registry, Journal, PlanMode(false), NewInvoker(), NullLoggerFactory.Instance);
+        var lookups = new List<string>();
+        var activity = new StepToolActivity { WebLookup = (tool, target) => lookups.Add($"{tool}: {target}") };
+        var properties = new AdditionalPropertiesDictionary
+        {
+            [FleetRoutingChatClient.RunnerTierKey] = "standard",
+            [StepToolActivity.Key] = activity
+        };
+        if (offered) properties[FleetRoutingChatClient.RunnerWebKey] = true;
+
+        await client.GetResponseAsync("fix the step", new ChatOptions
+        {
+            Tools = [AIFunctionFactory.Create(() => "ok", "read_file"), AIFunctionFactory.Create((string query) => $"results for {query}", "web_search")],
+            AdditionalProperties = properties
+        });
+
+        if (offered)
+        {
+            Assert.Contains("web_search", model.OfferedTools[0]);
+            Assert.Equal(["web_search: node test server close"], lookups);
+            Assert.Contains("--- BEGIN UNTRUSTED WEB TEXT (web_search) ---\nresults for node test server close\n--- END UNTRUSTED WEB TEXT ---", model.ToolResult);
+        }
+        else
+        {
+            Assert.DoesNotContain("web_search", model.OfferedTools[0]);
+            Assert.Empty(lookups);
+            Assert.DoesNotContain("results for", model.ToolResult);
+        }
+    }
+
+    [Fact]
+    public void Web_lookup_is_for_a_steps_own_model_only()
+    {
+        Assert.True(PlanRunnerToolPolicy.Offers("web_fetch", fromRunner: true, role: null, webOffered: true));
+        Assert.False(PlanRunnerToolPolicy.Offers("web_fetch", fromRunner: true, role: null, webOffered: false));
+        Assert.False(PlanRunnerToolPolicy.Offers("web_search", fromRunner: true, role: PlanRunnerToolPolicy.TestRulingRole, webOffered: true));
+        Assert.False(PlanRunnerToolPolicy.Offers("web_search", fromRunner: true, role: PlanRunnerToolPolicy.TestWriterRole, webOffered: true));
+        Assert.True(PlanRunnerToolPolicy.Offers("web_search", fromRunner: false, role: null));
+        Assert.Null(PlanRunnerToolPolicy.Refusal("web_search", role: null, webOffered: true));
+        Assert.NotNull(PlanRunnerToolPolicy.Refusal("web_search", role: null, webOffered: false));
+        Assert.NotNull(PlanRunnerToolPolicy.Refusal("web_fetch", role: PlanRunnerToolPolicy.StepReviewRole, webOffered: true));
+    }
 }

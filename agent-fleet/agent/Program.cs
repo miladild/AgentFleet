@@ -627,16 +627,7 @@ var invoker = new FleetFunctionInvoker(contextJournal, planModeService, planStor
 IChatClient agentClient = FleetHarness.BuildAgentClient(fleetClient, toolRegistry, contextJournal, planModeService, invoker, loggerFactory,
     string.Equals(builder.Configuration["FLEET_CHAT_RECOVERY_NOTE"], "on", StringComparison.OrdinalIgnoreCase));
 
-var fleetAgent = new ChatClientAgent(agentClient, new ChatClientAgentOptions
-{
-    Name = "fleet",
-    Description = "Local coding assistant routed across the available fleet",
-    // The paragraph about the machine the tools act on (the hub, or a plan step's worker) comes from a context provider.
-    AIContextProviders = [new MachinePathContextProvider()],
-    ChatOptions = new ChatOptions
-    {
-        Tools = agentTools,
-        Instructions = $"""
+string agentInstructions = $"""
         You are a local coding assistant. Give direct, accurate answers for the user's
         coding request.
 
@@ -703,9 +694,10 @@ var fleetAgent = new ChatClientAgent(agentClient, new ChatClientAgentOptions
         careful as if you were typing the command yourself, and confirm with the user
         before anything destructive or hard to reverse (force-push, reset --hard,
         deleting files, etc.) rather than guessing what they meant.
-        """
-    }
-});
+        """;
+// The framework's harness agent (see FleetHarness.BuildAgent). The paragraph about the machine the tools act on (the hub, or a
+// plan step's worker) comes from a context provider.
+AIAgent fleetAgent = FleetHarness.BuildAgent(agentClient, agentInstructions, agentTools, [new MachinePathContextProvider()], loggerFactory);
 AIAgent instrumentedFleetAgent = FleetTelemetry.Instrument(fleetAgent, app.Services);
 
 // Optional: a message to a LAN address when a plan needs the user (a step parked, the run ended with steps waiting, done,

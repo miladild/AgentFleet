@@ -12,6 +12,12 @@ internal static partial class PlanRunnerToolPolicy
         "get_plan", "search_context", "report_blocker", TestDispute.Tool
     };
 
+    // Offered to a model carrying out a step only once the step is stuck (see PlanRunner.WebLookupOffered): the owner wanted a stuck
+    // step to look things up rather than rely on what the model knows. Each call is logged in the run log with its query or URL.
+    private static readonly HashSet<string> WebLookupTools = new(StringComparer.Ordinal) { "web_search", "web_fetch" };
+
+    internal static bool IsWebLookup(string toolName) => WebLookupTools.Contains(toolName);
+
     /// <summary>The role of a model asked whether a step's check is broken.</summary>
     public const string CheckAuditRole = "check-audit";
 
@@ -41,8 +47,13 @@ internal static partial class PlanRunnerToolPolicy
     /// dispute_test is offered only to a model carrying out an ordinary step, and only when the caller says a frozen
     /// test is in play (disputeOffered), so with the setting off the list is the same as before.
     /// </summary>
-    public static bool Offers(string toolName, bool fromRunner, string? role, bool disputeOffered = false)
+    public static bool Offers(string toolName, bool fromRunner, string? role, bool disputeOffered = false, bool webOffered = false)
     {
+        if (fromRunner && IsWebLookup(toolName))
+        {
+            return webOffered && role is null;
+        }
+
         if (fromRunner && role is StepReviewRole or TestRulingRole)
         {
             // The reviewer and the ruler are offered the read-only tools and nothing that answers for the step.
@@ -102,8 +113,13 @@ internal static partial class PlanRunnerToolPolicy
     [GeneratedRegex(@"\b(?:git(?:\.exe)?|gh(?:\.exe)?)\b", RegexOptions.IgnoreCase)]
     private static partial Regex RepositoryCli();
 
-    public static string? Refusal(string toolName, string? command = null, string? role = null)
+    public static string? Refusal(string toolName, string? command = null, string? role = null, bool webOffered = false)
     {
+        if (IsWebLookup(toolName) && webOffered && role is null)
+        {
+            return null;
+        }
+
         if (role == StepReviewRole)
         {
             return ReviewTools.Contains(toolName)

@@ -37,6 +37,7 @@ internal sealed class FleetRoutingChatClient : IChatClient
 
     /// <summary>Set on a plan runner request whose step may dispute a frozen test (the dispute_test tool is offered only then).</summary>
     public const string RunnerDisputeKey = "fleet.runner.dispute";
+    public const string RunnerWebKey = "fleet.runner.web";
 
     private readonly IChatClient _triageClient;
     private readonly IReadOnlyList<FleetRouteTarget> _targets;
@@ -497,6 +498,11 @@ internal sealed class FleetRoutingChatClient : IChatClient
             ? role
             : null;
 
+    internal static bool WebOffered(ChatOptions? options) =>
+        options?.AdditionalProperties is { } properties &&
+        properties.TryGetValue(RunnerWebKey, out object? value) &&
+        value is true;
+
     internal static bool DisputeOffered(ChatOptions? options) =>
         options?.AdditionalProperties is { } properties &&
         properties.TryGetValue(RunnerDisputeKey, out object? value) &&
@@ -521,7 +527,7 @@ internal sealed class FleetRoutingChatClient : IChatClient
         if (options?.AdditionalProperties is null ||
             (!options.AdditionalProperties.ContainsKey(RunnerTierKey) && !options.AdditionalProperties.ContainsKey(RunnerMachineKey) &&
              !options.AdditionalProperties.ContainsKey(RunnerRoleKey) && !options.AdditionalProperties.ContainsKey(RunnerDisputeKey) &&
-             !options.AdditionalProperties.ContainsKey(StepToolActivity.Key)))
+             !options.AdditionalProperties.ContainsKey(RunnerWebKey) && !options.AdditionalProperties.ContainsKey(StepToolActivity.Key)))
         {
             return options;
         }
@@ -531,6 +537,7 @@ internal sealed class FleetRoutingChatClient : IChatClient
         cleaned.AdditionalProperties.Remove(RunnerMachineKey);
         cleaned.AdditionalProperties.Remove(RunnerRoleKey);
         cleaned.AdditionalProperties.Remove(RunnerDisputeKey);
+        cleaned.AdditionalProperties.Remove(RunnerWebKey);
         cleaned.AdditionalProperties.Remove(StepToolActivity.Key);
         return cleaned;
     }

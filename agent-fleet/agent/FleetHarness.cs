@@ -1,3 +1,4 @@
+using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 
 namespace AgentFleet;
@@ -38,7 +39,8 @@ internal static class FleetHarness
                     toolName,
                     fromRunner: options?.AdditionalProperties?.ContainsKey(FleetRoutingChatClient.RunnerTierKey) == true,
                     role: FleetRoutingChatClient.RunnerRole(options),
-                    disputeOffered: FleetRoutingChatClient.DisputeOffered(options)) &&
+                    disputeOffered: FleetRoutingChatClient.DisputeOffered(options),
+                    webOffered: FleetRoutingChatClient.WebOffered(options)) &&
                 ContextTools.ShouldOffer(
                     toolName,
                     hasContext: journal.Current is not null,
@@ -54,4 +56,31 @@ internal static class FleetHarness
             })
             .Build();
     }
+
+    /// <summary>
+    /// The agent: the framework's HarnessAgent over the agent client. Its parts that the fleet does its own way are off: its
+    /// default instructions (they ask a model to explain its reasoning between tool calls, the opposite of what the plan steps
+    /// measured), its compaction (fitting is per machine, in the node client), its web search (the fleet's own web tools are
+    /// used), skills, to-dos, modes, file memory, its tool auto-approval and its telemetry (the agent is instrumented with the
+    /// fleet's allow-list). The agent client keeps its own function invocation innermost, so every tool call, the harness's
+    /// included, passes the fleet's tool policy once.
+    /// </summary>
+    internal static HarnessAgent BuildAgent(IChatClient agentClient, string instructions, IList<AITool> tools,
+        IEnumerable<AIContextProvider> contextProviders, ILoggerFactory? loggerFactory = null) =>
+        agentClient.AsHarnessAgent(new HarnessAgentOptions
+        {
+            Name = "fleet",
+            Description = "Local coding assistant routed across the available fleet",
+            HarnessInstructions = "",
+            ChatOptions = new ChatOptions { Instructions = instructions, Tools = tools },
+            AIContextProviders = [.. contextProviders],
+            // No MaxContextWindowTokens or CompactionStrategy: the harness compacts nothing.
+            DisableWebSearch = true,
+            DisableAgentSkillsProvider = true,
+            DisableTodoProvider = true,
+            DisableAgentModeProvider = true,
+            DisableFileMemory = true,
+            DisableToolAutoApproval = true,
+            DisableOpenTelemetry = true,
+        }, loggerFactory);
 }

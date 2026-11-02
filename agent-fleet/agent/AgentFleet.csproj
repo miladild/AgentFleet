@@ -17,6 +17,7 @@
     <PackageReference Include="AGUI.Abstractions" Version="1.0.1" />
     <PackageReference Include="AGUI.Server" Version="1.0.1" />
     <PackageReference Include="HtmlAgilityPack" Version="1.11.72" />
+    <PackageReference Include="Microsoft.Agents.AI.Harness" Version="1.25.0" />
     <PackageReference Include="Microsoft.Agents.AI.Hosting.AGUI.AspNetCore" Version="1.25.0-preview.261014.1" />
     <PackageReference Include="Microsoft.Agents.AI.OpenAI" Version="1.25.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />

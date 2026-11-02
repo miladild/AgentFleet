@@ -233,6 +233,32 @@ public sealed partial class PlanRunnerTests
         finally { FailFirstTests.DeleteTree(project); }
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_step_whose_check_failed_twice_is_offered_web_lookup_from_its_next_round(bool enabled)
+    {
+        string project = NewGitProject();
+        try
+        {
+            var setup = DisputePlan(project, StepWithItsOwnTest());
+            var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []));
+            var fake = WritesItsOwnTest(project, new RulingBudget(0, _ => new StepAgentReply("", 0, false)));
+            await OwnTestRunner(new RulingAgent(fake), workspaces, setup.Options, setup.Health,
+                    command => command != "dotnet test" ? BuildPassOutput : TestsFailOutput,
+                    harness: new HarnessOptions(EnableArbiter: false, EnableWebLookup: enabled), roundsPerRung: 3)
+                .RunPlanAsync(setup.Plan.Id, default).WaitAsync(DisputeTimeLimit);
+
+            Assert.True(fake.Calls.Count >= 3, $"only {fake.Calls.Count} rounds ran");
+            Assert.All(fake.Calls.Take(2), call => Assert.DoesNotContain(PlanRunner.WebLookupNote, call.Prompt));
+            if (enabled)
+                Assert.All(fake.Calls.Skip(2), call => Assert.Contains(PlanRunner.WebLookupNote, call.Prompt));
+            else
+                Assert.All(fake.Calls, call => Assert.DoesNotContain(PlanRunner.WebLookupNote, call.Prompt));
+        }
+        finally { FailFirstTests.DeleteTree(project); }
+    }
+
     [Fact]
     public async Task A_failing_test_the_step_did_not_create_is_never_ruled_on()
     {
