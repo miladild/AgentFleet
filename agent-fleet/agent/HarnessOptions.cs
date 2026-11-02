@@ -30,7 +30,7 @@ internal sealed record HarnessOptions(
     int OllamaNumCtx = 32768,
     double StructuredCallTemperature = 0,
     int UntouchedSendBacks = 2,
-    int ArbiterAfterRounds = 3)
+    int ArbiterAfterRounds = 2)
 {
     private const string Prefix = "FLEET_HARNESS_";
 

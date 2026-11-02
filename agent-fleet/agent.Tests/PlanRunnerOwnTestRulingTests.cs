@@ -35,7 +35,7 @@ public sealed partial class PlanRunnerTests
     }
 
     [Fact]
-    public async Task A_test_the_step_wrote_that_keeps_failing_is_ruled_on_after_three_rounds_and_a_correction_lets_the_step_pass()
+    public async Task A_test_the_step_wrote_that_keeps_failing_is_ruled_on_after_two_rounds_and_a_correction_lets_the_step_pass()
     {
         string project = NewGitProject();
         try
@@ -54,11 +54,62 @@ public sealed partial class PlanRunnerTests
             Assert.Equal(0, budget.Violations);
             PlanRunEvent ruling = Assert.Single(after.Events!, e => e.Kind == RunEventKind.TestRuling);
             Assert.Equal("TestWrong", ruling.FailureClass);
-            Assert.Contains("failed 3 rounds in a row on tests the step wrote", ruling.Detail);
+            Assert.Contains("failed 2 rounds in a row on tests the step wrote", ruling.Detail);
             Assert.Contains("+ " + "    public void rejects_zero() { Assert.True(true); } // CORRECTED", ruling.Detail);
-            Assert.Equal(3, after.Events!.TakeWhile(e => e != ruling).Count(e => e.Kind is RunEventKind.CheckFailed or RunEventKind.FinalValidationFailed));
-            Assert.Contains(fake.Calls.Skip(3), call => call.Prompt.Contains("ruled that the failing test this step wrote was wrong", StringComparison.Ordinal));
+            Assert.Equal(2, after.Events!.TakeWhile(e => e != ruling).Count(e => e.Kind is RunEventKind.CheckFailed or RunEventKind.FinalValidationFailed));
+            Assert.Contains(fake.Calls.Skip(2), call => call.Prompt.Contains("ruled that the failing test this step wrote was wrong", StringComparison.Ordinal));
+            Assert.Contains(fake.Calls.Skip(2), call => call.Prompt.Contains("the step's check passes now", StringComparison.Ordinal));
             Assert.Null(after.FrozenTests);
+        }
+        finally { FailFirstTests.DeleteTree(project); }
+    }
+
+    [Fact]
+    public async Task A_correction_that_leaves_the_check_failing_the_same_way_is_undone_before_the_next_round()
+    {
+        string project = NewGitProject();
+        try
+        {
+            var setup = DisputePlan(project, StepWithItsOwnTest());
+            var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []));
+            var budget = new RulingBudget(2, _ => new StepAgentReply(TestWrongRuling, 0, false));
+            var fake = WritesItsOwnTest(project, budget);
+            await OwnTestRunner(new RulingAgent(fake), workspaces, setup.Options, setup.Health, CheckReadsTheTestFile(project, "NEVER"))
+                .RunPlanAsync(setup.Plan.Id, default).WaitAsync(DisputeTimeLimit);
+
+            PlanRecord after = Store.Get(setup.Plan.Id)!;
+            Assert.Equal(WrongTest, File.ReadAllText(Path.Combine(project, "tests", "LimitTests.cs")));
+            PlanRunEvent[] rulings = after.Events!.Where(e => e.Kind == RunEventKind.TestRuling).ToArray();
+            Assert.NotEmpty(rulings);
+            Assert.All(rulings, ruling => Assert.Equal("Undone", ruling.FailureClass));
+            Assert.Contains("with its correction the check still fails", rulings[0].Detail);
+            Assert.DoesNotContain(fake.Calls, call => call.Prompt.Contains("ruled that the failing test this step wrote was wrong", StringComparison.Ordinal));
+        }
+        finally { FailFirstTests.DeleteTree(project); }
+    }
+
+    [Fact]
+    public async Task A_correction_that_makes_another_test_fail_is_undone()
+    {
+        // Measured: a correction dropped an import that a passing test still used, and nothing caught it.
+        string project = NewGitProject();
+        try
+        {
+            var setup = DisputePlan(project, StepWithItsOwnTest());
+            var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []));
+            var budget = new RulingBudget(1, _ => new StepAgentReply(TestWrongRuling, 0, false));
+            var fake = WritesItsOwnTest(project, budget);
+            const string otherFails = "Exit code: 1\n  Failed Limits.reads_the_file [1 ms]\nFailed! - Failed: 1, Passed: 0, Skipped: 0, Total: 1";
+            await OwnTestRunner(new RulingAgent(fake), workspaces, setup.Options, setup.Health, command => command != "dotnet test"
+                    ? BuildPassOutput
+                    : File.ReadAllText(Path.Combine(project, "tests", "LimitTests.cs")).Contains("CORRECTED", StringComparison.Ordinal) ? otherFails : TestsFailOutput)
+                .RunPlanAsync(setup.Plan.Id, default).WaitAsync(DisputeTimeLimit);
+
+            PlanRecord after = Store.Get(setup.Plan.Id)!;
+            Assert.Equal(WrongTest, File.ReadAllText(Path.Combine(project, "tests", "LimitTests.cs")));
+            PlanRunEvent ruling = after.Events!.First(e => e.Kind == RunEventKind.TestRuling);
+            Assert.Equal("Undone", ruling.FailureClass);
+            Assert.Contains("tests that did not fail before (Limits.reads_the_file", ruling.Detail);
         }
         finally { FailFirstTests.DeleteTree(project); }
     }

@@ -23,6 +23,8 @@ internal sealed partial class PlanRunner
     private const string CodeWrongClass = nameof(TestRulingKind.CodeWrong);
     private const string NoVerdictClass = nameof(TestRulingKind.NoVerdict);
     private const string RefusedClass = "Refused";
+    // A correction that was written, checked at once, and put back because it did not help.
+    private const string UndoneClass = "Undone";
     private static readonly TestRulingOutcome NoRuling = new(null, false);
 
     private void RecordDispute(PlanRecord plan, PlanStep step, int attempt, string tier, ModelAttemptResult model, int rung, int round,

@@ -62,7 +62,7 @@ internal sealed partial class PlanRunner
         PlanRecord latest = _store.Get(plan.Id) ?? plan;
         PlanRunEvent[] earlierRulings = StepEventsSinceRetry(plan.Id, step.Id).Where(runEvent => runEvent.Kind == RunEventKind.TestRuling).ToArray();
         if (earlierRulings.Any(runEvent => runEvent.FailureClass is TestWrongClass or CodeWrongClass) ||
-            earlierRulings.Count(runEvent => runEvent.FailureClass is NoVerdictClass or RefusedClass) >= TestDispute.MaxUnresolvedAsks)
+            earlierRulings.Count(runEvent => runEvent.FailureClass is NoVerdictClass or RefusedClass or UndoneClass) >= TestDispute.MaxUnresolvedAsks)
         {
             return NoRuling;
         }
@@ -111,7 +111,8 @@ internal sealed partial class PlanRunner
                     $"{why} The ruler ({ruler}) found the test right: {Summarize(verdict.Paragraph)}", ruler);
                 return new TestRulingOutcome($"An independent model read the failing test this step wrote and found it right, so the code must change: {verdict.Paragraph}", false);
             case TestRulingKind.TestWrong:
-                return ApplyOwnTestCorrection(latest, step, attempt, tier, model, rung, round, verdict, holding, items, ruler, why);
+                return await ApplyOwnTestCorrectionAsync(latest, step, attempt, tier, model, rung, round, verdict, holding, items, ruler, why,
+                    cancellationToken);
             default:
                 RecordRuling(plan, step, attempt, tier, model, rung, round, NoVerdictClass,
                     $"{why} The ruler ({ruler}) gave no TEST-WRONG or CODE-WRONG verdict: {Summarize(reply.Text)} Nothing changes.", ruler);
@@ -119,9 +120,11 @@ internal sealed partial class PlanRunner
         }
     }
 
-    // Every file is checked before the first write; a write that fails puts back the files already written.
-    private TestRulingOutcome ApplyOwnTestCorrection(PlanRecord plan, PlanStep step, int attempt, string tier, ModelAttemptResult model, int rung,
-        int round, TestRulingVerdict verdict, IReadOnlyList<TestFileText> ownTests, IReadOnlyList<string> items, string ruler, string why)
+    // Every file is checked before the first write; a write that fails puts back the files already written. The written correction
+    // is then checked at once (see CheckCorrectionAsync) and put back when it does not help.
+    private async Task<TestRulingOutcome> ApplyOwnTestCorrectionAsync(PlanRecord plan, PlanStep step, int attempt, string tier,
+        ModelAttemptResult model, int rung, int round, TestRulingVerdict verdict, IReadOnlyList<TestFileText> ownTests, IReadOnlyList<string> items,
+        string ruler, string why, CancellationToken cancellationToken)
     {
         if (TestRuling.Guard(ownTests, verdict.Files, items) is { } refusal)
         {
@@ -184,6 +187,20 @@ internal sealed partial class PlanRunner
             return NoRuling;
         }
 
+        (bool passesNow, string? undoneBecause) = await CheckCorrectionAsync(plan, step, items, cancellationToken);
+        if (undoneBecause is not null)
+        {
+            foreach ((string full, byte[] original) in written)
+            {
+                File.WriteAllBytes(full, original);
+            }
+
+            RecordRuling(plan, step, attempt, tier, model, rung, round, UndoneClass,
+                $"{why} The ruler ({ruler}) ruled the test wrong, but {undoneBecause}, so the correction was undone and the test is as the step wrote it.",
+                ruler);
+            return NoRuling;
+        }
+
         var diff = new StringBuilder();
         foreach ((TestFileText file, var write) in verdict.Files.Zip(writes))
         {
@@ -196,8 +213,61 @@ internal sealed partial class PlanRunner
         string detail = JsonSerializer.Serialize(new { verdict = TestWrongClass, ruler, ownTest = true, why, files = names, diff = Cut(diff.ToString().TrimEnd(), 3000) },
             new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
         RecordRuling(plan, step, attempt, tier, model, rung, round, TestWrongClass, detail, ruler);
+        string then = passesNow
+            ? "With the corrected test the step's check passes now: keep it as it is and change nothing else the check does not ask for."
+            : "Keep the corrected test as it is and make the code pass it.";
         return new TestRulingOutcome(
-            $"An independent model ruled that the failing test this step wrote was wrong and corrected it: {names}. Keep the corrected test as it is and make the code pass it.",
-            true);
+            $"An independent model ruled that the failing test this step wrote was wrong and corrected it: {names}. {then}", true);
+    }
+
+    /// <summary>
+    /// Runs the step's check on the hub copy right after a correction was written, before any model round. Measured: one correction
+    /// left the same assertion failing and the step lost 20 minutes before a second ruling; another removed an import a passing test
+    /// still used. A correction is kept when the check passes, or when it fails on fewer of the same tests and on no new one. Returns
+    /// why it must be put back otherwise; a check that cannot run keeps the correction, as before this check existed.
+    /// </summary>
+    private async Task<(bool PassesNow, string? UndoBecause)> CheckCorrectionAsync(PlanRecord plan, PlanStep step, IReadOnlyList<string> before,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(step.Verify))
+        {
+            return (false, null);
+        }
+
+        (bool passed, string output) checkedRun;
+        try
+        {
+            using (WorkerWorkspaceContext.Suspend())
+            {
+                checkedRun = await _tools.RunRepairCommandAsync(plan, step.Verify, cancellationToken);
+            }
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            _logger.LogWarning(exception, "Plan {PlanId} step {StepId}: the check after a test correction could not run.", plan.Id, step.Id);
+            return (false, null);
+        }
+
+        (bool passed, string output) = checkedRun;
+        if (passed)
+        {
+            return (true, null);
+        }
+
+        if (CommandMissing(output))
+        {
+            return (false, null);
+        }
+
+        IReadOnlyList<string> after = TestDispute.FailingItems(output);
+        string[] added = after.Where(item => !before.Contains(item, StringComparer.Ordinal)).ToArray();
+        if (added.Length > 0)
+        {
+            return (false, $"with its correction the check fails on tests that did not fail before ({string.Join(", ", added.Take(FinalCheckNamesShown))})");
+        }
+
+        return after.Count > 0 && after.Count < before.Count
+            ? (false, null)
+            : (false, $"with its correction the check still fails: {Cut(output, FinalCheckDetailCharacters)}");
     }
 }
