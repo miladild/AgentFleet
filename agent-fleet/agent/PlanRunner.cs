@@ -1058,6 +1058,8 @@ internal sealed partial class PlanRunner
         int roundsInRung = position.RoundsInRung;
         int roundsTotal = position.RoundsTotal;
         int? bestFailing = RepairLadder.BestFailing(earlierEvents);
+        // Rounds in a row whose check failed only on tests the step wrote itself (see RuleOnOwnTestAsync).
+        int ownTestRounds = 0;
         TimeSpan worked = TimeSpan.FromSeconds(earlierEvents
             .Where(runEvent => runEvent.Kind == RunEventKind.RoundClassified).Sum(runEvent => runEvent.DurationSeconds ?? 0));
         string? hub = _fleetOptions?.Nodes.SingleOrDefault(node => node.Fallback)?.Name;
@@ -1691,6 +1693,22 @@ internal sealed partial class PlanRunner
                     ruling = await RuleOnDisputeAsync(plan, step, attempt, tier, model, change.Files, result.Output ?? result.Message,
                         rung, round, cancellationToken);
                     plan = _store.Get(plan.Id) ?? plan;
+                }
+
+                // A test the step wrote itself may be the wrong side: after rounds in a row failing only on such tests, an
+                // independent model rules on it. A step that only writes tests is left alone: its tests fail until the code exists.
+                if (_harness.EnableArbiter && ruling.Note is null && step.Kind != "tests")
+                {
+                    string checkText = result.Output ?? result.Message;
+                    IReadOnlyList<TestFileText> ownTests = ReadOwnTestFiles(plan, step);
+                    ownTestRounds = OnlyOwnTestsFail(checkText, ownTests) ? ownTestRounds + 1 : 0;
+                    if (ownTestRounds >= _harness.ArbiterAfterRounds)
+                    {
+                        ruling = await RuleOnOwnTestAsync(plan, step, attempt, tier, model, change.Files, checkText, ownTests, ownTestRounds,
+                            rung, round, cancellationToken);
+                        plan = _store.Get(plan.Id) ?? plan;
+                        ownTestRounds = 0;
+                    }
                 }
 
                 if (ruling.TestCorrected)
