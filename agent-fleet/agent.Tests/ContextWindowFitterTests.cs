@@ -98,11 +98,11 @@ public sealed class ContextWindowFitterTests
     }
 
     [Fact]
-    public void Context_fitter_parser_handles_null_and_empty()
+    public void Without_a_setting_the_framework_compaction_is_used()
     {
-        Assert.Same(ClassicContextWindowFitter.Instance, ContextWindowFitters.FromSetting(null, null));
-        Assert.Same(ClassicContextWindowFitter.Instance, ContextWindowFitters.FromSetting("", null));
-        Assert.Same(ClassicContextWindowFitter.Instance, ContextWindowFitters.FromSetting("   ", null));
+        Assert.Equal("maf-collapse", ContextWindowFitters.FromSetting(null, null).Name);
+        Assert.Equal("maf-collapse", ContextWindowFitters.FromSetting("", null).Name);
+        Assert.Equal("maf-collapse", ContextWindowFitters.FromSetting("   ", null).Name);
     }
 
     [Fact]
@@ -130,12 +130,12 @@ public sealed class ContextWindowFitterTests
     }
 
     [Fact]
-    public void Context_fitter_parser_defaults_unknown_to_classic_with_warning()
+    public void An_unknown_setting_uses_the_framework_compaction_with_a_warning()
     {
         var logger = new ContextWindowTestHelper.CollectingLogger();
         IContextWindowFitter fitter = ContextWindowFitters.FromSetting("unknown-fitter", logger);
 
-        Assert.Same(ClassicContextWindowFitter.Instance, fitter);
+        Assert.Equal("maf-collapse", fitter.Name);
         Assert.NotEmpty(logger.Warnings);
         Assert.Contains("unknown-fitter", logger.Warnings[0]);
     }

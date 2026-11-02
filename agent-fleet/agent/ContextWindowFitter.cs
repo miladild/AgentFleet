@@ -39,10 +39,19 @@ internal sealed class ClassicContextWindowFitter : IContextWindowFitter
 /// </summary>
 internal static class ContextWindowFitters
 {
+    /// <summary>
+    /// The framework's compaction (tool results collapsed) unless the setting names another policy. The classic policy is kept
+    /// selectable by name for one comparison run against the framework's.
+    /// </summary>
     public static IContextWindowFitter FromSetting(string? value, ILogger? logger)
     {
         string? trimmed = value?.Trim();
-        if (string.IsNullOrEmpty(trimmed) || string.Equals(trimmed, "classic", StringComparison.OrdinalIgnoreCase))
+        if (string.IsNullOrEmpty(trimmed))
+        {
+            return new MafContextWindowFitter(collapseToolResults: true, logger);
+        }
+
+        if (string.Equals(trimmed, "classic", StringComparison.OrdinalIgnoreCase))
         {
             return ClassicContextWindowFitter.Instance;
         }
@@ -57,7 +66,7 @@ internal static class ContextWindowFitters
             return new MafContextWindowFitter(collapseToolResults: true, logger);
         }
 
-        logger?.LogWarning("Unknown context-window fitter '{Value}'. Accepted values are: classic, maf-truncate, maf-collapse. Using classic.", value);
-        return ClassicContextWindowFitter.Instance;
+        logger?.LogWarning("Unknown context-window fitter '{Value}'. Accepted values are: maf-collapse, maf-truncate, classic. Using maf-collapse.", value);
+        return new MafContextWindowFitter(collapseToolResults: true, logger);
     }
 }

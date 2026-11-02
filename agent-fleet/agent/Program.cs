@@ -84,11 +84,11 @@ var fitLog = fitLoggers.CreateLogger("AgentFleet.ContextFit");
 IContextWindowFitter contextFitter = ContextWindowFitters.FromSetting(builder.Configuration["FLEET_CONTEXT_FIT"], fitLog);
 bool stepGuidanceEnabled = PlanStepGuidance.IsEnabled(builder.Configuration["FLEET_STEP_GUIDANCE"]);
 
-// Log a warning if a non-default context-window fitting policy is in use.
-if (contextFitter.Name != "classic")
+// The framework's compaction is the default; another policy is named in the log so a run's speed can be read against it.
+if (contextFitter.Name != "maf-collapse")
 {
     fitLog.LogWarning(
-        "Context-window policy \"{Name}\" is experimental; unset FLEET_CONTEXT_FIT to return to the default.", contextFitter.Name);
+        "Context-window policy \"{Name}\" is not the default; unset FLEET_CONTEXT_FIT to use the framework's compaction.", contextFitter.Name);
 }
 
 if (stepGuidanceEnabled)
