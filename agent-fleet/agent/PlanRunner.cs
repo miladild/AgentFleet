@@ -1060,6 +1060,9 @@ internal sealed partial class PlanRunner
         int? bestFailing = RepairLadder.BestFailing(earlierEvents);
         // Rounds in a row whose check failed only on tests the step wrote itself (see RuleOnOwnTestAsync).
         int ownTestRounds = 0;
+        // A ruling is given once per step, so its note leads every later failure of the step, not only the next one: measured, a
+        // ruler named the exact fix, the next answer made no tool call, and the seven rounds after it never saw the ruling again.
+        string? rulingNote = null;
         TimeSpan worked = TimeSpan.FromSeconds(earlierEvents
             .Where(runEvent => runEvent.Kind == RunEventKind.RoundClassified).Sum(runEvent => runEvent.DurationSeconds ?? 0));
         string? hub = _fleetOptions?.Nodes.SingleOrDefault(node => node.Fallback)?.Name;
@@ -1718,7 +1721,8 @@ internal sealed partial class PlanRunner
                     best = null;
                 }
 
-                if (ruling.Note is not null) lastFailure = $"{ruling.Note}\n\n{lastFailure}";
+                rulingNote = ruling.Note ?? rulingNote;
+                if (rulingNote is not null) lastFailure = $"{rulingNote}\n\n{lastFailure}";
                 // A worker that ran out of time on a round is not given the step's remaining time again when the hub may take it
                 // over: the rescue starts at once (a worker-only plan keeps its worker, as before).
                 bool hubRung = HubRungAvailable(step, hub, hubAllowed, model.ModelNode);

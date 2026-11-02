@@ -10,11 +10,11 @@ public sealed partial class PlanRunnerTests
         new("Implement limits", "Reject zero, with a test for it", ["src/limit.cs", LimitTestFile], "dotnet test", "standard");
 
     private PlanRunner OwnTestRunner(IStepAgent agent, FakeWorkerWorkspaceManager workspaces, FleetOptions options, FleetHealthMonitor health,
-        Func<string, string> run, HarnessOptions? harness = null) =>
+        Func<string, string> run, HarnessOptions? harness = null, int roundsPerRung = 2) =>
         new(Store, new PlanTools(Store, Valid, (command, directory, token) => command.StartsWith("git ", StringComparison.Ordinal)
                 ? FailFirstTests.RunShell(command, directory, token) : Task.FromResult(run(command))),
             agent, NullLogger.Instance, fleetOptions: options, healthMonitor: health, workerWorkspaces: workspaces,
-            transientDelay: _ => TimeSpan.Zero, delayAsync: (_, _) => Task.CompletedTask, roundsPerRung: 2,
+            transientDelay: _ => TimeSpan.Zero, delayAsync: (_, _) => Task.CompletedTask, roundsPerRung: roundsPerRung,
             failFirst: FailFirstMode.Off, testFirst: TestFirstMode.Off, harness: harness);
 
     // The step's model writes its test in the first message and changes the code in every message after it.
@@ -154,6 +154,30 @@ public sealed partial class PlanRunnerTests
             Assert.Equal(0, budget.Violations);
             Assert.Equal("CodeWrong", Assert.Single(after.Events!, e => e.Kind == RunEventKind.TestRuling).FailureClass);
             Assert.Contains(fake.Calls, call => call.Prompt.Contains("found it right, so the code must change: The limit must refuse zero", StringComparison.Ordinal));
+        }
+        finally { FailFirstTests.DeleteTree(project); }
+    }
+
+    [Fact]
+    public async Task A_ruling_that_the_code_is_wrong_stays_in_every_later_round_of_the_step()
+    {
+        // Measured: the ruler named the exact fix, the next round's answer ended without a tool call, and the seven rounds after it
+        // never saw the ruling again.
+        string project = NewGitProject();
+        try
+        {
+            var setup = DisputePlan(project, StepWithItsOwnTest());
+            var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []));
+            var budget = new RulingBudget(1, _ => new StepAgentReply(CodeWrongRuling, 0, false));
+            var fake = WritesItsOwnTest(project, budget);
+            int checks = 0;
+            await OwnTestRunner(new RulingAgent(fake), workspaces, setup.Options, setup.Health,
+                    command => command != "dotnet test" ? BuildPassOutput : ++checks < 6 ? TestsFailOutput : TestsPassOutput, roundsPerRung: 3)
+                .RunPlanAsync(setup.Plan.Id, default).WaitAsync(DisputeTimeLimit);
+
+            Assert.True(fake.Calls.Count >= 6, $"only {fake.Calls.Count} rounds ran");
+            Assert.All(fake.Calls.Skip(3), call =>
+                Assert.Contains("found it right, so the code must change: The limit must refuse zero", call.Prompt, StringComparison.Ordinal));
         }
         finally { FailFirstTests.DeleteTree(project); }
     }
