@@ -78,31 +78,123 @@ public sealed partial class PlanRunnerTests
         Assert.EndsWith(TestRunHint, failure, StringComparison.Ordinal);
     }
 
+    private const string NodeTestCheck = "node --test test/a.test.js";
+    // The first run of a step's own check exits when the tests are done and adds no per-test limit (a slow test must not fail it).
+    private const string NodeTestCheckForced = "node --test --test-force-exit test/a.test.js";
+    // The run after a timeout also stops a test that never ends.
+    private const string NodeTestCheckRerun = "node --test --test-force-exit --test-timeout=20000 test/a.test.js";
+
     [Fact]
-    public async Task A_killed_node_test_check_is_run_again_with_the_force_exit_flags_and_the_retry_sees_its_errors()
+    public async Task A_failing_node_test_check_reports_its_forced_exit_run_and_the_original_command_is_not_run_while_it_fails()
     {
-        PlanRecord plan = InterruptedWorkerPlan(out _, verify: "node --test test/a.test.js");
+        PlanRecord plan = InterruptedWorkerPlan(out _, verify: NodeTestCheck);
         var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], [])) { WorkerAnswers = true };
         var agent = Agent("I will fix the test.");
         var commands = new List<string>();
-        Exception timeout = new WorkerCommandTimeoutException("Operation has timed out.",
-            new Renci.SshNet.Common.SshOperationTimeoutException("Operation has timed out."), "✖ create an alert (4 ms)\n");
+        int forcedRuns = 0;
 
         string Verify(string command)
         {
+            if (!command.StartsWith("node ", StringComparison.Ordinal)) return Pass(command);
             commands.Add(command);
-            if (command == "node --test test/a.test.js" && commands.Count == 1) throw timeout;
-            if (command.Contains("--test-force-exit", StringComparison.Ordinal))
-                return "Exit code: 1\n--- stdout ---\n✖ create an alert (4 ms)\n  TypeError: fetch failed (ECONNREFUSED)\n";
-            return Pass(command);
+            if (!command.Contains("--test-force-exit", StringComparison.Ordinal)) return Pass(command);
+            return ++forcedRuns == 1
+                ? "Exit code: 1\n--- stdout ---\n✖ create an alert (4 ms)\n  AssertionError [ERR_ASSERTION]: 404 !== 201\n"
+                : Pass(command);
         }
 
         await Runner(agent, Verify, workerWorkspaces: workspaces).RunPlanAsync(plan.Id, default);
 
         string retry = string.Join('\n', agent.Calls.Skip(1).Select(call => call.Prompt));
-        Assert.Contains("node --test --test-force-exit --test-timeout=20000 test/a.test.js", commands);
-        Assert.Contains("TypeError: fetch failed (ECONNREFUSED)", retry, StringComparison.Ordinal);
+        Assert.Equal(new[] { NodeTestCheckForced, NodeTestCheckForced, NodeTestCheck }, commands);
+        Assert.Contains("AssertionError [ERR_ASSERTION]: 404 !== 201", retry, StringComparison.Ordinal);
+        Assert.DoesNotContain(KilledCheckMessage, retry, StringComparison.Ordinal);
         Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+    }
+
+    [Fact]
+    public async Task A_hub_node_test_check_that_fails_is_reported_from_its_forced_exit_run_alone()
+    {
+        PlanRecord plan = ApprovedPlan(new PlanStepInput("fix the test", "detail", [], NodeTestCheck, null));
+        var agent = Agent("I will fix the test.");
+        var commands = new List<string>();
+        int forcedRuns = 0;
+
+        string Verify(string command)
+        {
+            if (!command.StartsWith("node ", StringComparison.Ordinal)) return Pass(command);
+            commands.Add(command);
+            if (!command.Contains("--test-force-exit", StringComparison.Ordinal)) return Pass(command);
+            return ++forcedRuns == 1
+                ? "Exit code: 1\n--- stdout ---\n✖ create an alert (4 ms)\n  AssertionError [ERR_ASSERTION]: 404 !== 201\n"
+                : Pass(command);
+        }
+
+        await Runner(agent, Verify).RunPlanAsync(plan.Id, default);
+
+        string retry = string.Join('\n', agent.Calls.Skip(1).Select(call => call.Prompt));
+        Assert.Equal(new[] { NodeTestCheckForced, NodeTestCheckForced, NodeTestCheck }, commands);
+        Assert.Contains("AssertionError [ERR_ASSERTION]: 404 !== 201", retry, StringComparison.Ordinal);
+        Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+    }
+
+    [Fact]
+    public async Task A_node_test_check_that_passes_when_forced_still_runs_the_original_and_its_timeout_fails_the_round()
+    {
+        PlanRecord plan = InterruptedWorkerPlan(out _, verify: NodeTestCheck);
+        var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], [])) { WorkerAnswers = true };
+        var agent = Agent("I will fix the test.");
+        var commands = new List<string>();
+        Exception timeout = new WorkerCommandTimeoutException("Operation has timed out.",
+            new Renci.SshNet.Common.SshOperationTimeoutException("Operation has timed out."), "✖ create an alert (4 ms)\n");
+        bool originalHung = false;
+        bool rerunPrinted = false;
+
+        string Verify(string command)
+        {
+            if (!command.StartsWith("node ", StringComparison.Ordinal)) return Pass(command);
+            commands.Add(command);
+            if (!command.Contains("--test-force-exit", StringComparison.Ordinal))
+            {
+                if (originalHung) return Pass(command);
+                originalHung = true;
+                throw timeout;
+            }
+
+            if (!originalHung || rerunPrinted) return Pass(command);
+            rerunPrinted = true;
+            return "Exit code: 1\n--- stdout ---\n✖ create an alert (4 ms)\n  TypeError: fetch failed (ECONNREFUSED)\n";
+        }
+
+        await Runner(agent, Verify, workerWorkspaces: workspaces).RunPlanAsync(plan.Id, default);
+
+        string retry = string.Join('\n', agent.Calls.Skip(1).Select(call => call.Prompt));
+        Assert.Equal(new[] { NodeTestCheckForced, NodeTestCheck, NodeTestCheckRerun, NodeTestCheckForced, NodeTestCheck }, commands);
+        Assert.Contains("TypeError: fetch failed (ECONNREFUSED)", retry, StringComparison.Ordinal);
+        Assert.Contains(KilledCheckMessage, retry, StringComparison.Ordinal);
+        Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+    }
+
+    [Theory]
+    [InlineData("dotnet test")]
+    [InlineData("npm test && npm run lint")]
+    public async Task A_check_that_is_not_a_plain_node_test_command_runs_once_without_the_force_exit_flags(string verify)
+    {
+        PlanRecord plan = InterruptedWorkerPlan(out _, verify: verify);
+        var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], [])) { WorkerAnswers = true };
+        var agent = Agent("I will make the check finish.");
+        var commands = new List<string>();
+
+        string Verify(string command)
+        {
+            if (!command.StartsWith("git ", StringComparison.Ordinal)) commands.Add(command);
+            return Pass(command);
+        }
+
+        await Runner(agent, Verify, workerWorkspaces: workspaces).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+        Assert.Equal(new[] { verify }, commands);
     }
 
     [Fact]

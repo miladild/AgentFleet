@@ -13,6 +13,12 @@ internal sealed partial class PlanRunner
     /// <summary>The flags added to a node test command for the rerun: exit when the tests are done, and stop a test that never ends.</summary>
     private const string ForcedExitFlags = "--test-force-exit --test-timeout=20000";
 
+    /// <summary>
+    /// The flag a step's own check is tried with first: exit when the tests are done. No per-test limit is added, so a test that
+    /// legitimately takes long is not failed by it.
+    /// </summary>
+    internal const string FirstRunForcedExitFlags = "--test-force-exit";
+
     // The first "--test" flag of a node command, as a whole word (not --test-name-pattern and the like).
     [GeneratedRegex(@"^(?<head>\s*node\s(?:[^&|;]*?\s)?)--test(?=\s|$)", RegexOptions.CultureInvariant)]
     private static partial Regex NodeTestFlag();
@@ -22,7 +28,7 @@ internal sealed partial class PlanRunner
     /// them. A command chained with &amp;&amp; is left alone: only the first command is a plain one, and a rerun of part of a chain would
     /// not be the check.
     /// </summary>
-    internal static string? ForcedExitCommand(string? command)
+    internal static string? ForcedExitCommand(string? command, string flags = ForcedExitFlags)
     {
         if (string.IsNullOrWhiteSpace(command) || command.Contains("--test-force-exit", StringComparison.Ordinal) ||
             command.Contains("&&", StringComparison.Ordinal) || command.Contains('|') || command.Contains(';'))
@@ -31,7 +37,7 @@ internal sealed partial class PlanRunner
         }
 
         Match flag = NodeTestFlag().Match(command);
-        return flag.Success ? string.Concat(flag.Groups["head"].Value, "--test ", ForcedExitFlags, command.AsSpan(flag.Length)) : null;
+        return flag.Success ? string.Concat(flag.Groups["head"].Value, "--test ", flags, command.AsSpan(flag.Length)) : null;
     }
 
     /// <summary>

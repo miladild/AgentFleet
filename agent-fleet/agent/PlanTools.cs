@@ -368,7 +368,7 @@ internal sealed partial class PlanTools
                 return new StepCompletion(false, blocked, blocked);
             }
 
-            string result = await _runCommand(step.Verify, plan.WorkingDirectory, cancellationToken);
+            string result = await RunStepCheckAsync(plan, step.Verify, cancellationToken);
             passed = result.StartsWith("Exit code: 0", StringComparison.Ordinal);
             output = fullCheckOutput ? FailureLocation.ProjectRelative(result, plan.WorkingDirectory)
                 : ShortenCheckOutput(FailureLocation.ProjectRelative(result, plan.WorkingDirectory));
@@ -436,6 +436,26 @@ internal sealed partial class PlanTools
             ? "All steps are done. Give the user a short summary of what changed."
             : $"Next: step {next.Id}, {next.Title}.");
         return new StepCompletion(true, reply.ToString(), output, restoredNote);
+    }
+
+    /// <summary>
+    /// Runs a step's own check. A plain node test command runs first with the runner forced to exit: when that run fails, its
+    /// output is the check's result and the original command is not run, so a test that leaves a handle open does not cost the
+    /// full timeout in every round. When the forced run passes, the original command runs as before, so a hang in it still
+    /// fails the check by timeout. Any other command runs once, as it is.
+    /// </summary>
+    internal async Task<string> RunStepCheckAsync(PlanRecord plan, string command, CancellationToken cancellationToken)
+    {
+        if (PlanRunner.ForcedExitCommand(command, PlanRunner.FirstRunForcedExitFlags) is { } forced)
+        {
+            string forcedResult = await _runCommand(forced, plan.WorkingDirectory, cancellationToken);
+            if (!forcedResult.StartsWith("Exit code: 0", StringComparison.Ordinal))
+            {
+                return forcedResult;
+            }
+        }
+
+        return await _runCommand(command, plan.WorkingDirectory, cancellationToken);
     }
 
     /// <summary>
