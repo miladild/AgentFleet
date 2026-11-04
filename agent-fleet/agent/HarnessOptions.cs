@@ -32,7 +32,8 @@ internal sealed record HarnessOptions(
     int UntouchedSendBacks = 2,
     int ArbiterAfterRounds = 2,
     bool EnableWebLookup = true,
-    int WebLookupAfterFailures = 2)
+    int WebLookupAfterFailures = 2,
+    bool EnableNewPrintCheck = true)
 {
     private const string Prefix = "FLEET_HARNESS_";
 
@@ -69,7 +70,8 @@ internal sealed record HarnessOptions(
             Number("UNTOUCHED_SEND_BACKS", defaults.UntouchedSendBacks, 1, 50),
             Number("ARBITER_AFTER_ROUNDS", defaults.ArbiterAfterRounds, 1, 50),
             Flag("ENABLE_WEB_LOOKUP", defaults.EnableWebLookup),
-            Number("WEB_LOOKUP_AFTER_FAILURES", defaults.WebLookupAfterFailures, 1, 50));
+            Number("WEB_LOOKUP_AFTER_FAILURES", defaults.WebLookupAfterFailures, 1, 50),
+            Flag("ENABLE_NEW_PRINT_CHECK", defaults.EnableNewPrintCheck));
     }
 
     /// <summary>One line for the run log: every option and its value.</summary>
@@ -85,6 +87,7 @@ internal sealed record HarnessOptions(
             (nameof(MaxPacketTokens), MaxPacketTokens), (nameof(OllamaNumCtx), OllamaNumCtx),
             (nameof(StructuredCallTemperature), StructuredCallTemperature.ToString(CultureInfo.InvariantCulture)),
             (nameof(UntouchedSendBacks), UntouchedSendBacks), (nameof(ArbiterAfterRounds), ArbiterAfterRounds),
-            (nameof(EnableWebLookup), EnableWebLookup), (nameof(WebLookupAfterFailures), WebLookupAfterFailures)
+            (nameof(EnableWebLookup), EnableWebLookup), (nameof(WebLookupAfterFailures), WebLookupAfterFailures),
+            (nameof(EnableNewPrintCheck), EnableNewPrintCheck)
         }.Select(option => $"{option.Name}={(option.Value is bool flag ? (flag ? "on" : "off") : option.Value)}"));
 }

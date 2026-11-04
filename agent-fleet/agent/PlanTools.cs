@@ -654,6 +654,31 @@ internal sealed partial class PlanTools
     }
 
     /// <summary>
+    /// The text of a file as one commit holds it, or null when git cannot say (the file is not in that commit, git is missing, or the
+    /// path or commit is not one this method will put on a command line).
+    /// </summary>
+    internal async Task<string?> ReadAtCommitAsync(PlanRecord plan, string commit, string relativePath, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(plan.WorkingDirectory) || !CommitName().IsMatch(commit) || relativePath.Length == 0 ||
+            relativePath.IndexOfAny(['"', '`', '$', '%', '&', '|', ';', '<', '>', '\n', '\r', '\\']) >= 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            return Stdout(await _runCommand($"git show {commit}:\"{relativePath}\"", plan.WorkingDirectory, cancellationToken));
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    [System.Text.RegularExpressions.GeneratedRegex("^[0-9a-fA-F]{4,64}$")]
+    private static partial System.Text.RegularExpressions.Regex CommitName();
+
+    /// <summary>
     /// After an attempt: the files of the snapshot that are gone, or back to what git has committed, and that no
     /// unfinished step names, written back as they were. A file an unfinished step names (this step's own, or one a
     /// step running beside it or after it will write) is that step's to change. When the attempt committed (HEAD moved),

@@ -122,9 +122,11 @@ public sealed partial class PlanNoChangeTests
     }
 
     [Theory]
-    [InlineData("console.log(\"started\");")]
-    [InlineData("console.log(\"debug mode is off\");")]
-    [InlineData("console.log(\"DEBUGGING started\");")]
+    [InlineData("console.error(\"request failed\");")]
+    [InlineData("logger.info(\"started\");")]
+    [InlineData("Console.WriteLine(\"started\");")]
+    [InlineData("println(\"started\")")]
+    [InlineData("console.log")]
     [InlineData("const DEBUG = true;")]
     [InlineData("// DEBUG: temporary note")]
     [InlineData("debugger_mode = false;")]
@@ -139,6 +141,254 @@ public sealed partial class PlanNoChangeTests
         });
 
         await RepairRunner(agent, _ => Pass("check")).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+        Assert.Single(agent.Calls);
+        Assert.Equal(0, DebugRounds(plan.Id));
+    }
+
+    // Measured: a worker left console.log("DELETE handler called") lines in a route file; none of them named DEBUG, so the check let them pass.
+    [Theory]
+    [InlineData("console.log(\"DELETE handler called, id:\", id);")]
+    [InlineData("console.log(\"started\");")]
+    [InlineData("print(\"here\")")]
+    [InlineData("if (ok) console.log(x);")]
+    public async Task A_print_call_the_step_added_to_a_file_that_existed_before_it_gets_one_more_round(string line)
+    {
+        WriteProjectFile("app.js", "const x = 1;\n");
+        PlanRecord plan = OneStepPlan(StepListing("edit app", "app.js"));
+        int round = 0;
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            round++;
+            WriteProjectFile("app.js", round == 1 ? $"const x = 1;\n{line}\n" : "const x = 2;\n");
+            return Task.FromResult("Changed app.");
+        });
+
+        await RepairRunner(agent, _ => Pass("check")).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+        Assert.Equal(2, agent.Calls.Count);
+        Assert.Equal(1, DebugRounds(plan.Id));
+        Assert.Contains($"app.js:2 {line.Trim()}", agent.Sessions[0].Messages[1].Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_print_call_the_file_already_had_when_the_step_began_gets_no_round()
+    {
+        WriteProjectFile("app.js", "console.log(\"listening\");\nconst x = 1;\n");
+        PlanRecord plan = OneStepPlan(StepListing("edit app", "app.js"));
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            WriteProjectFile("app.js", "console.log(\"listening\");\nconst x = 2;\n");
+            return Task.FromResult("Changed app.");
+        });
+
+        await RepairRunner(agent, _ => Pass("check")).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+        Assert.Single(agent.Calls);
+        Assert.Equal(0, DebugRounds(plan.Id));
+    }
+
+    [Fact]
+    public async Task A_print_call_in_a_file_the_step_created_gets_no_round()
+    {
+        PlanRecord plan = OneStepPlan(StepListing("add the server", "server.js"));
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            WriteProjectFile("server.js", "console.log(\"listening\");\n");
+            return Task.FromResult("Created server.");
+        });
+
+        await RepairRunner(agent, _ => Pass("check")).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+        Assert.Single(agent.Calls);
+        Assert.Equal(0, DebugRounds(plan.Id));
+    }
+
+    [Fact]
+    public async Task A_print_call_added_to_a_file_the_step_does_not_list_is_judged_against_that_files_earlier_version()
+    {
+        WriteProjectFile("other.js", "console.log(\"old\");\nconst y = 1;\n");
+        WriteProjectFile("a.js", "const a = 1;\n");
+        PlanRecord plan = OneStepPlan(StepListing("edit a", "a.js"));
+        int round = 0;
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            round++;
+            WriteProjectFile("a.js", $"const a = {round + 1};\n");
+            WriteProjectFile("other.js", round == 1 ? "console.log(\"old\");\nconsole.log(\"new\");\nconst y = 1;\n" : "console.log(\"old\");\nconst y = 1;\n");
+            return Task.FromResult("Changed a.");
+        });
+
+        await RepairRunner(agent, _ => Pass("check")).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+        Assert.Equal(1, DebugRounds(plan.Id));
+        string extra = agent.Sessions[0].Messages[1].Text;
+        Assert.Contains("other.js:2 console.log(\"new\");", extra, StringComparison.Ordinal);
+        Assert.DoesNotContain("other.js:1", extra, StringComparison.Ordinal);
+    }
+
+    // A project whose git status leaves one file out (it was clean when the step began), so its earlier version comes from the commit.
+    private PlanRunner RunnerWithACleanFile(FakeStepAgent agent, string cleanFile, Func<string, string> show, Func<bool> changedByNow)
+    {
+        string project = ProjectDirectory;
+        var tools = new PlanTools(Store, Valid, (command, _, _) => Task.FromResult(command switch
+        {
+            "git rev-parse --show-toplevel" => $"Exit code: 0\n--- stdout ---\n{project}",
+            "git rev-parse HEAD" => "Exit code: 0\n--- stdout ---\nabc123",
+            _ when command.Contains("--untracked-files=all", StringComparison.Ordinal) =>
+                "Exit code: 0\n--- stdout ---\n" + string.Join("\n",
+                    Directory.GetFiles(project, "*", SearchOption.AllDirectories)
+                        .Select(file => Path.GetRelativePath(project, file).Replace('\\', '/'))
+                        .Where(file => file != cleanFile || changedByNow())
+                        .Select(file => "?? " + file)),
+            _ when command.StartsWith("git show ", StringComparison.Ordinal) => show(command),
+            _ when command.StartsWith("git ", StringComparison.Ordinal) => "Exit code: 0\n--- stdout ---\n",
+            _ => Pass("check")
+        }));
+        return new PlanRunner(Store, tools, agent, NullLogger.Instance, transientDelay: _ => TimeSpan.Zero, delayAsync: (_, _) => Task.CompletedTask);
+    }
+
+    [Fact]
+    public async Task A_file_that_was_clean_when_the_step_began_is_judged_against_the_commit()
+    {
+        WriteProjectFile("other.js", "console.log(\"old\");\nconst y = 1;\n");
+        WriteProjectFile("a.js", "const a = 1;\n");
+        PlanRecord plan = OneStepPlan(StepListing("edit a", "a.js"));
+        var commands = new List<string>();
+        int round = 0;
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            round++;
+            WriteProjectFile("a.js", $"const a = {round + 1};\n");
+            WriteProjectFile("other.js", round == 1 ? "console.log(\"old\");\nconsole.log(\"new\");\nconst y = 1;\n" : "console.log(\"old\");\nconst y = 1;\n");
+            return Task.FromResult("Changed a.");
+        });
+
+        await RunnerWithACleanFile(agent, "other.js", command =>
+        {
+            commands.Add(command);
+            return "Exit code: 0\n--- stdout ---\nconsole.log(\"old\");\nconst y = 1;\n";
+        }, () => round > 0).RunPlanAsync(plan.Id, default);
+
+        Assert.Contains("git show abc123:\"other.js\"", commands);
+        Assert.Equal(1, DebugRounds(plan.Id));
+        string extra = agent.Sessions[0].Messages[1].Text;
+        Assert.Contains("other.js:2 console.log(\"new\");", extra, StringComparison.Ordinal);
+        Assert.DoesNotContain("other.js:1", extra, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_file_whose_earlier_version_cannot_be_found_is_not_checked_for_new_print_calls_and_the_log_says_so()
+    {
+        WriteProjectFile("other.js", "const y = 1;\n");
+        WriteProjectFile("a.js", "const a = 1;\n");
+        PlanRecord plan = OneStepPlan(StepListing("edit a", "a.js"));
+        bool changed = false;
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            changed = true;
+            WriteProjectFile("a.js", "const a = 2;\n");
+            WriteProjectFile("other.js", "console.log(\"new\");\nconst y = 1;\n");
+            return Task.FromResult("Changed a.");
+        });
+
+        await RunnerWithACleanFile(agent, "other.js", _ => "Exit code: 128\n--- stderr ---\nfatal: path does not exist", () => changed)
+            .RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.Equal(0, DebugRounds(plan.Id));
+        Assert.Contains(after.Events!, e => e.Kind == "debug-output-baseline-missing" && e.Detail.Contains("other.js", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("abc123", "src/a.js", true)]
+    [InlineData("zzzz", "src/a.js", false)]
+    [InlineData("abc123", "src/a.js\"; rm -rf x", false)]
+    [InlineData("abc123", "a`b.js", false)]
+    [InlineData("abc123", "", false)]
+    public async Task A_file_is_read_at_a_commit_only_for_a_plain_commit_name_and_path(string commit, string path, bool runs)
+    {
+        var commands = new List<string>();
+        var tools = new PlanTools(Store, Valid, (command, _, _) =>
+        {
+            commands.Add(command);
+            return Task.FromResult("Exit code: 0\n--- stdout ---\nthe text\n");
+        });
+        PlanRecord plan = OneStepPlan(StepListing("edit a", "a.js"));
+
+        string? text = await tools.ReadAtCommitAsync(plan, commit, path, default);
+
+        Assert.Equal(runs ? "the text" : null, text);
+        Assert.Equal(runs ? [$"git show {commit}:\"{path}\""] : [], commands);
+    }
+
+    [Fact]
+    public void The_new_print_check_is_on_unless_a_setting_turns_it_off()
+    {
+        Assert.True(new HarnessOptions().EnableNewPrintCheck);
+        Assert.False(HarnessOptions.FromSettings(name => name == "FLEET_HARNESS_ENABLE_NEW_PRINT_CHECK" ? "false" : null).EnableNewPrintCheck);
+        Assert.Contains("EnableNewPrintCheck=on", new HarnessOptions().Describe(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("add request logging to the route")]
+    [InlineData("print the result to the console")]
+    [InlineData("Add a Logger")]
+    public async Task A_step_that_asks_for_logging_or_printing_gets_no_round_for_a_new_print_call(string title)
+    {
+        WriteProjectFile("app.js", "const x = 1;\n");
+        PlanRecord plan = OneStepPlan(StepListing(title, "app.js"));
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            WriteProjectFile("app.js", "const x = 1;\nconsole.log(\"request\");\n");
+            return Task.FromResult("Changed app.");
+        });
+
+        await RepairRunner(agent, _ => Pass("check")).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+        Assert.Single(agent.Calls);
+        Assert.Equal(0, DebugRounds(plan.Id));
+    }
+
+    [Fact]
+    public async Task A_step_that_only_mentions_output_still_gets_the_round()
+    {
+        WriteProjectFile("app.js", "const x = 1;\n");
+        PlanRecord plan = OneStepPlan(StepListing("return JSON output from the route", "app.js"));
+        int round = 0;
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            round++;
+            WriteProjectFile("app.js", round == 1 ? "const x = 1;\nconsole.log(\"here\");\n" : "const x = 2;\n");
+            return Task.FromResult("Changed app.");
+        });
+
+        await RepairRunner(agent, _ => Pass("check")).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(1, DebugRounds(plan.Id));
+    }
+
+    [Fact]
+    public async Task With_the_new_print_check_switched_off_only_the_DEBUG_rule_applies()
+    {
+        WriteProjectFile("app.js", "const x = 1;\n");
+        PlanRecord plan = OneStepPlan(StepListing("edit app", "app.js"));
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            WriteProjectFile("app.js", "const x = 1;\nconsole.log(\"here\");\n");
+            return Task.FromResult("Changed app.");
+        });
+        var runner = new PlanRunner(Store, RepairTools(Pass), agent, NullLogger.Instance, transientDelay: _ => TimeSpan.Zero,
+            delayAsync: (_, _) => Task.CompletedTask, harness: new HarnessOptions(EnableNewPrintCheck: false));
+
+        await runner.RunPlanAsync(plan.Id, default);
 
         Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
         Assert.Single(agent.Calls);

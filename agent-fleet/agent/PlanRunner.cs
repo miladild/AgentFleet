@@ -1590,7 +1590,7 @@ internal sealed partial class PlanRunner
                 // Debugging output the step left in its changed files gets one more round too, once per attempt (see DebugOutputLines).
                 // It comes after the rules above, so a step any of them sent back is looked at on its next passing check. Lines
                 // still there after that round are named in the step-done note, which reads the completion's note.
-                IReadOnlyList<DebugLine> debugLines = result.Done ? DebugOutputLines(plan, step, change.Files) : [];
+                IReadOnlyList<DebugLine> debugLines = result.Done ? await DebugOutputLinesAsync(plan, step, attempt, change.Files, cancellationToken) : [];
                 if (debugLines.Count > 0 && !DebugRoundGiven(plan, step, attempt))
                 {
                     string note = DebugOutputMessage(debugLines);
