@@ -327,13 +327,14 @@ public sealed partial class PlanRunnerTests
         {
             var setup = DisputePlan(project, TestsStep(), ImplementationStep("dotnet test"));
             var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []));
-            var budget = new RulingBudget(2, _ => new StepAgentReply("I am not sure which one is wrong.", 0, false));
+            // Two asks, each a first reply and a request for the verdict alone: four calls.
+            var budget = new RulingBudget(4, _ => new StepAgentReply("I am not sure which one is wrong.", 0, false));
             var fake = DisputingImplementer(project, _ => true, budget, disputeFreshConversations: true);
             await FrozenRunner(new RulingAgent(fake), workspaces, setup.Options, setup.Health, CheckReadsTheTestFile(project, "CORRECTED"))
                 .RunPlanAsync(setup.Plan.Id, default).WaitAsync(DisputeTimeLimit);
 
             PlanRecord after = Store.Get(setup.Plan.Id)!;
-            Assert.Equal(2, budget.Calls);
+            Assert.Equal(4, budget.Calls);
             Assert.Equal(0, budget.Violations);
             Assert.Contains(after.Events!, e => e.Kind == RunEventKind.TestRuling && e.Detail.Contains("not ruled on: too-many-asks"));
         }

@@ -77,13 +77,14 @@ internal sealed partial class PlanRunner
         IReadOnlyList<TestFileText> changed = ReadFilesToReview(latest, step, changedFiles).Select(file => new TestFileText(file.Path, file.Content)).ToArray();
         string prompt = TestRuling.BuildPrompt(latest, step, TestDispute.Holding(frozen, items), checkOutput, dispute.Reason, changed);
         IStepSession session = _agent.OpenSession(PlanRunnerToolPolicy.TestRulingRole);
-        StepAgentReply reply;
+        RulerAnswer answer;
         try
         {
             using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             limit.CancelAfter(RulingTimeLimit);
             using IDisposable? folder = HubProjectFolderScope.For(latest);
-            reply = await session.SendAsync(prompt, reviewerTier, ruler, limit.Token);
+            StepAgentReply reply = await session.SendAsync(prompt, reviewerTier, ruler, limit.Token);
+            answer = await ReadVerdictAsync(session, reply, reviewerTier, ruler, cancellationToken);
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
@@ -95,7 +96,7 @@ internal sealed partial class PlanRunner
             return NoRuling;
         }
 
-        TestRulingVerdict verdict = TestRuling.Parse(reply.Text);
+        TestRulingVerdict verdict = answer.Verdict;
         switch (verdict.Kind)
         {
             case TestRulingKind.CodeWrong:
@@ -107,18 +108,60 @@ internal sealed partial class PlanRunner
                 return ApplyCorrection(latest, step, attempt, tier, model, rung, round, verdict, frozen, items, ruler);
             default:
                 RecordRuling(plan, step, attempt, tier, model, rung, round, nameof(TestRulingKind.NoVerdict),
-                    $"The ruler ({ruler}) gave no TEST-WRONG or CODE-WRONG verdict: {RulerReplyForLog(reply.Text)} Nothing changes.", ruler);
+                    $"The ruler ({ruler}) gave no TEST-WRONG or CODE-WRONG verdict: {answer.NoVerdictLog} Nothing changes.", ruler);
                 return NoRuling;
         }
     }
 
-    /// <summary>How much of a ruler's reply that gave no verdict the run log keeps: enough to see whether a verdict was there in some other form.</summary>
-    internal const int RulerReplyLogCharacters = 5000;
+    /// <summary>
+    /// How much of a ruler's reply that gave no verdict the run log keeps: enough to see whether a verdict was there in some other
+    /// form. A long reply keeps its start and its end, because a ruler that analyses first states its answer last.
+    /// </summary>
+    internal const int RulerReplyLogCharacters = 3600;
 
-    internal static string RulerReplyForLog(string? text)
+    /// <summary>The same, for the reply to the second ask, so both replies fit one event.</summary>
+    internal const int RulerFollowUpLogCharacters = 1800;
+
+    /// <summary>The second ask is a short answer: it gets half the time of the first.</summary>
+    private static readonly TimeSpan RulingFollowUpTimeLimit = TimeSpan.FromMinutes(4);
+
+    internal static string RulerReplyForLog(string? text, int limit = RulerReplyLogCharacters)
     {
         string trimmed = (text ?? string.Empty).Trim();
-        return trimmed.Length <= RulerReplyLogCharacters ? trimmed : trimmed[..RulerReplyLogCharacters].TrimEnd() + "...";
+        if (trimmed.Length <= limit) return trimmed;
+        int head = limit * 2 / 3;
+        return trimmed[..head].TrimEnd() + " ... " + trimmed[^(limit - head)..].TrimStart();
+    }
+
+    /// <summary>What a ruler's answer came to: the verdict it gave, and the text for the log when it gave none.</summary>
+    private readonly record struct RulerAnswer(TestRulingVerdict Verdict, string NoVerdictLog);
+
+    // A reply with no verdict is answered once, in the same conversation, with a request for the verdict alone. Measured: three of
+    // three rulings in a live run opened with analysis and gave no verdict, and each took about seven minutes.
+    private async Task<RulerAnswer> ReadVerdictAsync(IStepSession session, StepAgentReply first, string reviewerTier, string ruler,
+        CancellationToken cancellationToken)
+    {
+        TestRulingVerdict verdict = TestRuling.Parse(first.Text);
+        string log = RulerReplyForLog(first.Text);
+        if (verdict.Kind != TestRulingKind.NoVerdict || string.IsNullOrWhiteSpace(first.Text))
+        {
+            return new RulerAnswer(verdict, log);
+        }
+
+        try
+        {
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            limit.CancelAfter(RulingFollowUpTimeLimit);
+            StepAgentReply second = await session.SendAsync(TestRuling.VerdictRequest, reviewerTier, ruler, limit.Token);
+            verdict = TestRuling.Parse(second.Text);
+            return new RulerAnswer(verdict,
+                $"{log} Asked again for the verdict alone, it said: {RulerReplyForLog(second.Text, RulerFollowUpLogCharacters)}");
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(exception, "The ruler ({Ruler}) did not answer the request for the verdict alone.", ruler);
+            return new RulerAnswer(TestRulingVerdict.None, $"{log} Asked again for the verdict alone, it did not answer.");
+        }
     }
 
     // The correction is written to the hub copy (the accepted one) and its hash recorded, and only then does the step continue

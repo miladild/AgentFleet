@@ -85,13 +85,14 @@ internal sealed partial class PlanRunner
         string said = string.IsNullOrWhiteSpace(model.Summary) ? "(nothing)" : Cut(model.Summary.Trim(), MaxRulerReplyCharacters);
         string prompt = TestRuling.BuildPrompt(latest, step, holding, checkOutput, said, changed, ownTest: true);
         IStepSession session = _agent.OpenSession(PlanRunnerToolPolicy.TestRulingRole);
-        StepAgentReply reply;
+        RulerAnswer answer;
         try
         {
             using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             limit.CancelAfter(RulingTimeLimit);
             using IDisposable? folder = HubProjectFolderScope.For(latest);
-            reply = await session.SendAsync(prompt, reviewerTier, ruler, limit.Token);
+            StepAgentReply reply = await session.SendAsync(prompt, reviewerTier, ruler, limit.Token);
+            answer = await ReadVerdictAsync(session, reply, reviewerTier, ruler, cancellationToken);
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
@@ -104,7 +105,7 @@ internal sealed partial class PlanRunner
         }
 
         string why = $"The check failed {roundsFailing} rounds in a row on tests the step wrote ({string.Join(", ", testPaths)}).";
-        TestRulingVerdict verdict = TestRuling.Parse(reply.Text);
+        TestRulingVerdict verdict = answer.Verdict;
         switch (verdict.Kind)
         {
             case TestRulingKind.CodeWrong:
@@ -117,7 +118,7 @@ internal sealed partial class PlanRunner
                     cancellationToken);
             default:
                 RecordRuling(plan, step, attempt, tier, model, rung, round, NoVerdictClass,
-                    $"{why} The ruler ({ruler}) gave no TEST-WRONG or CODE-WRONG verdict: {RulerReplyForLog(reply.Text)} Nothing changes.", ruler);
+                    $"{why} The ruler ({ruler}) gave no TEST-WRONG or CODE-WRONG verdict: {answer.NoVerdictLog} Nothing changes.", ruler);
                 return NoRuling;
         }
     }

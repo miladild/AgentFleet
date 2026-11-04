@@ -242,8 +242,8 @@ public sealed partial class PlanRunnerTests
         {
             var setup = DisputePlan(project, StepWithItsOwnTest());
             var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []));
-            string reply = "Let me analyze this carefully. " + new string('a', 3000) + " TAIL-MARKER " + new string('b', 6000);
-            var budget = new RulingBudget(2, _ => new StepAgentReply(reply, 0, false));
+            string reply = "Let me analyze this carefully. " + new string('a', 2000) + " TAIL-MARKER " + new string('b', 6000);
+            var budget = new RulingBudget(4, _ => new StepAgentReply(reply, 0, false));
             var fake = WritesItsOwnTest(project, budget);
             int checks = 0;
             await OwnTestRunner(new RulingAgent(fake), workspaces, setup.Options, setup.Health,
@@ -254,6 +254,84 @@ public sealed partial class PlanRunnerTests
             Assert.Equal("NoVerdict", ruling.FailureClass);
             Assert.Contains("TAIL-MARKER", ruling.Detail, StringComparison.Ordinal);
             Assert.DoesNotContain(new string('b', 6000), ruling.Detail, StringComparison.Ordinal);
+            Assert.True(ruling.Detail.Length <= FleetPlanStore.MaxRulingDetailCharacters + 3);
+        }
+        finally { FailFirstTests.DeleteTree(project); }
+    }
+
+    [Fact]
+    public async Task A_ruler_reply_with_no_verdict_is_asked_once_more_for_the_verdict_alone_in_the_same_conversation()
+    {
+        // Measured: a ruler that writes its analysis first ignored "verdict first" in three of three rulings, and each took minutes.
+        string project = NewGitProject();
+        try
+        {
+            var setup = DisputePlan(project, StepWithItsOwnTest());
+            var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []));
+            var budget = new RulingBudget(2, call => call.Number == 1
+                ? new StepAgentReply("Let me analyze this carefully. The test is right and the code refuses nothing.", 0, false)
+                : new StepAgentReply(CodeWrongRuling, 0, false));
+            var fake = WritesItsOwnTest(project, budget);
+            int checks = 0;
+            await OwnTestRunner(new RulingAgent(fake), workspaces, setup.Options, setup.Health,
+                    command => command != "dotnet test" ? BuildPassOutput : ++checks < 4 ? TestsFailOutput : TestsPassOutput, roundsPerRung: 3)
+                .RunPlanAsync(setup.Plan.Id, default).WaitAsync(DisputeTimeLimit);
+
+            PlanRunEvent ruling = Store.Get(setup.Plan.Id)!.Events!.First(e => e.Kind == RunEventKind.TestRuling);
+            Assert.Equal("CodeWrong", ruling.FailureClass);
+            Assert.Equal(2, budget.Calls);
+            Assert.Equal(0, budget.Violations);
+            Assert.Equal(2, fake.Audits.Count);
+            Assert.Equal(fake.Audits[0].Role, fake.Audits[1].Role);
+            Assert.Contains("no VERDICT line", fake.Audits[1].Message, StringComparison.Ordinal);
+        }
+        finally { FailFirstTests.DeleteTree(project); }
+    }
+
+    [Fact]
+    public async Task A_ruler_that_gives_no_verdict_twice_is_logged_with_both_replies_and_asked_no_third_time()
+    {
+        string project = NewGitProject();
+        try
+        {
+            var setup = DisputePlan(project, StepWithItsOwnTest());
+            var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []));
+            var budget = new RulingBudget(4, call => new StepAgentReply(call.Number == 1 ? "FIRST-REPLY analysis only." : "SECOND-REPLY analysis only.", 0, false));
+            var fake = WritesItsOwnTest(project, budget);
+            int checks = 0;
+            await OwnTestRunner(new RulingAgent(fake), workspaces, setup.Options, setup.Health,
+                    command => command != "dotnet test" ? BuildPassOutput : ++checks < 4 ? TestsFailOutput : TestsPassOutput, roundsPerRung: 3)
+                .RunPlanAsync(setup.Plan.Id, default).WaitAsync(DisputeTimeLimit);
+
+            PlanRunEvent ruling = Store.Get(setup.Plan.Id)!.Events!.First(e => e.Kind == RunEventKind.TestRuling);
+            Assert.Equal("NoVerdict", ruling.FailureClass);
+            Assert.Contains("FIRST-REPLY", ruling.Detail, StringComparison.Ordinal);
+            Assert.Contains("SECOND-REPLY", ruling.Detail, StringComparison.Ordinal);
+            Assert.Equal(0, budget.Violations);
+            Assert.All(fake.Audits.GroupBy(call => call.Role), group => Assert.True(group.Count() <= 4));
+        }
+        finally { FailFirstTests.DeleteTree(project); }
+    }
+
+    [Fact]
+    public async Task A_long_ruler_reply_with_no_verdict_keeps_its_end_in_the_log_as_well_as_its_start()
+    {
+        string project = NewGitProject();
+        try
+        {
+            var setup = DisputePlan(project, StepWithItsOwnTest());
+            var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []));
+            string reply = "START-MARKER " + new string('a', 9000) + " END-MARKER";
+            var budget = new RulingBudget(4, _ => new StepAgentReply(reply, 0, false));
+            var fake = WritesItsOwnTest(project, budget);
+            int checks = 0;
+            await OwnTestRunner(new RulingAgent(fake), workspaces, setup.Options, setup.Health,
+                    command => command != "dotnet test" ? BuildPassOutput : ++checks < 4 ? TestsFailOutput : TestsPassOutput, roundsPerRung: 3)
+                .RunPlanAsync(setup.Plan.Id, default).WaitAsync(DisputeTimeLimit);
+
+            PlanRunEvent ruling = Store.Get(setup.Plan.Id)!.Events!.First(e => e.Kind == RunEventKind.TestRuling);
+            Assert.Contains("START-MARKER", ruling.Detail, StringComparison.Ordinal);
+            Assert.Contains("END-MARKER", ruling.Detail, StringComparison.Ordinal);
             Assert.True(ruling.Detail.Length <= FleetPlanStore.MaxRulingDetailCharacters + 3);
         }
         finally { FailFirstTests.DeleteTree(project); }

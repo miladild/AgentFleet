@@ -98,6 +98,15 @@ internal static partial class TestRuling
         return text.ToString().TrimEnd();
     }
 
+    /// <summary>
+    /// What a ruler is asked when its answer had no verdict line: measured, a ruler that wrote its analysis first ignored "verdict
+    /// first" every time, but had usually reached its answer by the end of the analysis.
+    /// </summary>
+    public static readonly string VerdictRequest =
+        "Your answer has no VERDICT line, so it cannot be used. Answer again now, without repeating your analysis, and start with the VERDICT line, " +
+        $"in exactly one of these two forms: \"VERDICT: {TestWrongVerdict}\" followed by a FILE line and the COMPLETE corrected file in a fenced block " +
+        $"for each corrected test file, or \"VERDICT: {CodeWrongVerdict}\" followed by one paragraph saying what the code must do to satisfy the test, and why.";
+
     /// <summary>Reads a ruler's reply. Anything that is not one clear verdict in the expected form is NoVerdict.</summary>
     public static TestRulingVerdict Parse(string? reply)
     {
