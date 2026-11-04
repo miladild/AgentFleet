@@ -285,6 +285,38 @@ public sealed partial class PlanRunnerTests
         finally { FailFirstTests.DeleteTree(project); }
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task The_first_offer_of_web_lookup_in_an_attempt_is_written_to_the_run_log_once(bool enabled)
+    {
+        // Measured: a stuck step's model never used the web tools, and the log could not say whether they were ever offered.
+        string project = NewGitProject();
+        try
+        {
+            var setup = DisputePlan(project, StepWithItsOwnTest());
+            var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []));
+            var fake = WritesItsOwnTest(project, new RulingBudget(0, _ => new StepAgentReply("", 0, false)));
+            await OwnTestRunner(new RulingAgent(fake), workspaces, setup.Options, setup.Health,
+                    command => command != "dotnet test" ? BuildPassOutput : TestsFailOutput,
+                    harness: new HarnessOptions(EnableArbiter: false, EnableWebLookup: enabled), roundsPerRung: 3)
+                .RunPlanAsync(setup.Plan.Id, default).WaitAsync(DisputeTimeLimit);
+
+            IReadOnlyList<PlanRunEvent> events = Store.Get(setup.Plan.Id)!.Events!;
+            PlanRunEvent[] offered = events.Where(e => e.Kind == PlanRunner.WebLookupOfferedEvent).ToArray();
+            if (!enabled)
+            {
+                Assert.Empty(offered);
+                return;
+            }
+
+            Assert.NotEmpty(offered);
+            Assert.Equal(offered.Length, offered.Select(e => e.Attempt).Distinct().Count());
+            Assert.True(events.TakeWhile(e => e != offered[0]).Count(e => e.Kind is RunEventKind.CheckFailed or RunEventKind.FinalValidationFailed) >= 2);
+        }
+        finally { FailFirstTests.DeleteTree(project); }
+    }
+
     [Fact]
     public async Task A_failing_test_the_step_did_not_create_is_never_ruled_on()
     {
