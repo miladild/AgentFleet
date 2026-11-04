@@ -49,7 +49,8 @@ internal sealed partial class PlanRunner
         PlanRecord latest = _store.Get(plan.Id) ?? plan;
         IReadOnlyList<TestFileText> frozen = ReadFrozenTestFiles(latest);
         PlanRunEvent[] earlierRulings = StepEventsSinceRetry(plan.Id, step.Id).Where(runEvent => runEvent.Kind == RunEventKind.TestRuling).ToArray();
-        int rulingsMade = earlierRulings.Count(runEvent => runEvent.FailureClass is TestWrongClass or CodeWrongClass);
+        int rulingsMade = earlierRulings.Count(runEvent => runEvent.FailureClass is TestWrongClass or CodeWrongClass) +
+            (CarriedRulingNote(plan.Id, step.Id) is not null && !earlierRulings.Any(runEvent => runEvent.FailureClass is CodeWrongClass) ? 1 : 0);
         TestDisputeCall? dispute = model.Dispute;
         int unresolvedAsks = earlierRulings.Count(runEvent => runEvent.FailureClass is NoVerdictClass or RefusedClass);
         TestRulingDue due = TestDispute.Evaluate(_testFirstMode == TestFirstMode.On, !IsTestsStep(step), latest.FrozenTests is { Count: > 0 },
@@ -98,9 +99,10 @@ internal sealed partial class PlanRunner
         switch (verdict.Kind)
         {
             case TestRulingKind.CodeWrong:
+                string note = $"An independent model read the disputed test and found it right: {verdict.Paragraph}";
                 RecordRuling(plan, step, attempt, tier, model, rung, round, CodeWrongClass,
-                    $"The ruler ({ruler}) found the test right: {Summarize(verdict.Paragraph)}", ruler);
-                return new TestRulingOutcome($"An independent model read the disputed test and found it right: {verdict.Paragraph}", false);
+                    $"The ruler ({ruler}) found the test right: {Summarize(verdict.Paragraph)}{RulingNoteMarker}{note}", ruler);
+                return new TestRulingOutcome(note, false);
             case TestRulingKind.TestWrong:
                 return ApplyCorrection(latest, step, attempt, tier, model, rung, round, verdict, frozen, items, ruler);
             default:

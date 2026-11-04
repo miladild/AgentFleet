@@ -1099,7 +1099,9 @@ internal sealed partial class PlanRunner
         int ownTestRounds = 0;
         // A ruling is given once per step, so its note leads every later failure of the step, not only the next one: measured, a
         // ruler named the exact fix, the next answer made no tool call, and the seven rounds after it never saw the ruling again.
-        string? rulingNote = null;
+        // A code-wrong ruling from before the runner's own retry of this step is kept (see CarriedRulingNote).
+        string? rulingNote = CarriedRulingNote(plan.Id, step.Id);
+        if (rulingNote is not null && !string.IsNullOrWhiteSpace(lastFailure)) lastFailure = $"{rulingNote}\n\n{lastFailure}";
         TimeSpan worked = TimeSpan.FromSeconds(earlierEvents
             .Where(runEvent => runEvent.Kind == RunEventKind.RoundClassified).Sum(runEvent => runEvent.DurationSeconds ?? 0));
         string? hub = _fleetOptions?.Nodes.SingleOrDefault(node => node.Fallback)?.Name;

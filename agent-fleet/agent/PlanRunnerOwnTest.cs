@@ -62,6 +62,7 @@ internal sealed partial class PlanRunner
         PlanRecord latest = _store.Get(plan.Id) ?? plan;
         PlanRunEvent[] earlierRulings = StepEventsSinceRetry(plan.Id, step.Id).Where(runEvent => runEvent.Kind == RunEventKind.TestRuling).ToArray();
         if (earlierRulings.Any(runEvent => runEvent.FailureClass is TestWrongClass or CodeWrongClass) ||
+            CarriedRulingNote(plan.Id, step.Id) is not null ||
             earlierRulings.Count(runEvent => runEvent.FailureClass is NoVerdictClass or RefusedClass or UndoneClass) >= TestDispute.MaxUnresolvedAsks)
         {
             return NoRuling;
@@ -107,9 +108,10 @@ internal sealed partial class PlanRunner
         switch (verdict.Kind)
         {
             case TestRulingKind.CodeWrong:
+                string note = $"An independent model read the failing test this step wrote and found it right, so the code must change: {verdict.Paragraph}";
                 RecordRuling(plan, step, attempt, tier, model, rung, round, CodeWrongClass,
-                    $"{why} The ruler ({ruler}) found the test right: {Summarize(verdict.Paragraph)}", ruler);
-                return new TestRulingOutcome($"An independent model read the failing test this step wrote and found it right, so the code must change: {verdict.Paragraph}", false);
+                    $"{why} The ruler ({ruler}) found the test right: {Summarize(verdict.Paragraph)}{RulingNoteMarker}{note}", ruler);
+                return new TestRulingOutcome(note, false);
             case TestRulingKind.TestWrong:
                 return await ApplyOwnTestCorrectionAsync(latest, step, attempt, tier, model, rung, round, verdict, holding, items, ruler, why,
                     cancellationToken);
