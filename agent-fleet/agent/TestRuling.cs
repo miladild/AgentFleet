@@ -84,7 +84,7 @@ internal static partial class TestRuling
 
         text.AppendLine();
         text.AppendLine("Decide whether the TEST is wrong or the CODE is wrong, judged against the step's text and the plan's requirements.");
-        text.AppendLine("Answer in exactly one of these two forms, and nothing else:");
+        text.AppendLine("Start your answer with the VERDICT line, in exactly one of these two forms, and put no analysis before it:");
         text.AppendLine();
         text.AppendLine($"VERDICT: {TestWrongVerdict}");
         text.AppendLine("FILE: <project-relative path>");
@@ -94,7 +94,7 @@ internal static partial class TestRuling
         text.AppendLine("(one FILE line and one fenced block for each corrected file, and only for the test files above; correct only what is wrong and keep every other test as it is)");
         text.AppendLine();
         text.AppendLine($"VERDICT: {CodeWrongVerdict}");
-        text.AppendLine("One paragraph saying what the code must do to satisfy the test.");
+        text.AppendLine("One paragraph saying what the code must do to satisfy the test, and why.");
         return text.ToString().TrimEnd();
     }
 
@@ -110,13 +110,16 @@ internal static partial class TestRuling
         var verdicts = new List<(int Line, string Kind)>();
         for (int index = 0; index < lines.Length; index++)
         {
-            if (VerdictLine().Match(lines[index]) is { Success: true } match)
+            if (VerdictLine().Match(PlainVerdictText(lines[index])) is { Success: true } match)
             {
                 verdicts.Add((index, match.Groups["kind"].Value.ToUpperInvariant()));
             }
         }
 
-        if (verdicts.Count != 1)
+        // Two different verdicts are not a clear answer. The same code-wrong verdict said again is: its paragraph is what follows the
+        // first one. A repeated test-wrong verdict carries two sets of files, so it stays unclear.
+        bool repeatedCodeWrong = verdicts.Count > 1 && verdicts.All(verdict => verdict.Kind == CodeWrongVerdict);
+        if (verdicts.Count != 1 && !repeatedCodeWrong)
         {
             return TestRulingVerdict.None;
         }
@@ -124,7 +127,8 @@ internal static partial class TestRuling
         (int at, string kind) = verdicts[0];
         if (kind == CodeWrongVerdict)
         {
-            string paragraph = string.Join('\n', lines.Skip(at + 1)).Trim();
+            HashSet<int> repeats = verdicts.Skip(1).Select(verdict => verdict.Line).ToHashSet();
+            string paragraph = string.Join('\n', lines.Where((_, index) => index > at && !repeats.Contains(index))).Trim();
             return paragraph.Length == 0
                 ? TestRulingVerdict.None
                 : new TestRulingVerdict(TestRulingKind.CodeWrong, [], Cut(paragraph, MaxParagraphCharacters));
@@ -277,6 +281,12 @@ internal static partial class TestRuling
 
         return longest;
     }
+
+    // A model often wraps the verdict line in markdown (**VERDICT: CODE-WRONG**) or ends it with a full stop. The line is read without
+    // the emphasis marks, list bullet and end punctuation; anything else on the line still makes it not a verdict line.
+    private static string PlainVerdictText(string line) =>
+        line.Replace("*", string.Empty, StringComparison.Ordinal).Replace("`", string.Empty, StringComparison.Ordinal)
+            .Trim().TrimStart('-', '#', '>', ' ').TrimEnd('.', '!', ' ');
 
     private static string Cut(string text, int limit) =>
         text.Length <= limit ? text : text[..Math.Max(0, limit)] + "\n[the rest is cut]";

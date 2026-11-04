@@ -39,7 +39,7 @@ internal sealed partial class PlanRunner
         string verdict, string detail, string? node = null)
     {
         _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.TestRuling, tier, node: node ?? model.ModelNode ?? model.Machine,
-            detail: Cut(detail, 4000), failureClass: verdict,
+            detail: Cut(detail, FleetPlanStore.MaxRulingDetailCharacters), failureClass: verdict,
             modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round);
     }
 
@@ -105,9 +105,18 @@ internal sealed partial class PlanRunner
                 return ApplyCorrection(latest, step, attempt, tier, model, rung, round, verdict, frozen, items, ruler);
             default:
                 RecordRuling(plan, step, attempt, tier, model, rung, round, nameof(TestRulingKind.NoVerdict),
-                    $"The ruler ({ruler}) gave no TEST-WRONG or CODE-WRONG verdict: {Summarize(reply.Text)} Nothing changes.", ruler);
+                    $"The ruler ({ruler}) gave no TEST-WRONG or CODE-WRONG verdict: {RulerReplyForLog(reply.Text)} Nothing changes.", ruler);
                 return NoRuling;
         }
+    }
+
+    /// <summary>How much of a ruler's reply that gave no verdict the run log keeps: enough to see whether a verdict was there in some other form.</summary>
+    internal const int RulerReplyLogCharacters = 5000;
+
+    internal static string RulerReplyForLog(string? text)
+    {
+        string trimmed = (text ?? string.Empty).Trim();
+        return trimmed.Length <= RulerReplyLogCharacters ? trimmed : trimmed[..RulerReplyLogCharacters].TrimEnd() + "...";
     }
 
     // The correction is written to the hub copy (the accepted one) and its hash recorded, and only then does the step continue

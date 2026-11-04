@@ -459,6 +459,12 @@ internal sealed partial class FleetPlanStore
 
     public const int MaxEvents = 400;
     public const int MaxEventDetailCharacters = 1200;
+
+    /// <summary>
+    /// A ruling keeps more than other events: the start of a ruler's reply that gave no verdict, and a code-wrong paragraph that
+    /// a retried attempt is given again, have to be readable later.
+    /// </summary>
+    public const int MaxRulingDetailCharacters = 6000;
     public const int MaxFilesChangedCharacters = 4000;
     public const int MaxChangedFilesPerEvent = 12;
 
@@ -491,7 +497,8 @@ internal sealed partial class FleetPlanStore
         int? loopGuardNotes = null)
     {
         string text = detail ?? string.Empty;
-        int limit = kind == RunEventKind.FilesChanged ? MaxFilesChangedCharacters : MaxEventDetailCharacters;
+        int limit = kind == RunEventKind.FilesChanged ? MaxFilesChangedCharacters
+            : kind == RunEventKind.TestRuling ? MaxRulingDetailCharacters : MaxEventDetailCharacters;
         if (text.Length > limit)
         {
             text = text[..limit].TrimEnd() + "...";

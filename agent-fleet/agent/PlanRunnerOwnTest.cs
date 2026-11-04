@@ -115,7 +115,7 @@ internal sealed partial class PlanRunner
                     cancellationToken);
             default:
                 RecordRuling(plan, step, attempt, tier, model, rung, round, NoVerdictClass,
-                    $"{why} The ruler ({ruler}) gave no TEST-WRONG or CODE-WRONG verdict: {Summarize(reply.Text)} Nothing changes.", ruler);
+                    $"{why} The ruler ({ruler}) gave no TEST-WRONG or CODE-WRONG verdict: {RulerReplyForLog(reply.Text)} Nothing changes.", ruler);
                 return NoRuling;
         }
     }

@@ -216,10 +216,70 @@ public sealed class TestDisputeTests : PlanTestBase
     [InlineData("VERDICT: TEST-WRONG\nFILE: tests/A.cs\n```\na\n```\nVERDICT: CODE-WRONG\nThe code is wrong.")]
     [InlineData("VERDICT: CODE-WRONG\nThe limit must refuse zero.\nVERDICT: TEST-WRONG\nFILE: tests/A.cs\n```\na\n```")]
     [InlineData("VERDICT: TEST-WRONG\nFILE: tests/A.cs\n```\na\n```\nVERDICT: TEST-WRONG\nFILE: tests/B.cs\n```\nb\n```")]
-    [InlineData("VERDICT: CODE-WRONG\nThe limit must refuse zero.\nVERDICT: CODE-WRONG\nAgain.")]
+    [InlineData("**VERDICT: CODE-WRONG**\nThe code must refuse zero.\n**VERDICT: TEST-WRONG**\nFILE: tests/A.cs\n```\na\n```")]
+    [InlineData("VERDICT: TEST-WRONG.\nFILE: tests/A.cs\n```\na\n```\nVERDICT: TEST-WRONG.\nFILE: tests/B.cs\n```\nb\n```")]
     public void Anything_that_cannot_be_read_is_no_verdict(string? reply)
     {
         Assert.Equal(TestRulingKind.NoVerdict, TestRuling.Parse(reply).Kind);
+    }
+
+    [Theory]
+    [InlineData("**VERDICT: CODE-WRONG**\nThe limit must refuse zero.")]
+    [InlineData("**VERDICT:** CODE-WRONG\nThe limit must refuse zero.")]
+    [InlineData("VERDICT: CODE-WRONG.\nThe limit must refuse zero.")]
+    [InlineData("- `VERDICT: CODE-WRONG`\nThe limit must refuse zero.")]
+    [InlineData("## VERDICT: CODE-WRONG\nThe limit must refuse zero.")]
+    public void A_verdict_line_in_markdown_or_with_a_full_stop_is_still_the_verdict(string reply)
+    {
+        TestRulingVerdict verdict = TestRuling.Parse(reply);
+
+        Assert.Equal(TestRulingKind.CodeWrong, verdict.Kind);
+        Assert.Equal("The limit must refuse zero.", verdict.Paragraph);
+    }
+
+    [Fact]
+    public void A_test_wrong_verdict_in_markdown_is_read_with_its_files()
+    {
+        TestRulingVerdict verdict = TestRuling.Parse("**VERDICT: TEST-WRONG**\nFILE: tests/A.cs\n```\na\n```\n");
+
+        Assert.Equal(TestRulingKind.TestWrong, verdict.Kind);
+        Assert.Equal("tests/A.cs", Assert.Single(verdict.Files).Path);
+    }
+
+    [Fact]
+    public void The_same_code_wrong_verdict_said_twice_gives_the_paragraph_after_the_first_without_the_second_line()
+    {
+        TestRulingVerdict verdict = TestRuling.Parse("VERDICT: CODE-WRONG\nThe limit must refuse zero.\n**VERDICT: CODE-WRONG**\nAgain.");
+
+        Assert.Equal(TestRulingKind.CodeWrong, verdict.Kind);
+        Assert.Equal("The limit must refuse zero.\nAgain.", verdict.Paragraph);
+    }
+
+    [Fact]
+    public void A_verdict_after_a_line_of_analysis_is_read()
+    {
+        TestRulingVerdict verdict = TestRuling.Parse("Let me analyze this.\nThe test closes nothing.\nVERDICT: CODE-WRONG\nClose the server.");
+
+        Assert.Equal(TestRulingKind.CodeWrong, verdict.Kind);
+        Assert.Equal("Close the server.", verdict.Paragraph);
+    }
+
+    [Fact]
+    public void The_ruling_prompt_asks_for_the_verdict_line_first_and_allows_a_reason_after_it()
+    {
+        PlanRecord plan = NewPlan(Step("limit"));
+
+        string prompt = TestRuling.BuildPrompt(plan, plan.Steps[0], [Limit("x")], "output", "reason", []);
+
+        Assert.Contains("Start your answer with the VERDICT line", prompt);
+        Assert.Contains("paragraph saying what the code must do to satisfy the test, and why", prompt);
+        Assert.DoesNotContain("and nothing else", prompt);
+    }
+
+    [Fact]
+    public void A_reply_that_only_mentions_the_verdict_in_a_sentence_is_no_verdict()
+    {
+        Assert.Equal(TestRulingKind.NoVerdict, TestRuling.Parse("My VERDICT: CODE-WRONG is that the code needs a close.").Kind);
     }
 
     private static TestFileText Limit(string text) => new("tests/LimitTests.cs", text);

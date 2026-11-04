@@ -233,6 +233,32 @@ public sealed partial class PlanRunnerTests
         finally { FailFirstTests.DeleteTree(project); }
     }
 
+    [Fact]
+    public async Task A_ruler_reply_with_no_verdict_is_kept_in_the_log_well_past_the_first_few_hundred_characters()
+    {
+        // Measured: the log kept the first 300 characters of such a reply, so nobody could tell whether a verdict was in it.
+        string project = NewGitProject();
+        try
+        {
+            var setup = DisputePlan(project, StepWithItsOwnTest());
+            var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []));
+            string reply = "Let me analyze this carefully. " + new string('a', 3000) + " TAIL-MARKER " + new string('b', 6000);
+            var budget = new RulingBudget(2, _ => new StepAgentReply(reply, 0, false));
+            var fake = WritesItsOwnTest(project, budget);
+            int checks = 0;
+            await OwnTestRunner(new RulingAgent(fake), workspaces, setup.Options, setup.Health,
+                    command => command != "dotnet test" ? BuildPassOutput : ++checks < 4 ? TestsFailOutput : TestsPassOutput, roundsPerRung: 3)
+                .RunPlanAsync(setup.Plan.Id, default).WaitAsync(DisputeTimeLimit);
+
+            PlanRunEvent ruling = Store.Get(setup.Plan.Id)!.Events!.First(e => e.Kind == RunEventKind.TestRuling);
+            Assert.Equal("NoVerdict", ruling.FailureClass);
+            Assert.Contains("TAIL-MARKER", ruling.Detail, StringComparison.Ordinal);
+            Assert.DoesNotContain(new string('b', 6000), ruling.Detail, StringComparison.Ordinal);
+            Assert.True(ruling.Detail.Length <= FleetPlanStore.MaxRulingDetailCharacters + 3);
+        }
+        finally { FailFirstTests.DeleteTree(project); }
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]

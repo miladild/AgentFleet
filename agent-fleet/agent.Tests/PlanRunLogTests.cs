@@ -245,6 +245,22 @@ public sealed class PlanRunLogTests : PlanTestBase
     }
 
     [Fact]
+    public void A_ruling_keeps_a_longer_detail_than_other_events_so_the_rulers_reply_can_be_read_later()
+    {
+        PlanRecord plan = Approved(Step("one"));
+
+        Store.AddEvent(plan.Id, 1, 1, RunEventKind.TestRuling, detail: new string('r', 5500));
+        Store.AddEvent(plan.Id, 1, 1, RunEventKind.TestRuling, detail: new string('s', 7000));
+        Store.AddEvent(plan.Id, 1, 1, RunEventKind.CheckFailed, detail: new string('c', 5500));
+
+        IReadOnlyList<PlanRunEvent> events = Store.Get(plan.Id)!.Events!;
+        Assert.Equal(5500, events[0].Detail.Length);
+        Assert.True(events[1].Detail.Length <= FleetPlanStore.MaxRulingDetailCharacters + 3);
+        Assert.True(events[1].Detail.Length > FleetPlanStore.MaxEventDetailCharacters);
+        Assert.True(events[2].Detail.Length <= FleetPlanStore.MaxEventDetailCharacters + 3);
+    }
+
+    [Fact]
     public void A_plan_saved_before_the_log_existed_still_loads_and_reports()
     {
         PlanRecord plan = Approved(Step("one"));
