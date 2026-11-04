@@ -145,7 +145,8 @@ internal static partial class TestDispute
     /// </summary>
     internal static bool Matches(string item, string testName)
     {
-        IReadOnlyList<string> name = Words(testName);
+        // A failing line has its paths replaced (see PlanFailure), so a name such as "GET /api/health" is read the same way.
+        IReadOnlyList<string> name = Words(PlanFailure.WithPathsNormalized(testName));
         if (name.Count == 0) return false;
         IReadOnlyList<string> words = Words(Identifier(item));
         return words.Count >= name.Count && words.Skip(words.Count - name.Count).SequenceEqual(name);

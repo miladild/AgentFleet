@@ -820,4 +820,49 @@ public sealed class TestDisputeTests : PlanTestBase
         Assert.False(due.Due);
         Assert.Equal("not-a-frozen-test", due.Reason);
     }
+
+    // From a real run on Windows. The failing test's name holds a URL path, which the shared reading of a failing line replaces with
+    // "<path>", so the name in the test file never matched it and no ruling was ever asked for the step's own test.
+    private const string NodeSpecOutputWithTeardownAssertion =
+        "Exit code: 1\n" +
+        "--- stdout ---\n" +
+        "✔ GET /api/health reports activeAlerts=0 and lastFiredUtc=null with empty store (75.4405ms)\n" +
+        "✔ GET /api/health reports activeAlerts=1 after adding an alert (48.6933ms)\n" +
+        "✖ GET /api/health reports lastFiredUtc from history (13.87ms)\n" +
+        "Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\\win\\async.c, line 94\n" +
+        "ℹ tests 3\n" +
+        "ℹ suites 0\n" +
+        "ℹ pass 2\n" +
+        "ℹ fail 1\n" +
+        "ℹ cancelled 0\n" +
+        "ℹ skipped 0\n" +
+        "ℹ todo 0\n" +
+        "ℹ duration_ms 940.0529\n" +
+        "\n" +
+        "✖ failing tests:\n" +
+        "\n" +
+        "test at test\\health-alerts.test.ts:1:2442\n" +
+        "✖ GET /api/health reports lastFiredUtc from history (13.87ms)\n" +
+        "  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n" +
+        "  + actual - expected\n" +
+        "  \n" +
+        "  + undefined\n" +
+        "  - '2026-01-02T00:00:00.000Z'\n";
+
+    private static readonly TestFileText OwnHealthTests = new("test/health-alerts.test.ts",
+        "test('GET /api/health reports lastFiredUtc from history', async () => { assert.equal(1, 1); });\n");
+
+    [Fact]
+    public void A_failing_test_whose_name_holds_a_url_path_still_matches_the_test_in_the_file()
+    {
+        Assert.Single(TestDispute.FailingItems(NodeSpecOutputWithTeardownAssertion));
+        Assert.True(TestDispute.Matches("GET <path> reports lastFiredUtc from history", "GET /api/health reports lastFiredUtc from history"));
+        Assert.True(PlanRunner.OnlyOwnTestsFail(NodeSpecOutputWithTeardownAssertion, [OwnHealthTests]));
+    }
+
+    [Fact]
+    public void A_name_that_differs_beyond_its_path_still_does_not_match()
+    {
+        Assert.False(TestDispute.Matches("GET <path> reports lastFiredUtc from history", "GET /api/health reports activeAlerts"));
+    }
 }

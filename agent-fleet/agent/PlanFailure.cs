@@ -284,6 +284,9 @@ internal static partial class PlanFailure
         return false;
     }
 
+    /// <summary>The text with each path (a drive path or a slash path) replaced as a failing line is, so a test name can be compared with the line.</summary>
+    internal static string WithPathsNormalized(string text) => AbsolutePath().Replace(text, "<path>");
+
     private static string NormalizeLine(string line)
     {
         string normalized = DurationSuffix().Replace(line, string.Empty);
