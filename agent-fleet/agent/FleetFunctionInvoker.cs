@@ -89,18 +89,24 @@ internal sealed class FleetFunctionInvoker(
         string toolName = context.Function.Name;
         // The plan runner is the executor: its requests carry the runner key and are exempt.
         bool fromRunner = context.Options?.AdditionalProperties?.ContainsKey(FleetRoutingChatClient.RunnerTierKey) == true;
+        // The command a worker's plain node test call runs instead: the same with the runner told to exit when the tests are done.
+        string? forcedExitCommand = null;
         if (fromRunner)
         {
             StepToolActivity? counter = context.Options?.AdditionalProperties?.TryGetValue(StepToolActivity.Key, out object? activity) == true
                 ? activity as StepToolActivity
                 : null;
-            counter?.Record(toolName);
 
             string? command = null;
             if (toolName == "run_command" && context.Arguments.TryGetValue("command", out object? commandValue))
+            {
                 command = commandValue?.ToString();
+                forcedExitCommand = PlanRunner.ForcedExitCommand(command, PlanRunner.FirstRunForcedExitFlags);
+            }
             else if (toolName == "run_git_command" && context.Arguments.TryGetValue("arguments", out object? gitArguments))
                 command = gitArguments?.ToString();
+
+            counter?.Record(toolName, toolName == "run_command" ? forcedExitCommand ?? command : null);
             bool webOffered = FleetRoutingChatClient.WebOffered(context.Options);
             string? refusal = PlanRunnerToolPolicy.Refusal(toolName, command, FleetRoutingChatClient.RunnerRole(context.Options), webOffered);
             if (refusal is null && webOffered && PlanRunnerToolPolicy.IsWebLookup(toolName))
@@ -154,6 +160,14 @@ internal sealed class FleetFunctionInvoker(
             planTools.StepWorkingDirectory(context.Messages) is { } stepFolder)
         {
             context.Arguments["workingDirectory"] = stepFolder;
+        }
+
+        // A test that opens a server and fails before closing it keeps node's test runner alive, so a worker running its tests again
+        // and again in one round waited out the command limit each time. The policy and the file guard above saw the command as the
+        // worker wrote it; what runs exits when the tests are done and prints their errors.
+        if (fromRunner && toolName == "run_command" && forcedExitCommand is not null)
+        {
+            context.Arguments["command"] = forcedExitCommand;
         }
 
         // The user answers a chat tool call before it runs, after the gate and the argument fixes above, so the arguments

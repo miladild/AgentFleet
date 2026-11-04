@@ -12,6 +12,9 @@ namespace AgentFleet.Tests;
 [Collection(ContextTestBase.SqliteRecordCollection)]
 public sealed class FileGuardInvokerTests : ContextTestBase
 {
+    // Whether the scripted round is the plan runner's (a plan step's worker) or an ordinary chat turn.
+    private bool _runnerCall = true;
+
     private FleetFunctionInvoker NewInvoker(HarnessOptions? harness)
     {
         string configPath = Path.Combine(Path.GetTempPath(), $"fleet-{Guid.NewGuid():N}.json");
@@ -69,7 +72,7 @@ public sealed class FileGuardInvokerTests : ContextTestBase
         var chatOptions = new ChatOptions
         {
             Tools = [real],
-            AdditionalProperties = new AdditionalPropertiesDictionary { [FleetRoutingChatClient.RunnerTierKey] = "standard" }
+            AdditionalProperties = _runnerCall ? new AdditionalPropertiesDictionary { [FleetRoutingChatClient.RunnerTierKey] = "standard" } : []
         };
         using IDisposable scope = Scope(NewContextId());
         ChatResponse response = await client.GetResponseAsync("go", chatOptions, CancellationToken.None);
@@ -96,6 +99,50 @@ public sealed class FileGuardInvokerTests : ContextTestBase
         Assert.Equal(["npm test"], ran);
         Assert.StartsWith("DENIED: this command installs or changes packages", results[0], StringComparison.Ordinal);
         Assert.Equal(3, requests);
+    }
+
+    [Theory]
+    [InlineData("node --import tsx --test test/health-alerts.test.ts", "node --import tsx --test --test-force-exit test/health-alerts.test.ts")]
+    [InlineData("node --test", "node --test --test-force-exit")]
+    public async Task A_workers_plain_node_test_command_runs_with_the_runner_forced_to_exit(string command, string expected)
+    {
+        // Measured: a test that opened a server and failed before closing it kept the runner alive, and the worker's own command
+        // waited out the two-minute limit again and again in the same round.
+        (List<string> ran, _, _) = await RunRoundAsync(null, "run_command", "command", command);
+
+        Assert.Equal([expected], ran);
+    }
+
+    [Theory]
+    [InlineData("node --test --test-force-exit test/a.test.ts")]
+    [InlineData("node --test && echo done")]
+    [InlineData("node --test test/a.test.ts | tail -20")]
+    [InlineData("npm test")]
+    [InlineData("ls src")]
+    public async Task Any_other_command_of_a_worker_runs_as_it_was_written(string command)
+    {
+        (List<string> ran, _, _) = await RunRoundAsync(null, "run_command", "command", command);
+
+        Assert.Equal([command], ran);
+    }
+
+    [Fact]
+    public async Task A_command_in_an_ordinary_chat_turn_is_not_rewritten()
+    {
+        _runnerCall = false;
+
+        (List<string> ran, _, _) = await RunRoundAsync(null, "run_command", "command", "node --test test/a.test.ts");
+
+        Assert.Equal(["node --test test/a.test.ts"], ran);
+    }
+
+    [Fact]
+    public async Task A_command_the_guard_denies_is_denied_as_the_worker_wrote_it()
+    {
+        (List<string> ran, List<string> results, _) = await RunRoundAsync(null, "run_command", "command", "npm install tsx@latest && node --test");
+
+        Assert.Empty(ran);
+        Assert.StartsWith("DENIED: this command installs or changes packages", results[0], StringComparison.Ordinal);
     }
 
     [Fact]

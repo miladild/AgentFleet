@@ -119,4 +119,26 @@ public sealed partial class PlanRunnerTests
         Assert.Equal("run_command", changing.Detail);
         Assert.Equal(1, changing.Attempt);
     }
+
+    [Fact]
+    public async Task A_worker_round_logs_the_command_a_command_call_ran()
+    {
+        // Measured: the log named the tool only, so nobody could tell which commands a round spent its time on.
+        PlanRecord plan = NewPlan(new PlanStepInput("recover worker work", "detail", null, "dotnet build", "standard"));
+        plan = Store.SelectMachine(plan.Id, 1, "worker-a", out string? selectionError)!;
+        Assert.Null(selectionError);
+        plan = Store.Approve(plan.Id, autoRetries: 0)!;
+        var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []));
+        var agent = new ScriptedAgent((activity, _) =>
+        {
+            activity.Record("run_command", "node --test --test-force-exit test/a.test.ts " + new string('x', 400));
+            return Task.FromResult(new StepAgentReply("Done.", 1, false));
+        });
+
+        await Runner(agent, Pass, workerWorkspaces: workspaces).RunPlanAsync(plan.Id, default);
+
+        PlanRunEvent changing = Assert.Single(Store.Get(plan.Id)!.Events!, runEvent => runEvent.Kind == PlanRunner.ChangingToolEvent);
+        Assert.StartsWith("run_command: node --test --test-force-exit test/a.test.ts ", changing.Detail, StringComparison.Ordinal);
+        Assert.True(changing.Detail.Length <= "run_command: ".Length + 200 + 3);
+    }
 }

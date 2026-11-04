@@ -109,18 +109,25 @@ internal sealed class StepToolActivity
     }
 
     /// <summary>Told of each tool call as the model makes it, in order. The runner uses it to see that a model call is still working.</summary>
-    public Action<string>? Observed { get; set; }
+    public Action<string, string?>? Observed { get; set; }
+
+    /// <summary>How much of a command the run log keeps.</summary>
+    private const int LoggedCommandCharacters = 200;
 
     /// <summary>Told of each web lookup a stuck step's model makes, with its query or URL, so the run log shows what left the LAN.</summary>
     public Action<string, string>? WebLookup { get; set; }
 
     public void RecordWebLookup(string toolName, string target) => WebLookup?.Invoke(toolName, target);
 
-    public void Record(string toolName)
+    /// <param name="toolName">The tool the model called.</param>
+    /// <param name="command">For a command call, the command that runs (after any change the fleet made to it), so the run log shows what a round spent its time on.</param>
+    public void Record(string toolName, string? command = null)
     {
         ToolCalls++;
         EditToolCalled |= IsEdit(toolName);
-        Observed?.Invoke(toolName);
+        string? logged = command is null ? null
+            : command.Length <= LoggedCommandCharacters ? command : command[..LoggedCommandCharacters].TrimEnd() + "...";
+        Observed?.Invoke(toolName, logged);
     }
 
     public static bool IsEdit(string toolName) => toolName is "write_file" or "edit_file" or "move_file" or "delete_file";
@@ -3366,13 +3373,13 @@ internal sealed partial class PlanRunner
         // A round that goes on from a failed check, or a fresh conversation with a brief, is a repair round (see StepToolActivity.RepairRound).
         var activity = new StepToolActivity { RepairRound = conversation.RepairMessage is not null || !string.IsNullOrEmpty(conversation.Brief) };
         var stall = new ModelStallWatch(StallLimit, StallGrace);
-        activity.Observed = toolName =>
+        activity.Observed = (toolName, command) =>
         {
             stall.Progress();
             // Only a worker round is reconciled after a restart, so only a worker round's changing calls go to the run log.
             if (worker is not null && !ReadOnlyTools.Contains(toolName))
             {
-                _store.AddEvent(plan.Id, step.Id, attempt, ChangingToolEvent, tier, machine, toolName,
+                _store.AddEvent(plan.Id, step.Id, attempt, ChangingToolEvent, tier, machine, command is null ? toolName : $"{toolName}: {command}",
                     modelNode: modelMachine, workspaceNode: machine, rung: conversation.Rung, round: conversation.Round);
             }
         };
