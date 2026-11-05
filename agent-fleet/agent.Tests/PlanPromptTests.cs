@@ -140,6 +140,28 @@ public sealed class PlanPromptTests : PlanTestBase
         Assert.Contains("keeps the process alive", prompt);
     }
 
+    [Fact]
+    public void A_retry_after_the_windows_server_close_crash_says_how_to_close_the_servers_connections()
+    {
+        PlanRecord plan = NewApproved();
+
+        string prompt = PlanPromptComposition.BuildPrompt(plan, plan.Steps[0], 2,
+            "Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\\win\\async.c, line 94");
+
+        Assert.Contains("server.closeAllConnections()", prompt);
+        Assert.Contains("Do not use process.exit", prompt);
+    }
+
+    [Fact]
+    public void A_retry_after_an_ordinary_failure_does_not_mention_closing_server_connections()
+    {
+        PlanRecord plan = NewApproved();
+
+        string prompt = PlanPromptComposition.BuildPrompt(plan, plan.Steps[0], 2, "AssertionError: expected 1 to equal 2");
+
+        Assert.DoesNotContain("closeAllConnections", prompt);
+    }
+
     // Replies with the given texts in turn and remembers what it was sent.
     private sealed class Replies(params string[] texts) : Microsoft.Extensions.AI.IChatClient
     {
