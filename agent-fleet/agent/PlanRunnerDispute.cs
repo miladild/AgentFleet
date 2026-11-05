@@ -78,13 +78,15 @@ internal sealed partial class PlanRunner
         string prompt = TestRuling.BuildPrompt(latest, step, TestDispute.Holding(frozen, items), checkOutput, dispute.Reason, changed);
         IStepSession session = _agent.OpenSession(PlanRunnerToolPolicy.TestRulingRole);
         RulerAnswer answer;
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             limit.CancelAfter(RulingTimeLimit);
             using IDisposable? folder = HubProjectFolderScope.For(latest);
             StepAgentReply reply = await session.SendAsync(prompt, reviewerTier, ruler, limit.Token);
-            answer = await ReadVerdictAsync(session, reply, reviewerTier, ruler, cancellationToken);
+            answer = await ReadVerdictAsync(session, reply, clock.Elapsed, reviewerTier, ruler, cancellationToken);
+            RecordRulerTiming(plan, step, attempt, tier, model, rung, round, ruler, answer.Timing);
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
@@ -92,6 +94,8 @@ internal sealed partial class PlanRunner
                 ? $"The ruler ({ruler}) did not answer within {Duration(RulingTimeLimit)}; nothing changes."
                 : $"The ruler ({ruler}) could not be reached: {exception.Message} Nothing changes.";
             _logger.LogWarning(exception, "Plan {PlanId} step {StepId}: the test ruling failed.", plan.Id, step.Id);
+            RecordRulerTiming(plan, step, attempt, tier, model, rung, round, ruler,
+                $"The ruler ({ruler}) gave no reply after {Duration(clock.Elapsed)} ({(exception is OperationCanceledException ? "time limit reached" : exception.GetType().Name)}).");
             RecordRuling(plan, step, attempt, tier, model, rung, round, "Unavailable", detail, ruler);
             return NoRuling;
         }
@@ -133,21 +137,34 @@ internal sealed partial class PlanRunner
         return trimmed[..head].TrimEnd() + " ... " + trimmed[^(limit - head)..].TrimStart();
     }
 
-    /// <summary>What a ruler's answer came to: the verdict it gave, and the text for the log when it gave none.</summary>
-    private readonly record struct RulerAnswer(TestRulingVerdict Verdict, string NoVerdictLog);
+    /// <summary>What a ruler's answer came to: the verdict it gave, the text for the log when it gave none, and how long each ask took.</summary>
+    private readonly record struct RulerAnswer(TestRulingVerdict Verdict, string NoVerdictLog, string Timing);
+
+    /// <summary>
+    /// The run-log kind written once for every ruler ask: how long the ruler took and how long its reply was. Measured: rulings took
+    /// 49 of 131 minutes in a live run and three of seven returned nothing, and nothing in the log said why.
+    /// </summary>
+    internal const string RulerTimingEvent = "ruler-timing";
+
+    private void RecordRulerTiming(PlanRecord plan, PlanStep step, int attempt, string tier, ModelAttemptResult model, int rung, int round,
+        string ruler, string text) =>
+        _store.AddEvent(plan.Id, step.Id, attempt, RulerTimingEvent, tier, node: ruler, detail: text, modelNode: model.ModelNode,
+            workspaceNode: model.Machine, rung: rung, round: round);
 
     // A reply with no verdict is answered once, in the same conversation, with a request for the verdict alone. Measured: three of
     // three rulings in a live run opened with analysis and gave no verdict, and each took about seven minutes.
-    private async Task<RulerAnswer> ReadVerdictAsync(IStepSession session, StepAgentReply first, string reviewerTier, string ruler,
-        CancellationToken cancellationToken)
+    private async Task<RulerAnswer> ReadVerdictAsync(IStepSession session, StepAgentReply first, TimeSpan firstTook, string reviewerTier,
+        string ruler, CancellationToken cancellationToken)
     {
         TestRulingVerdict verdict = TestRuling.Parse(first.Text);
         string log = RulerReplyForLog(first.Text);
+        string timing = $"The ruler ({ruler}) answered after {Duration(firstTook)} with {(first.Text ?? string.Empty).Length} characters";
         if (verdict.Kind != TestRulingKind.NoVerdict || string.IsNullOrWhiteSpace(first.Text))
         {
-            return new RulerAnswer(verdict, log);
+            return new RulerAnswer(verdict, log, timing + ".");
         }
 
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -155,12 +172,14 @@ internal sealed partial class PlanRunner
             StepAgentReply second = await session.SendAsync(TestRuling.VerdictRequest, reviewerTier, ruler, limit.Token);
             verdict = TestRuling.Parse(second.Text);
             return new RulerAnswer(verdict,
-                $"{log} Asked again for the verdict alone, it said: {RulerReplyForLog(second.Text, RulerFollowUpLogCharacters)}");
+                $"{log} Asked again for the verdict alone, it said: {RulerReplyForLog(second.Text, RulerFollowUpLogCharacters)}",
+                $"{timing}; asked again for the verdict alone, it answered after {Duration(clock.Elapsed)} with {(second.Text ?? string.Empty).Length} characters.");
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             _logger.LogWarning(exception, "The ruler ({Ruler}) did not answer the request for the verdict alone.", ruler);
-            return new RulerAnswer(TestRulingVerdict.None, $"{log} Asked again for the verdict alone, it did not answer.");
+            return new RulerAnswer(TestRulingVerdict.None, $"{log} Asked again for the verdict alone, it did not answer.",
+                $"{timing}; asked again for the verdict alone, it gave no answer after {Duration(clock.Elapsed)}.");
         }
     }
 

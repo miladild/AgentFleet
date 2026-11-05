@@ -313,6 +313,38 @@ public sealed partial class PlanRunnerTests
         finally { FailFirstTests.DeleteTree(project); }
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Every_ruler_ask_writes_how_long_it_took_and_how_long_each_reply_was(bool giveVerdict)
+    {
+        // Measured: rulings took 49 of 131 minutes in a live run, three of seven returned nothing after eight minutes, and the log
+        // held neither a duration nor a reply size, so the cause could not be read.
+        string project = NewGitProject();
+        try
+        {
+            var setup = DisputePlan(project, StepWithItsOwnTest());
+            var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []));
+            var budget = new RulingBudget(4, call => giveVerdict && call.Number == 1
+                ? new StepAgentReply(CodeWrongRuling, 0, false)
+                : new StepAgentReply("Analysis only, " + new string('x', 400), 0, false));
+            var fake = WritesItsOwnTest(project, budget);
+            int checks = 0;
+            await OwnTestRunner(new RulingAgent(fake), workspaces, setup.Options, setup.Health,
+                    command => command != "dotnet test" ? BuildPassOutput : ++checks < 4 ? TestsFailOutput : TestsPassOutput, roundsPerRung: 3)
+                .RunPlanAsync(setup.Plan.Id, default).WaitAsync(DisputeTimeLimit);
+
+            PlanRunEvent timing = Store.Get(setup.Plan.Id)!.Events!.First(e => e.Kind == PlanRunner.RulerTimingEvent);
+            Assert.Contains("answered after", timing.Detail, StringComparison.Ordinal);
+            Assert.Contains(giveVerdict ? $"{CodeWrongRuling.Length} characters" : "415 characters", timing.Detail, StringComparison.Ordinal);
+            if (!giveVerdict)
+            {
+                Assert.Contains("asked again for the verdict alone", timing.Detail, StringComparison.Ordinal);
+            }
+        }
+        finally { FailFirstTests.DeleteTree(project); }
+    }
+
     [Fact]
     public async Task A_long_ruler_reply_with_no_verdict_keeps_its_end_in_the_log_as_well_as_its_start()
     {

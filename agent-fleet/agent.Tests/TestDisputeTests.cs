@@ -218,6 +218,10 @@ public sealed class TestDisputeTests : PlanTestBase
     [InlineData("VERDICT: TEST-WRONG\nFILE: tests/A.cs\n```\na\n```\nVERDICT: TEST-WRONG\nFILE: tests/B.cs\n```\nb\n```")]
     [InlineData("**VERDICT: CODE-WRONG**\nThe code must refuse zero.\n**VERDICT: TEST-WRONG**\nFILE: tests/A.cs\n```\na\n```")]
     [InlineData("VERDICT: TEST-WRONG.\nFILE: tests/A.cs\n```\na\n```\nVERDICT: TEST-WRONG.\nFILE: tests/B.cs\n```\nb\n```")]
+    // Measured: a ruler copied the prompt's own format line back as its "paragraph", and the worker was told nothing.
+    [InlineData("VERDICT: CODE-WRONG\nOne paragraph saying what the code must do to satisfy the test, and why.")]
+    [InlineData("**VERDICT: CODE-WRONG**\n\n> One paragraph saying what the code must do to satisfy the test, and why.\n")]
+    [InlineData("VERDICT: CODE-WRONG\n- `one paragraph saying what the code must do to satisfy the test and why`")]
     public void Anything_that_cannot_be_read_is_no_verdict(string? reply)
     {
         Assert.Equal(TestRulingKind.NoVerdict, TestRuling.Parse(reply).Kind);
@@ -235,6 +239,15 @@ public sealed class TestDisputeTests : PlanTestBase
 
         Assert.Equal(TestRulingKind.CodeWrong, verdict.Kind);
         Assert.Equal("The limit must refuse zero.", verdict.Paragraph);
+    }
+
+    [Fact]
+    public void A_paragraph_that_uses_the_template_words_inside_a_real_sentence_is_still_a_verdict()
+    {
+        TestRulingVerdict verdict = TestRuling.Parse(
+            "VERDICT: CODE-WRONG\nOne paragraph saying what the code must do to satisfy the test, and why: it must refuse zero before it counts the call.");
+
+        Assert.Equal(TestRulingKind.CodeWrong, verdict.Kind);
     }
 
     [Fact]

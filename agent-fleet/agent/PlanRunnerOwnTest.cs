@@ -86,13 +86,15 @@ internal sealed partial class PlanRunner
         string prompt = TestRuling.BuildPrompt(latest, step, holding, checkOutput, said, changed, ownTest: true);
         IStepSession session = _agent.OpenSession(PlanRunnerToolPolicy.TestRulingRole);
         RulerAnswer answer;
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             limit.CancelAfter(RulingTimeLimit);
             using IDisposable? folder = HubProjectFolderScope.For(latest);
             StepAgentReply reply = await session.SendAsync(prompt, reviewerTier, ruler, limit.Token);
-            answer = await ReadVerdictAsync(session, reply, reviewerTier, ruler, cancellationToken);
+            answer = await ReadVerdictAsync(session, reply, clock.Elapsed, reviewerTier, ruler, cancellationToken);
+            RecordRulerTiming(plan, step, attempt, tier, model, rung, round, ruler, answer.Timing);
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
@@ -100,6 +102,8 @@ internal sealed partial class PlanRunner
                 ? $"The ruler ({ruler}) did not answer within {Duration(RulingTimeLimit)}; nothing changes."
                 : $"The ruler ({ruler}) could not be reached: {exception.Message} Nothing changes.";
             _logger.LogWarning(exception, "Plan {PlanId} step {StepId}: the ruling on the step's own test failed.", plan.Id, step.Id);
+            RecordRulerTiming(plan, step, attempt, tier, model, rung, round, ruler,
+                $"The ruler ({ruler}) gave no reply after {Duration(clock.Elapsed)} ({(exception is OperationCanceledException ? "time limit reached" : exception.GetType().Name)}).");
             RecordRuling(plan, step, attempt, tier, model, rung, round, "Unavailable", detail, ruler);
             return NoRuling;
         }

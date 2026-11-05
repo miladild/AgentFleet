@@ -94,9 +94,18 @@ internal static partial class TestRuling
         text.AppendLine("(one FILE line and one fenced block for each corrected file, and only for the test files above; correct only what is wrong and keep every other test as it is)");
         text.AppendLine();
         text.AppendLine($"VERDICT: {CodeWrongVerdict}");
-        text.AppendLine("One paragraph saying what the code must do to satisfy the test, and why.");
+        text.AppendLine(CodeWrongTemplateLine);
         return text.ToString().TrimEnd();
     }
+
+    /// <summary>The format line that stands for the paragraph in the prompt. A ruler has been seen to copy it back as its answer.</summary>
+    internal const string CodeWrongTemplateLine = "One paragraph saying what the code must do to satisfy the test, and why.";
+
+    private static bool RepeatsTemplate(string paragraph) =>
+        WordsOf(paragraph).SequenceEqual(WordsOf(CodeWrongTemplateLine));
+
+    private static string[] WordsOf(string text) =>
+        Regex.Matches(text.ToLowerInvariant(), "[a-z0-9]+").Select(match => match.Value).ToArray();
 
     /// <summary>
     /// What a ruler is asked when its answer had no verdict line: measured, a ruler that wrote its analysis first ignored "verdict
@@ -138,7 +147,7 @@ internal static partial class TestRuling
         {
             HashSet<int> repeats = verdicts.Skip(1).Select(verdict => verdict.Line).ToHashSet();
             string paragraph = string.Join('\n', lines.Where((_, index) => index > at && !repeats.Contains(index))).Trim();
-            return paragraph.Length == 0
+            return paragraph.Length == 0 || RepeatsTemplate(paragraph)
                 ? TestRulingVerdict.None
                 : new TestRulingVerdict(TestRulingKind.CodeWrong, [], Cut(paragraph, MaxParagraphCharacters));
         }
