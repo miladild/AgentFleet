@@ -162,6 +162,28 @@ public sealed class PlanPromptTests : PlanTestBase
         Assert.DoesNotContain("closeAllConnections", prompt);
     }
 
+    [Fact]
+    public void A_retry_after_reading_a_property_of_undefined_says_to_check_where_the_value_comes_from_and_when_events_are_awaited()
+    {
+        PlanRecord plan = NewApproved();
+
+        string prompt = PlanPromptComposition.BuildPrompt(plan, plan.Steps[0], 2,
+            "TypeError: Cannot read properties of undefined (reading 'fired')");
+
+        Assert.Contains("register the wait first", prompt);
+        Assert.Contains("Print the value", prompt);
+    }
+
+    [Fact]
+    public void A_retry_after_an_ordinary_failure_does_not_mention_registering_an_event_wait()
+    {
+        PlanRecord plan = NewApproved();
+
+        string prompt = PlanPromptComposition.BuildPrompt(plan, plan.Steps[0], 2, "AssertionError: expected 1 to equal 2");
+
+        Assert.DoesNotContain("register the wait first", prompt);
+    }
+
     // Replies with the given texts in turn and remembers what it was sent.
     private sealed class Replies(params string[] texts) : Microsoft.Extensions.AI.IChatClient
     {

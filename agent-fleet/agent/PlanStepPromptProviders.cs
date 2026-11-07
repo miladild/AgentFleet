@@ -120,6 +120,18 @@ internal abstract class PlanStepPromptProvider(bool consumesContext = false) : M
                 "on port 0. Do not use process.exit, and keep the tests written as test('name', ...) so the runner still counts them.";
         }
 
+        // Measured: a step's own test read a property of a value that was undefined, and the model blamed the other
+        // module for five rounds and never checked what the test actually received or waited on.
+        if (failure.Contains("Cannot read properties of undefined", StringComparison.Ordinal) ||
+            failure.Contains("Cannot read property", StringComparison.Ordinal))
+        {
+            yield return "The failing line reads a property of a value that is undefined. Before you change any other file, find " +
+                "where that value comes from in the test and in the code it calls, and check what it really is: an event's payload " +
+                "is only given to a listener that was registered before the call that emits it, so register the wait first " +
+                "(const done = once(emitter, 'name'); await call(); await done), or collect events in an array; a wait set up " +
+                "after the event has fired never finishes. Print the value to see it.";
+        }
+
         if (failure.Contains("too long to finish", StringComparison.OrdinalIgnoreCase))
         {
             yield return "Your last reply took too long to write and was lost. Write less in each call: one short file or a few " +
