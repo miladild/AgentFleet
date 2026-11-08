@@ -401,6 +401,49 @@ public sealed class WorkerWorkspaceTests : PlanTestBase
         return (uploaded, modes);
     }
 
+    // Measured: a hub file that existed before and after was reported "path not found" for under a second right after the worker's
+    // changes were written back, and the step was parked as an environment fault.
+    private static readonly TimeSpan[] ThreePauses = [TimeSpan.FromMilliseconds(1), TimeSpan.FromMilliseconds(2), TimeSpan.FromMilliseconds(3)];
+
+    [Fact]
+    public void A_hub_file_that_is_not_there_for_a_moment_is_opened_again_and_uploaded()
+    {
+        string source = Path.Combine(PlansDirectory, "late-" + Guid.NewGuid().ToString("N") + ".md");
+        string uploaded = "";
+        int sleeps = 0;
+
+        WorkerWorkspaceSession.UploadKeepingMode(source, "/work/late.md", linuxWorker: false,
+            (stream, _) => uploaded = new StreamReader(stream).ReadToEnd(), (_, _) => { },
+            ThreePauses, _ => { sleeps++; File.WriteAllText(source, "# plan\n"); });
+
+        Assert.Equal("# plan\n", uploaded);
+        Assert.Equal(1, sleeps);
+    }
+
+    [Fact]
+    public void A_hub_file_that_never_appears_fails_after_the_last_attempt()
+    {
+        string source = Path.Combine(PlansDirectory, "never-" + Guid.NewGuid().ToString("N") + ".md");
+        int sleeps = 0;
+
+        Assert.ThrowsAny<IOException>(() => WorkerWorkspaceSession.UploadKeepingMode(source, "/work/never.md", linuxWorker: false,
+            (_, _) => { }, (_, _) => { }, ThreePauses, _ => sleeps++));
+
+        Assert.Equal(ThreePauses.Length, sleeps);
+    }
+
+    [Fact]
+    public void A_hub_file_error_that_is_not_a_missing_file_is_not_tried_again()
+    {
+        // Opening a folder as a file is refused for a reason waiting will not change.
+        int sleeps = 0;
+
+        Assert.Throws<UnauthorizedAccessException>(() => WorkerWorkspaceSession.UploadKeepingMode(PlansDirectory, "/work/folder", linuxWorker: false,
+            (_, _) => { }, (_, _) => { }, ThreePauses, _ => sleeps++));
+
+        Assert.Equal(0, sleeps);
+    }
+
     [Fact]
     public void Restart_reconciliation_accepts_an_unchanged_worker_snapshot()
     {

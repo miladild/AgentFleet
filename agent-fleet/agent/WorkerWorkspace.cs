@@ -1415,15 +1415,38 @@ internal sealed class WorkerWorkspaceSession : IWorkerWorkspaceSession, IEditChe
     /// Windows hub there is no mode to copy, so a file that starts with `#!` is taken to be a script; on a Unix hub the file's own
     /// execute bit decides. Other files are left as the upload made them, and nothing is changed for a Windows worker.
     /// </summary>
-    internal static void UploadKeepingMode(string source, string destination, bool linuxWorker, Action<Stream, string> upload, Action<string, short> setMode)
+    internal static void UploadKeepingMode(string source, string destination, bool linuxWorker, Action<Stream, string> upload, Action<string, short> setMode,
+        IReadOnlyList<TimeSpan>? openPauses = null, Action<TimeSpan>? sleep = null)
     {
-        using FileStream input = File.OpenRead(source);
+        using FileStream input = OpenHubFile(source, openPauses ?? HubFileOpenPauses, sleep ?? Thread.Sleep);
         bool executable = linuxWorker && IsMeantToBeExecuted(input, source);
         input.Position = 0;
         upload(input, destination);
         if (executable)
         {
             setMode(destination, 755);
+        }
+    }
+
+    /// <summary>
+    /// How long to wait before each new attempt to open a hub file for upload. Measured: a file that existed before and after was
+    /// reported as not found for under a second right after the worker's changes were written back to the hub, and the step was parked.
+    /// </summary>
+    private static readonly TimeSpan[] HubFileOpenPauses = [TimeSpan.FromMilliseconds(250), TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(3)];
+
+    // A file error (not found, in use) is tried again after each pause; any other error, and the last attempt's, is thrown.
+    internal static FileStream OpenHubFile(string source, IReadOnlyList<TimeSpan> pauses, Action<TimeSpan> sleep)
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return File.OpenRead(source);
+            }
+            catch (IOException) when (attempt < pauses.Count)
+            {
+                sleep(pauses[attempt]);
+            }
         }
     }
 
