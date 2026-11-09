@@ -167,17 +167,25 @@ internal static partial class PlanRunnerToolPolicy
     }
 
     // The file endings a test runner loads: a file with one of these endings is judged by what it registers.
-    private static readonly string[] TestFileEndings = [".test.ts", ".test.js", ".test.mjs", ".test.tsx", ".spec.ts", ".spec.js"];
+    private static readonly string[] TestFileEndings =
+    [
+        ".test.ts", ".test.js", ".test.mjs", ".test.cjs", ".test.mts", ".test.cts", ".test.tsx",
+        ".spec.ts", ".spec.js", ".spec.tsx", ".spec.mjs", ".spec.mts", ".spec.cjs"
+    ];
 
     // A call that registers a test or a suite: test(, it(, describe(, suite(, or one of them with a member such as test.describe( or test.skip(.
     [GeneratedRegex(@"\b(?:test|it|describe|suite)(?:\.\w+)?\s*\(")]
     private static partial Regex TestRegistration();
 
+    // A block comment or a line comment, in the order they appear. A "//" right after a colon is part of a web address, not a comment.
+    [GeneratedRegex(@"/\*[\s\S]*?\*/|(?<!:)//[^\r\n]*")]
+    private static partial Regex CommentText();
+
     /// <summary>
     /// The refusal for a worker's whole-file write (write_file) to a test file whose content registers no test, or null. A script with
-    /// top-level code and asserts runs, but the test runner counts no test in it, so the file passes without testing anything. The
-    /// refusal is the tool's result: nothing is written and the round goes on. A partial edit (edit_file) is not judged, and neither is
-    /// any role but the step worker's (the reviewing, auditing and ruling roles cannot write).
+    /// top-level code and asserts runs, but the test runner counts no test in it, so the file passes without testing anything. A call
+    /// inside a comment does not count. The refusal is the tool's result: nothing is written and the round goes on. A partial edit
+    /// (edit_file) is not judged, and neither is any role but the step worker's (the reviewing, auditing and ruling roles cannot write).
     /// </summary>
     public static string? UnregisteredTestFileRefusal(string toolName, string? path, string? content, string? role)
     {
@@ -187,7 +195,8 @@ internal static partial class PlanRunnerToolPolicy
         }
 
         string fileName = path.Split('/', '\\')[^1];
-        if (!TestFileEndings.Any(ending => fileName.EndsWith(ending, StringComparison.OrdinalIgnoreCase)) || TestRegistration().IsMatch(content))
+        if (!TestFileEndings.Any(ending => fileName.EndsWith(ending, StringComparison.OrdinalIgnoreCase)) ||
+            TestRegistration().IsMatch(CommentText().Replace(content, " ")))
         {
             return null;
         }

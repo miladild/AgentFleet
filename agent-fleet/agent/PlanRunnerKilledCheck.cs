@@ -32,10 +32,14 @@ internal sealed partial class PlanRunner
     [GeneratedRegex(@"^(?<head>\s*node\s(?:[^&|;]*?\s)?)--test(?=\s|$)", RegexOptions.CultureInvariant)]
     private static partial Regex NodeTestFlag();
 
+    // The characters that chain or pipe commands in a shell, besides "&&".
+    private static readonly char[] ChainCharacters = ['|', ';'];
+
     /// <summary>
     /// The command a worker's plain node test call runs: the same command with the per-test limit added after "--test", and the
-    /// force-exit flag too when the worker did not add it. Null when the command already sets a per-test limit, or when it is not a
-    /// plain node test command. A step's own check is not changed by this (see FirstRunForcedExitFlags).
+    /// force-exit flag too when the worker did not add it. A piped or chained command gets the flags in its first command only, when
+    /// that is a node test command; the rest of the text is kept as the worker wrote it. Null when the command already sets a per-test
+    /// limit, or when its first command is not a node test command. A step's own check is not changed by this (see FirstRunForcedExitFlags).
     /// </summary>
     internal static string? WorkerTestCommand(string? command)
     {
@@ -45,13 +49,19 @@ internal sealed partial class PlanRunner
         }
 
         string flags = command.Contains("--test-force-exit", StringComparison.Ordinal) ? WorkerTestTimeoutFlag : WorkerTestFlags;
-        return WithFlagsAfterTest(command, flags);
+        int chain = FirstChainOperator(command);
+        if (chain < 0)
+        {
+            return WithFlagsAfterTest(command, flags);
+        }
+
+        // The first command is the test run; the operator and everything after it are kept as the worker wrote them.
+        return WithFlagsAfterTest(command[..chain], flags) is { } first ? first + command[chain..] : null;
     }
 
     /// <summary>
     /// The command with the runner's force-exit flags added, or null when it is not a plain node test command or already carries
-    /// them. A command chained with &amp;&amp; is left alone: only the first command is a plain one, and a rerun of part of a chain would
-    /// not be the check.
+    /// them. A command that pipes or chains others is left alone: a rerun of part of it would not be the check.
     /// </summary>
     internal static string? ForcedExitCommand(string? command, string flags = ForcedExitFlags)
     {
@@ -63,11 +73,19 @@ internal sealed partial class PlanRunner
         return WithFlagsAfterTest(command, flags);
     }
 
+    // The position of the first "&&", "|" or ";" in a command, or -1 when it has none. A single "&" (a redirect such as 2>&1) is not one.
+    private static int FirstChainOperator(string command)
+    {
+        int and = command.IndexOf("&&", StringComparison.Ordinal);
+        int other = command.IndexOfAny(ChainCharacters);
+        return and < 0 ? other : other < 0 ? and : Math.Min(and, other);
+    }
+
     // The command with the flags put right after its first "--test" flag, or null when the command is empty, chains or pipes
     // commands, or is not a node test command.
     private static string? WithFlagsAfterTest(string? command, string flags)
     {
-        if (string.IsNullOrWhiteSpace(command) || command.Contains("&&", StringComparison.Ordinal) || command.Contains('|') || command.Contains(';'))
+        if (string.IsNullOrWhiteSpace(command) || FirstChainOperator(command) >= 0)
         {
             return null;
         }

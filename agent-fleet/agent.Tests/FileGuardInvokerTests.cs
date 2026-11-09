@@ -116,8 +116,6 @@ public sealed class FileGuardInvokerTests : ContextTestBase
 
     [Theory]
     [InlineData("node --test --test-timeout=5000 test/a.test.ts")]
-    [InlineData("node --test && echo done")]
-    [InlineData("node --test test/a.test.ts | tail -20")]
     [InlineData("npm test")]
     [InlineData("ls src")]
     public async Task Any_other_command_of_a_worker_runs_as_it_was_written(string command)
@@ -125,6 +123,14 @@ public sealed class FileGuardInvokerTests : ContextTestBase
         (List<string> ran, _, _) = await RunRoundAsync(null, "run_command", "command", command);
 
         Assert.Equal([command], ran);
+    }
+
+    [Fact]
+    public async Task A_piped_node_test_command_of_a_worker_gets_the_flags_in_its_first_command_only()
+    {
+        (List<string> ran, _, _) = await RunRoundAsync(null, "run_command", "command", "node --test test/a.test.ts | tail -20");
+
+        Assert.Equal(["node --test --test-force-exit --test-timeout=30000 test/a.test.ts | tail -20"], ran);
     }
 
     [Fact]

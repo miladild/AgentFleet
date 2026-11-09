@@ -23,6 +23,21 @@ internal sealed partial class PlanRunner
         TestDispute.Evaluate(testFirstOn: true, ordinaryStep: true, hasFrozenFiles: true, disputed: true, rulingsMade: 0, unresolvedAsks: 0,
             checkOutput, ownTestFiles).Due;
 
+    // The run-log wording of a ruler ask that got no reply. The dispute path writes the same words (see RecordRulerTiming).
+    internal const string NoReplyWording = "gave no reply after";
+
+    /// <summary>
+    /// The rulings of a step that ended with no usable answer, and the asks that got no reply: a ruling with no verdict, a refused or
+    /// undone correction, and an ask whose ruler-timing event says it got no reply. A ruling that ended unavailable after its ask is
+    /// counted through that ask. Only an ask writes a ruler-timing event, so a ruler skipped because its machine was not ready is not counted.
+    /// </summary>
+    internal static int UnresolvedAsks(IEnumerable<PlanRunEvent> events)
+    {
+        PlanRunEvent[] all = events.ToArray();
+        return all.Count(runEvent => runEvent.Kind == RunEventKind.TestRuling && runEvent.FailureClass is NoVerdictClass or RefusedClass or UndoneClass) +
+            all.Count(runEvent => runEvent.Kind == RulerTimingEvent && runEvent.Detail.Contains(NoReplyWording, StringComparison.Ordinal));
+    }
+
     // The test files the step lists that were not in the project when the step began, as the hub copy holds them now.
     private IReadOnlyList<TestFileText> ReadOwnTestFiles(PlanRecord plan, PlanStep step)
     {
@@ -60,10 +75,11 @@ internal sealed partial class PlanRunner
         CancellationToken cancellationToken)
     {
         PlanRecord latest = _store.Get(plan.Id) ?? plan;
-        PlanRunEvent[] earlierRulings = StepEventsSinceRetry(plan.Id, step.Id).Where(runEvent => runEvent.Kind == RunEventKind.TestRuling).ToArray();
+        PlanRunEvent[] earlierEvents = StepEventsSinceRetry(plan.Id, step.Id);
+        PlanRunEvent[] earlierRulings = earlierEvents.Where(runEvent => runEvent.Kind == RunEventKind.TestRuling).ToArray();
         if (earlierRulings.Any(runEvent => runEvent.FailureClass is TestWrongClass or CodeWrongClass) ||
             CarriedRulingNote(plan.Id, step.Id) is not null ||
-            earlierRulings.Count(runEvent => runEvent.FailureClass is NoVerdictClass or RefusedClass or UndoneClass) >= TestDispute.MaxUnresolvedAsks)
+            UnresolvedAsks(earlierEvents) >= TestDispute.MaxUnresolvedAsks)
         {
             return NoRuling;
         }
@@ -104,7 +120,7 @@ internal sealed partial class PlanRunner
                 : $"The ruler ({ruler}) could not be reached: {exception.Message} Nothing changes.";
             _logger.LogWarning(exception, "Plan {PlanId} step {StepId}: the ruling on the step's own test failed.", plan.Id, step.Id);
             RecordRulerTiming(plan, step, attempt, tier, model, rung, round, ruler,
-                $"The ruler ({ruler}) gave no reply after {Duration(clock.Elapsed)} ({(exception is OperationCanceledException ? "time limit reached" : exception.GetType().Name)}).");
+                $"The ruler ({ruler}) {NoReplyWording} {Duration(clock.Elapsed)} ({(exception is OperationCanceledException ? "time limit reached" : exception.GetType().Name)}).");
             RecordRuling(plan, step, attempt, tier, model, rung, round, "Unavailable", detail, ruler);
             return NoRuling;
         }
@@ -123,7 +139,7 @@ internal sealed partial class PlanRunner
                     cancellationToken);
             default:
                 RecordRuling(plan, step, attempt, tier, model, rung, round, NoVerdictClass,
-                    $"{why} The ruler ({ruler}) gave no TEST-WRONG or CODE-WRONG verdict: {answer.NoVerdictLog} Nothing changes.", ruler);
+                    $"{why} The ruler ({ruler}) gave no usable verdict: {answer.NoVerdictLog} Nothing changes.", ruler);
                 return NoRuling;
         }
     }

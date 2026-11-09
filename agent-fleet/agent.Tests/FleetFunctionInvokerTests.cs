@@ -960,7 +960,7 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
     [InlineData("node --test test/a.test.js", "node --test --test-force-exit --test-timeout=30000 test/a.test.js")]
     [InlineData("node --test --test-force-exit test/a.test.js", "node --test --test-timeout=30000 --test-force-exit test/a.test.js")]
     [InlineData("node --test --test-timeout=5000 test/a.test.js", "node --test --test-timeout=5000 test/a.test.js")]
-    [InlineData("node --test test/a.test.js && echo done", "node --test test/a.test.js && echo done")]
+    [InlineData("node --test test/a.test.js && echo done", "node --test --test-force-exit --test-timeout=30000 test/a.test.js && echo done")]
     public async Task A_workers_node_test_command_runs_with_the_per_test_limit_and_the_attempt_logs_that_command(string requested, string expected)
     {
         var invoker = NewInvoker();
