@@ -89,7 +89,8 @@ internal sealed class FleetFunctionInvoker(
         string toolName = context.Function.Name;
         // The plan runner is the executor: its requests carry the runner key and are exempt.
         bool fromRunner = context.Options?.AdditionalProperties?.ContainsKey(FleetRoutingChatClient.RunnerTierKey) == true;
-        // The command a worker's plain node test call runs instead: the same with the runner told to exit when the tests are done.
+        // The command a worker's plain node test call runs instead: the same with the runner told to exit when the tests are done
+        // and a per-test limit set (see PlanRunner.WorkerTestCommand).
         string? forcedExitCommand = null;
         if (fromRunner)
         {
@@ -101,7 +102,7 @@ internal sealed class FleetFunctionInvoker(
             if (toolName == "run_command" && context.Arguments.TryGetValue("command", out object? commandValue))
             {
                 command = commandValue?.ToString();
-                forcedExitCommand = PlanRunner.ForcedExitCommand(command, PlanRunner.FirstRunForcedExitFlags);
+                forcedExitCommand = PlanRunner.WorkerTestCommand(command);
             }
             else if (toolName == "run_git_command" && context.Arguments.TryGetValue("arguments", out object? gitArguments))
                 command = gitArguments?.ToString();
@@ -129,6 +130,15 @@ internal sealed class FleetFunctionInvoker(
             {
                 RecordToolCall(context, toolName, denial, isError: true);
                 return (denial, "refused");
+            }
+
+            // A whole-file write to a test file that registers no tests is refused the same way: nothing is written and the round goes on.
+            if (toolName == "write_file" &&
+                PlanRunnerToolPolicy.UnregisteredTestFileRefusal(toolName, ArgumentText(context.Arguments, "path"), ArgumentText(context.Arguments, "content"),
+                    FleetRoutingChatClient.RunnerRole(context.Options)) is { } testFileRefusal)
+            {
+                RecordToolCall(context, toolName, testFileRefusal, isError: true);
+                return (testFileRefusal, "refused");
             }
         }
         if (toolName != PlanGate.BlockedToolName && !fromRunner)
@@ -164,7 +174,7 @@ internal sealed class FleetFunctionInvoker(
 
         // A test that opens a server and fails before closing it keeps node's test runner alive, so a worker running its tests again
         // and again in one round waited out the command limit each time. The policy and the file guard above saw the command as the
-        // worker wrote it; what runs exits when the tests are done and prints their errors.
+        // worker wrote it; what runs exits when the tests are done, fails a test that runs past the per-test limit, and prints the errors.
         if (fromRunner && toolName == "run_command" && forcedExitCommand is not null)
         {
             context.Arguments["command"] = forcedExitCommand;
@@ -274,6 +284,10 @@ internal sealed class FleetFunctionInvoker(
             throw;
         }
     }
+
+    // The text of a tool argument, or null when the call leaves it out.
+    private static string? ArgumentText(IReadOnlyDictionary<string, object?> arguments, string name) =>
+        CustomToolRunner.ValueOf(arguments.TryGetValue(name, out object? value) ? value : null);
 
     private void RecordToolCall(FunctionInvocationContext context, string toolName, string result, bool isError)
     {

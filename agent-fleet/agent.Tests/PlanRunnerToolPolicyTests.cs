@@ -167,4 +167,69 @@ public sealed class PlanRunnerToolPolicyTests
     [Fact]
     public void An_empty_command_has_nothing_to_refuse() =>
         Assert.Null(PlanRunnerToolPolicy.CommandRefusal(null));
+
+    // A test file written whole must register its tests: a script with top-level asserts runs, but the runner counts no test in it.
+    private const string ScriptOnlyTest = "const assert = require('node:assert');\nassert.equal(1 + 1, 2);\n";
+
+    [Theory]
+    [InlineData("test/add.test.js")]
+    [InlineData("test/add.test.ts")]
+    [InlineData("test/add.test.mjs")]
+    [InlineData("src/components/Add.test.tsx")]
+    [InlineData("test/add.spec.ts")]
+    [InlineData("test/add.spec.js")]
+    [InlineData("test/ADD.TEST.TS")]
+    [InlineData(@"test\add.test.js")]
+    public void A_test_file_that_registers_no_test_is_refused_when_it_is_written_whole(string path)
+    {
+        string? refusal = PlanRunnerToolPolicy.UnregisteredTestFileRefusal("write_file", path, ScriptOnlyTest, role: null);
+
+        Assert.NotNull(refusal);
+        Assert.Contains("registers no tests, so nothing was written", refusal);
+        Assert.Contains("test('name', async () => { ... })", refusal);
+        Assert.Contains("(or it('name', ...))", refusal);
+        Assert.Contains("inside test blocks", refusal);
+    }
+
+    [Theory]
+    [InlineData("test('adds two numbers', () => {\n  assert.equal(1 + 1, 2);\n});")]
+    [InlineData("it('adds', async () => {});")]
+    [InlineData("describe('add', () => {\n  it('adds', () => {});\n});")]
+    [InlineData("test.describe('add', () => {});")]
+    [InlineData("test.skip('later', () => {});")]
+    [InlineData("suite('add', () => {\n  test('adds', () => {});\n});")]
+    [InlineData("describe.each([1, 2])('add %i', (n) => {});")]
+    public void A_test_file_that_registers_a_test_is_allowed(string content) =>
+        Assert.Null(PlanRunnerToolPolicy.UnregisteredTestFileRefusal("write_file", "test/add.test.ts", content, role: null));
+
+    [Fact]
+    public void A_word_that_only_ends_in_a_registration_word_does_not_count_as_one() =>
+        Assert.NotNull(PlanRunnerToolPolicy.UnregisteredTestFileRefusal("write_file", "test/split.test.js",
+            "const parts = line.split(',');\nassert.equal(parts.length, 2);\n", role: null));
+
+    [Fact]
+    public void A_partial_edit_of_a_test_file_is_not_judged() =>
+        Assert.Null(PlanRunnerToolPolicy.UnregisteredTestFileRefusal("edit_file", "test/add.test.js", ScriptOnlyTest, role: null));
+
+    [Fact]
+    public void A_file_that_is_not_a_test_file_is_not_judged()
+    {
+        Assert.Null(PlanRunnerToolPolicy.UnregisteredTestFileRefusal("write_file", "src/add.js", "export const add = (a, b) => a + b;\n", role: null));
+        Assert.Null(PlanRunnerToolPolicy.UnregisteredTestFileRefusal("write_file", "test/fixtures/notes.txt", ScriptOnlyTest, role: null));
+    }
+
+    [Fact]
+    public void A_write_without_content_is_left_to_the_missing_argument_check() =>
+        Assert.Null(PlanRunnerToolPolicy.UnregisteredTestFileRefusal("write_file", "test/add.test.js", null, role: null));
+
+    [Theory]
+    [InlineData(PlanRunnerToolPolicy.StepReviewRole)]
+    [InlineData(PlanRunnerToolPolicy.TestRulingRole)]
+    [InlineData(PlanRunnerToolPolicy.CheckAuditRole)]
+    public void The_reviewing_auditing_and_ruling_roles_are_not_judged_by_this_rule(string role) =>
+        Assert.Null(PlanRunnerToolPolicy.UnregisteredTestFileRefusal("write_file", "test/add.test.js", ScriptOnlyTest, role));
+
+    [Fact]
+    public void The_test_writer_role_is_judged_like_an_ordinary_step() =>
+        Assert.NotNull(PlanRunnerToolPolicy.UnregisteredTestFileRefusal("write_file", "test/add.test.js", ScriptOnlyTest, PlanRunnerToolPolicy.TestWriterRole));
 }

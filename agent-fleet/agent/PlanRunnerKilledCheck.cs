@@ -19,9 +19,34 @@ internal sealed partial class PlanRunner
     /// </summary>
     internal const string FirstRunForcedExitFlags = "--test-force-exit";
 
+    /// <summary>The per-test limit a worker's own node test command gets: a test that runs longer than this fails by itself.</summary>
+    internal const string WorkerTestTimeoutFlag = "--test-timeout=30000";
+
+    /// <summary>
+    /// The flags added to a worker's own plain node test command when it has neither: exit when the tests are done, and fail one test
+    /// that runs past the per-test limit, so one hanging test does not hold the whole command until its own limit.
+    /// </summary>
+    internal const string WorkerTestFlags = "--test-force-exit " + WorkerTestTimeoutFlag;
+
     // The first "--test" flag of a node command, as a whole word (not --test-name-pattern and the like).
     [GeneratedRegex(@"^(?<head>\s*node\s(?:[^&|;]*?\s)?)--test(?=\s|$)", RegexOptions.CultureInvariant)]
     private static partial Regex NodeTestFlag();
+
+    /// <summary>
+    /// The command a worker's plain node test call runs: the same command with the per-test limit added after "--test", and the
+    /// force-exit flag too when the worker did not add it. Null when the command already sets a per-test limit, or when it is not a
+    /// plain node test command. A step's own check is not changed by this (see FirstRunForcedExitFlags).
+    /// </summary>
+    internal static string? WorkerTestCommand(string? command)
+    {
+        if (command is null || command.Contains("--test-timeout", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        string flags = command.Contains("--test-force-exit", StringComparison.Ordinal) ? WorkerTestTimeoutFlag : WorkerTestFlags;
+        return WithFlagsAfterTest(command, flags);
+    }
 
     /// <summary>
     /// The command with the runner's force-exit flags added, or null when it is not a plain node test command or already carries
@@ -30,8 +55,19 @@ internal sealed partial class PlanRunner
     /// </summary>
     internal static string? ForcedExitCommand(string? command, string flags = ForcedExitFlags)
     {
-        if (string.IsNullOrWhiteSpace(command) || command.Contains("--test-force-exit", StringComparison.Ordinal) ||
-            command.Contains("&&", StringComparison.Ordinal) || command.Contains('|') || command.Contains(';'))
+        if (command?.Contains("--test-force-exit", StringComparison.Ordinal) == true)
+        {
+            return null;
+        }
+
+        return WithFlagsAfterTest(command, flags);
+    }
+
+    // The command with the flags put right after its first "--test" flag, or null when the command is empty, chains or pipes
+    // commands, or is not a node test command.
+    private static string? WithFlagsAfterTest(string? command, string flags)
+    {
+        if (string.IsNullOrWhiteSpace(command) || command.Contains("&&", StringComparison.Ordinal) || command.Contains('|') || command.Contains(';'))
         {
             return null;
         }

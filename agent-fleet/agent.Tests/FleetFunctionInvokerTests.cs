@@ -951,6 +951,96 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
         Assert.Empty(approvals.Pending());
     }
 
+    private static ScriptedModel CallOnce(string toolName, Dictionary<string, object?> arguments) =>
+        new(round => round == 0 ? new FunctionCallContent("c" + round, toolName, arguments) : null);
+
+    // A worker's plain node test command runs with a per-test limit (see PlanRunner.WorkerTestCommand). The tool receives that
+    // command, and the attempt's counter logs the same one.
+    [Theory]
+    [InlineData("node --test test/a.test.js", "node --test --test-force-exit --test-timeout=30000 test/a.test.js")]
+    [InlineData("node --test --test-force-exit test/a.test.js", "node --test --test-timeout=30000 --test-force-exit test/a.test.js")]
+    [InlineData("node --test --test-timeout=5000 test/a.test.js", "node --test --test-timeout=5000 test/a.test.js")]
+    [InlineData("node --test test/a.test.js && echo done", "node --test test/a.test.js && echo done")]
+    public async Task A_workers_node_test_command_runs_with_the_per_test_limit_and_the_attempt_logs_that_command(string requested, string expected)
+    {
+        var invoker = NewInvoker();
+        var activity = new StepToolActivity();
+        var logged = new List<(string Tool, string? Command)>();
+        activity.Observed = (tool, text) => logged.Add((tool, text));
+        var ran = new List<string>();
+        var tool = AIFunctionFactory.Create((string command) => { ran.Add(command); return "ok"; }, "run_command", "Runs a command.");
+        var model = CallOnce("run_command", new Dictionary<string, object?> { ["command"] = requested });
+
+        await RunAsync(invoker, model, tool, runner: true, activity: activity).WaitAsync(SafetyLimit);
+
+        Assert.Equal([expected], ran);
+        Assert.Equal(("run_command", expected), Assert.Single(logged));
+    }
+
+    // A worker's whole-file write to a test file must register its tests (see PlanRunnerToolPolicy.UnregisteredTestFileRefusal).
+    private const string ScriptOnlyTest = "const assert = require('node:assert');\nassert.equal(1 + 1, 2);\n";
+    private const string RegisteredTest = "test('adds two numbers', () => {\n  assert.equal(1 + 1, 2);\n});\n";
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(PlanRunnerToolPolicy.TestWriterRole)]
+    public async Task A_worker_whole_file_write_of_a_test_file_that_registers_no_test_is_refused_and_nothing_is_written(string? role)
+    {
+        var written = new List<string>();
+        var tool = AIFunctionFactory.Create((string path, string content) => { written.Add(path); return "Wrote " + path; }, "write_file", "Writes a file.");
+        var model = CallOnce("write_file", new Dictionary<string, object?> { ["path"] = "test/add.test.js", ["content"] = ScriptOnlyTest });
+        string contextId = NewContextId();
+
+        string[] results = await RunAsync(NewInvoker(), model, tool, runner: true, role: role, contextId: contextId).WaitAsync(SafetyLimit);
+
+        Assert.Empty(written);
+        Assert.Contains("test/add.test.js registers no tests", results[0], StringComparison.Ordinal);
+        Assert.Contains("test('name', async () => { ... })", results[0], StringComparison.Ordinal);
+        Assert.Contains("inside test blocks", results[0], StringComparison.Ordinal);
+        Assert.Equal(2, model.Requests); // The round goes on, so the worker can write the file again.
+        FleetContextEvent recorded = Assert.Single(Store.AllEvents(contextId), e => e.Kind == FleetContextEventKind.ToolResult);
+        Assert.True(ContextText.Bool(recorded.Payload, "isError"));
+    }
+
+    [Fact]
+    public async Task A_worker_whole_file_write_of_a_test_file_that_registers_its_test_runs()
+    {
+        var written = new List<string>();
+        var tool = AIFunctionFactory.Create((string path, string content) => { written.Add(path); return "Wrote " + path; }, "write_file", "Writes a file.");
+        var model = CallOnce("write_file", new Dictionary<string, object?> { ["path"] = "test/add.test.js", ["content"] = RegisteredTest });
+
+        string[] results = await RunAsync(NewInvoker(), model, tool, runner: true).WaitAsync(SafetyLimit);
+
+        Assert.Equal(["test/add.test.js"], written);
+        Assert.Equal("Wrote test/add.test.js", results[0]);
+    }
+
+    [Fact]
+    public async Task A_worker_partial_edit_of_a_test_file_is_not_judged()
+    {
+        var edited = new List<string>();
+        var tool = AIFunctionFactory.Create((string path, string oldText, string newText) => { edited.Add(path); return "Edited " + path; }, "edit_file", "Edits a file.");
+        var model = CallOnce("edit_file", new Dictionary<string, object?> { ["path"] = "test/add.test.js", ["oldText"] = "1 + 1", ["newText"] = "2 + 2" });
+
+        string[] results = await RunAsync(NewInvoker(), model, tool, runner: true).WaitAsync(SafetyLimit);
+
+        Assert.Equal(["test/add.test.js"], edited);
+        Assert.Equal("Edited test/add.test.js", results[0]);
+    }
+
+    [Fact]
+    public async Task A_chat_write_of_a_test_file_that_registers_no_test_is_not_judged()
+    {
+        var written = new List<string>();
+        var tool = AIFunctionFactory.Create((string path, string content) => { written.Add(path); return "Wrote " + path; }, "write_file", "Writes a file.");
+        var model = CallOnce("write_file", new Dictionary<string, object?> { ["path"] = "test/add.test.js", ["content"] = ScriptOnlyTest });
+
+        string[] results = await RunAsync(NewInvoker(), model, tool, runner: false).WaitAsync(SafetyLimit);
+
+        Assert.Equal(["test/add.test.js"], written);
+        Assert.Equal("Wrote test/add.test.js", results[0]);
+    }
+
     [Fact]
     public void No_risky_tool_is_read_only_or_fleet_bookkeeping()
     {

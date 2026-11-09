@@ -67,6 +67,27 @@ public sealed partial class PlanRunnerTests
     public void A_node_test_command_gets_the_force_exit_flags_and_anything_else_is_left_alone(string? command, string? expected) =>
         Assert.Equal(expected, PlanRunner.ForcedExitCommand(command));
 
+    // A worker's own plain node test command gets a per-test limit, so one test that hangs fails by itself after 30 seconds.
+    [Theory]
+    [InlineData("node --test test/a.test.js", "node --test --test-force-exit --test-timeout=30000 test/a.test.js")]
+    [InlineData("node --test --test-force-exit test/a.test.js", "node --test --test-timeout=30000 --test-force-exit test/a.test.js")]
+    [InlineData("node --import tsx --test test/a.test.ts", "node --import tsx --test --test-force-exit --test-timeout=30000 test/a.test.ts")]
+    [InlineData("node --test", "node --test --test-force-exit --test-timeout=30000")]
+    [InlineData("node --test --test-timeout=5000 test/a.test.js", null)]
+    [InlineData("node --test --test-force-exit --test-timeout=5000 test/a.test.js", null)]
+    [InlineData("node --test test/a.test.js && echo done", null)]
+    [InlineData("node --test test/a.test.js | tail -20", null)]
+    [InlineData("node --test test/a.test.js; echo done", null)]
+    [InlineData("npm test", null)]
+    [InlineData("", null)]
+    [InlineData(null, null)]
+    public void A_workers_node_test_command_gets_a_per_test_limit_and_the_force_exit_flag_only_when_it_is_missing(string? command, string? expected) =>
+        Assert.Equal(expected, PlanRunner.WorkerTestCommand(command));
+
+    [Fact]
+    public void The_step_check_gets_the_force_exit_flag_and_no_per_test_limit_on_its_first_run() =>
+        Assert.Equal("node --test --test-force-exit test/a.test.js", PlanRunner.ForcedExitCommand(NodeTestCheck, PlanRunner.FirstRunForcedExitFlags));
+
     [Fact]
     public void A_killed_test_run_shows_the_errors_the_forced_exit_rerun_printed()
     {

@@ -102,19 +102,20 @@ public sealed class FileGuardInvokerTests : ContextTestBase
     }
 
     [Theory]
-    [InlineData("node --import tsx --test test/health-alerts.test.ts", "node --import tsx --test --test-force-exit test/health-alerts.test.ts")]
-    [InlineData("node --test", "node --test --test-force-exit")]
+    [InlineData("node --import tsx --test test/health-alerts.test.ts", "node --import tsx --test --test-force-exit --test-timeout=30000 test/health-alerts.test.ts")]
+    [InlineData("node --test", "node --test --test-force-exit --test-timeout=30000")]
+    [InlineData("node --test --test-force-exit test/a.test.ts", "node --test --test-timeout=30000 --test-force-exit test/a.test.ts")]
     public async Task A_workers_plain_node_test_command_runs_with_the_runner_forced_to_exit(string command, string expected)
     {
         // Measured: a test that opened a server and failed before closing it kept the runner alive, and the worker's own command
-        // waited out the two-minute limit again and again in the same round.
+        // waited out the two-minute limit again and again in the same round. The per-test limit fails such a test by itself.
         (List<string> ran, _, _) = await RunRoundAsync(null, "run_command", "command", command);
 
         Assert.Equal([expected], ran);
     }
 
     [Theory]
-    [InlineData("node --test --test-force-exit test/a.test.ts")]
+    [InlineData("node --test --test-timeout=5000 test/a.test.ts")]
     [InlineData("node --test && echo done")]
     [InlineData("node --test test/a.test.ts | tail -20")]
     [InlineData("npm test")]
