@@ -308,7 +308,7 @@ public sealed partial class PlanRunnerTests
 
             Assert.Equal(2, fake.Audits.Count);
             Assert.Equal(1500, fake.Audits[0].MaxOutputTokens);
-            Assert.Equal(3000, fake.Audits[1].MaxOutputTokens);
+            Assert.Equal(400, fake.Audits[1].MaxOutputTokens);
         }
         finally { FailFirstTests.DeleteTree(project); }
     }

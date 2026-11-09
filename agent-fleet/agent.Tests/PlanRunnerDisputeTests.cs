@@ -152,7 +152,7 @@ public sealed partial class PlanRunnerTests
             FakeAuditCall[] asks = fake.Audits.Where(call => call.Role == PlanRunnerToolPolicy.TestRulingRole).ToArray();
             Assert.Equal(2, asks.Length);
             Assert.Equal(1500, asks[0].MaxOutputTokens);
-            Assert.Equal(3000, asks[1].MaxOutputTokens);
+            Assert.Equal(400, asks[1].MaxOutputTokens);
         }
         finally { FailFirstTests.DeleteTree(project); }
     }

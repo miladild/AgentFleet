@@ -116,7 +116,7 @@ internal sealed partial class PlanRunner
                 return ApplyCorrection(latest, step, attempt, tier, model, rung, round, verdict, frozen, items, ruler);
             default:
                 RecordRuling(plan, step, attempt, tier, model, rung, round, nameof(TestRulingKind.NoVerdict),
-                    $"The ruler ({ruler}) gave no TEST-WRONG or CODE-WRONG verdict: {answer.NoVerdictLog} Nothing changes.", ruler);
+                    $"The ruler ({ruler}) gave no usable verdict: {answer.NoVerdictLog} Nothing changes.", ruler);
                 return NoRuling;
         }
     }
@@ -130,11 +130,22 @@ internal sealed partial class PlanRunner
     /// <summary>The same, for the reply to the second ask, so both replies fit one event.</summary>
     internal const int RulerFollowUpLogCharacters = 1800;
 
-    /// <summary>The second ask is a short answer: it gets half the time of the first.</summary>
-    private static readonly TimeSpan RulingFollowUpTimeLimit = TimeSpan.FromMinutes(4);
+    /// <summary>
+    /// The verdict-only ask: its reply is a verdict line and one sentence or one paragraph, so two minutes is ample.
+    /// </summary>
+    private static readonly TimeSpan RulingFollowUpTimeLimit = TimeSpan.FromMinutes(2);
 
-    // The verdict-only ask gets a shorter cap than the first answer: its reply is the verdict, not the analysis.
-    private const int RulingFollowUpAnswerTokens = 3000;
+    // The most the verdict-only ask may run to: a verdict line and one sentence or paragraph, not the analysis.
+    private const int RulingVerdictAnswerTokens = 400;
+
+    /// <summary>
+    /// The corrected-files ask, made after a test-wrong verdict that came without files. A complete test file is much longer than a
+    /// verdict: on a slow machine (about 13 tokens a second) 3000 tokens take about 230 seconds, plus the prompt.
+    /// </summary>
+    private static readonly TimeSpan RulingFileTimeLimit = TimeSpan.FromMinutes(6);
+
+    // The most the corrected-files ask may run to: one complete test file.
+    private const int RulingFileAnswerTokens = 3000;
 
     internal static string RulerReplyForLog(string? text, int limit = RulerReplyLogCharacters)
     {
@@ -158,8 +169,10 @@ internal sealed partial class PlanRunner
         _store.AddEvent(plan.Id, step.Id, attempt, RulerTimingEvent, tier, node: ruler, detail: text, modelNode: model.ModelNode,
             workspaceNode: model.Machine, rung: rung, round: round);
 
-    // A reply with no verdict is answered once, in the same conversation, with a request for the verdict alone. Measured: three of
-    // three rulings in a live run opened with analysis and gave no verdict, and each took about seven minutes.
+    // A reply with no verdict is answered once, in the same conversation, with a request for the verdict alone, which is short. Only a
+    // test-wrong verdict gets a further ask, for the complete corrected files. Measured: three of three rulings in a live run opened with
+    // analysis and gave no verdict, and each took about seven minutes. The verdict ask used to ask for the files as well, so on a slow
+    // machine it ran to its cap, was cut off at four minutes, and its reply was thrown away.
     private async Task<RulerAnswer> ReadVerdictAsync(IStepSession session, StepAgentReply first, TimeSpan firstTook, string reviewerTier,
         string ruler, CancellationToken cancellationToken)
     {
@@ -176,18 +189,54 @@ internal sealed partial class PlanRunner
         {
             using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             limit.CancelAfter(RulingFollowUpTimeLimit);
-            session.CapAnswer(RulingFollowUpAnswerTokens);
+            session.CapAnswer(RulingVerdictAnswerTokens);
             StepAgentReply second = await session.SendAsync(TestRuling.VerdictRequest, reviewerTier, ruler, limit.Token);
-            verdict = TestRuling.Parse(second.Text);
-            return new RulerAnswer(verdict,
-                $"{log} Asked again for the verdict alone, it said: {RulerReplyForLog(second.Text, RulerFollowUpLogCharacters)}",
-                $"{timing}; asked again for the verdict alone, it answered after {Duration(clock.Elapsed)} with {(second.Text ?? string.Empty).Length} characters.");
+            verdict = TestRuling.ParseVerdictOnly(second.Text);
+            string askedLog = $"{log} Asked again for the verdict alone, it said: {RulerReplyForLog(second.Text, RulerFollowUpLogCharacters)}";
+            string askedTiming = $"{timing}; asked again for the verdict alone, it answered after {Duration(clock.Elapsed)} with {(second.Text ?? string.Empty).Length} characters";
+            return verdict.Kind == TestRulingKind.TestWrong
+                ? await ReadCorrectedFilesAsync(session, reviewerTier, ruler, askedLog, askedTiming, cancellationToken)
+                : new RulerAnswer(verdict, askedLog, askedTiming + ".");
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             _logger.LogWarning(exception, "The ruler ({Ruler}) did not answer the request for the verdict alone.", ruler);
             return new RulerAnswer(TestRulingVerdict.None, $"{log} Asked again for the verdict alone, it did not answer.",
                 $"{timing}; asked again for the verdict alone, it gave no answer after {Duration(clock.Elapsed)}.");
+        }
+    }
+
+    // The third ask, in the same conversation: the complete corrected files, with its own cap and time limit. Its failure never throws.
+    // A reply with no file, or no reply in time, leaves the ruling with no verdict, and the log says that the verdict was test-wrong and
+    // that no corrected file arrived. That phrase comes first, because the log is cut from its end.
+    private async Task<RulerAnswer> ReadCorrectedFilesAsync(IStepSession session, string reviewerTier, string ruler, string log, string timing,
+        CancellationToken cancellationToken)
+    {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            limit.CancelAfter(RulingFileTimeLimit);
+            session.CapAnswer(RulingFileAnswerTokens);
+            StepAgentReply reply = await session.SendAsync(TestRuling.FilesRequest, reviewerTier, ruler, limit.Token);
+            TestRulingVerdict files = TestRuling.ParseFiles(reply.Text);
+            string replyTiming = $"{timing}; asked for the corrected file(s), it answered after {Duration(clock.Elapsed)} with {(reply.Text ?? string.Empty).Length} characters";
+            if (files.Kind == TestRulingKind.TestWrong)
+            {
+                return new RulerAnswer(files, log, replyTiming + ".");
+            }
+
+            string said = string.IsNullOrWhiteSpace(reply.Text) ? "gave no text" : $"said: {RulerReplyForLog(reply.Text, RulerFollowUpLogCharacters)}";
+            return new RulerAnswer(TestRulingVerdict.None,
+                $"The verdict was TEST-WRONG, but no corrected file arrived: asked for the corrected file(s), it {said}. {log}",
+                replyTiming + ", and it held no file.");
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(exception, "The ruler ({Ruler}) did not send the corrected files after a test-wrong verdict.", ruler);
+            return new RulerAnswer(TestRulingVerdict.None,
+                $"The verdict was TEST-WRONG, but no corrected file arrived: asked for the corrected file(s), it did not answer. {log}",
+                $"{timing}; asked for the corrected file(s), it gave no answer after {Duration(clock.Elapsed)}.");
         }
     }
 

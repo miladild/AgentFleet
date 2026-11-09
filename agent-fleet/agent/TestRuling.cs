@@ -109,12 +109,26 @@ internal static partial class TestRuling
 
     /// <summary>
     /// What a ruler is asked when its answer had no verdict line: measured, a ruler that wrote its analysis first ignored "verdict
-    /// first" every time, but had usually reached its answer by the end of the analysis.
+    /// first" every time, but had usually reached its answer by the end of the analysis. The answer is the verdict alone. The
+    /// corrected files for a test-wrong verdict are asked for separately (FilesRequest), so this answer stays short.
     /// </summary>
     public static readonly string VerdictRequest =
         "Your answer has no VERDICT line, so it cannot be used. Answer again now, without repeating your analysis, and start with the VERDICT line, " +
-        $"in exactly one of these two forms: \"VERDICT: {TestWrongVerdict}\" followed by a FILE line and the COMPLETE corrected file in a fenced block " +
-        $"for each corrected test file, or \"VERDICT: {CodeWrongVerdict}\" followed by one paragraph saying what the code must do to satisfy the test, and why.";
+        $"in exactly one of these two forms: \"VERDICT: {TestWrongVerdict}\" followed by one short sentence of reason, or \"VERDICT: {CodeWrongVerdict}\" " +
+        "followed by one paragraph saying what the code must do to satisfy the test, and why. Do not write any file in this answer.";
+
+    /// <summary>
+    /// What a ruler is asked when its verdict is test-wrong and that answer carried no corrected file: the complete corrected files,
+    /// in the form the prompt asks for.
+    /// </summary>
+    public static readonly string FilesRequest =
+        $"Your verdict is {TestWrongVerdict}, but no corrected file came with it. Now give the COMPLETE corrected file for each test file that is wrong, " +
+        "without repeating your analysis. Use this form, one FILE line and one fenced block for each corrected file, and only for the test files above:\n" +
+        "FILE: <project-relative path>\n" +
+        "```\n" +
+        "the COMPLETE corrected file\n" +
+        "```\n" +
+        "Correct only what is wrong and keep every other test as it is.";
 
     /// <summary>Reads a ruler's reply. Anything that is not one clear verdict in the expected form is NoVerdict.</summary>
     public static TestRulingVerdict Parse(string? reply)
@@ -124,7 +138,80 @@ internal static partial class TestRuling
             return TestRulingVerdict.None;
         }
 
-        string[] lines = reply.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+        string[] lines = LinesOf(reply);
+        if (FindVerdict(lines) is not { } found)
+        {
+            return TestRulingVerdict.None;
+        }
+
+        if (found.Kind == CodeWrongVerdict)
+        {
+            return CodeWrongOf(lines, found);
+        }
+
+        List<TestFileText>? files = FilesFrom(lines, found.Line + 1);
+        return files is { Count: > 0 } ? new TestRulingVerdict(TestRulingKind.TestWrong, files, string.Empty) : TestRulingVerdict.None;
+    }
+
+    /// <summary>
+    /// Reads the reply to the request for the verdict alone: its verdict line, and for code-wrong the paragraph after it. A test-wrong
+    /// verdict comes back with no files whatever follows it. The corrected files are asked for in a further request (ParseFiles), and
+    /// a reply cut short by its cap must not be read as a broken file.
+    /// </summary>
+    public static TestRulingVerdict ParseVerdictOnly(string? reply)
+    {
+        if (string.IsNullOrWhiteSpace(reply))
+        {
+            return TestRulingVerdict.None;
+        }
+
+        string[] lines = LinesOf(reply);
+        if (FindVerdict(lines) is not { } found)
+        {
+            return TestRulingVerdict.None;
+        }
+
+        return found.Kind == CodeWrongVerdict
+            ? CodeWrongOf(lines, found)
+            : new TestRulingVerdict(TestRulingKind.TestWrong, [], string.Empty);
+    }
+
+    /// <summary>
+    /// Reads the reply to the request for the complete corrected files: the FILE lines and their fenced blocks, read as Parse reads
+    /// them. The reply may open with the test-wrong verdict line again. A reply with no file is NoVerdict.
+    /// </summary>
+    public static TestRulingVerdict ParseFiles(string? reply)
+    {
+        if (string.IsNullOrWhiteSpace(reply))
+        {
+            return TestRulingVerdict.None;
+        }
+
+        string[] lines = LinesOf(reply);
+        int position = 0;
+        while (position < lines.Length && string.IsNullOrWhiteSpace(lines[position]))
+        {
+            position++;
+        }
+
+        if (position < lines.Length && FindVerdict([lines[position]]) is { Kind: TestWrongVerdict })
+        {
+            position++;
+        }
+
+        List<TestFileText>? files = FilesFrom(lines, position);
+        return files is { Count: > 0 } ? new TestRulingVerdict(TestRulingKind.TestWrong, files, string.Empty) : TestRulingVerdict.None;
+    }
+
+    /// <summary>The verdict a reply gives: the line it is on, its kind, and the later lines that repeat the same code-wrong verdict.</summary>
+    private readonly record struct FoundVerdict(int Line, string Kind, HashSet<int> Repeats);
+
+    private static string[] LinesOf(string reply) => reply.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+
+    // The one verdict a reply gives, or null. Two different verdicts are not a clear answer. The same code-wrong verdict said again is:
+    // its paragraph is what follows the first one. A repeated test-wrong verdict carries two sets of files, so it stays unclear.
+    private static FoundVerdict? FindVerdict(string[] lines)
+    {
         var verdicts = new List<(int Line, string Kind)>();
         for (int index = 0; index < lines.Length; index++)
         {
@@ -134,26 +221,29 @@ internal static partial class TestRuling
             }
         }
 
-        // Two different verdicts are not a clear answer. The same code-wrong verdict said again is: its paragraph is what follows the
-        // first one. A repeated test-wrong verdict carries two sets of files, so it stays unclear.
         bool repeatedCodeWrong = verdicts.Count > 1 && verdicts.All(verdict => verdict.Kind == CodeWrongVerdict);
         if (verdicts.Count != 1 && !repeatedCodeWrong)
         {
-            return TestRulingVerdict.None;
+            return null;
         }
 
-        (int at, string kind) = verdicts[0];
-        if (kind == CodeWrongVerdict)
-        {
-            HashSet<int> repeats = verdicts.Skip(1).Select(verdict => verdict.Line).ToHashSet();
-            string paragraph = string.Join('\n', lines.Where((_, index) => index > at && !repeats.Contains(index))).Trim();
-            return paragraph.Length == 0 || RepeatsTemplate(paragraph)
-                ? TestRulingVerdict.None
-                : new TestRulingVerdict(TestRulingKind.CodeWrong, [], Cut(paragraph, MaxParagraphCharacters));
-        }
+        return new FoundVerdict(verdicts[0].Line, verdicts[0].Kind, verdicts.Skip(1).Select(verdict => verdict.Line).ToHashSet());
+    }
 
+    // The paragraph after a code-wrong verdict line, without the lines that repeat the verdict. NoVerdict when it is empty, or when it
+    // only repeats the format line of the prompt.
+    private static TestRulingVerdict CodeWrongOf(string[] lines, FoundVerdict found)
+    {
+        string paragraph = string.Join('\n', lines.Where((_, index) => index > found.Line && !found.Repeats.Contains(index))).Trim();
+        return paragraph.Length == 0 || RepeatsTemplate(paragraph)
+            ? TestRulingVerdict.None
+            : new TestRulingVerdict(TestRulingKind.CodeWrong, [], Cut(paragraph, MaxParagraphCharacters));
+    }
+
+    // The FILE line and fenced block pairs from the given line on. Null when the text is not in that form; an empty list when it has none.
+    private static List<TestFileText>? FilesFrom(string[] lines, int position)
+    {
         var files = new List<TestFileText>();
-        int position = at + 1;
         while (position < lines.Length)
         {
             if (string.IsNullOrWhiteSpace(lines[position]))
@@ -165,7 +255,7 @@ internal static partial class TestRuling
             Match file = FileLine().Match(lines[position]);
             if (!file.Success || position + 1 >= lines.Length || !lines[position + 1].TrimStart().StartsWith("```", StringComparison.Ordinal))
             {
-                return TestRulingVerdict.None;
+                return null;
             }
 
             var content = new List<string>();
@@ -178,7 +268,7 @@ internal static partial class TestRuling
 
             if (close >= lines.Length)
             {
-                return TestRulingVerdict.None;
+                return null;
             }
 
             string path = file.Groups["path"].Value.Trim();
@@ -196,14 +286,14 @@ internal static partial class TestRuling
 
             if (files.Any(earlier => string.Equals(earlier.Path, path, StringComparison.OrdinalIgnoreCase)))
             {
-                return TestRulingVerdict.None;
+                return null;
             }
 
             files.Add(new TestFileText(path, content.Count == 0 ? string.Empty : string.Join('\n', content) + "\n"));
             position = close + 1;
         }
 
-        return files.Count == 0 ? TestRulingVerdict.None : new TestRulingVerdict(TestRulingKind.TestWrong, files, string.Empty);
+        return files;
     }
 
     /// <summary>
