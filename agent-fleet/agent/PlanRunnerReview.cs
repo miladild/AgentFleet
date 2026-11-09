@@ -164,25 +164,44 @@ internal sealed partial class PlanRunner
     }
 
     // A model that did not write the code: the hub when the plan lets it be used and it did not do the work itself, else a
-    // machine other than the author's. Without one the step is accepted on its check, and the log says why.
+    // machine other than the author's. A machine whose last health check failed is passed over, since asking it would only
+    // wait out its connect timeout; when every candidate is passed over, the reason says so. Without a candidate the step is
+    // accepted on its check, and the log says why.
     private (string Tier, string? Machine, string? Unavailable) ChooseReviewer(PlanRecord plan, PlanStep step, ModelAttemptResult model)
     {
         FleetNodeDefinition[] nodes = _fleetOptions?.Nodes.Where(node => !node.Vision).ToArray() ?? [];
         string? hub = nodes.SingleOrDefault(node => node.Fallback)?.Name;
         string? author = model.ModelNode ?? model.Machine;
         bool Same(string? left, string? right) => string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+        // Only the last snapshot is read, without a probe: a machine nobody has checked yet is taken to be usable.
+        bool NotReady(string name) =>
+            _healthMonitor is not null && _healthMonitor.TryGetCachedNode(name, out NodeHealthSnapshot? snapshot) && !snapshot.Ready;
+        bool passedOver = false;
 
         if (hub is not null && HubRescueAllowed(plan, step) && !Same(author, hub))
         {
-            return (FleetTiers.Heavy, hub, null);
+            if (!NotReady(hub))
+            {
+                return (FleetTiers.Heavy, hub, null);
+            }
+
+            passedOver = true;
         }
 
-        FleetNodeDefinition? other = nodes
-            .Where(node => !Same(node.Name, author) && !Same(node.Name, hub))
+        FleetNodeDefinition[] others = nodes.Where(node => !Same(node.Name, author) && !Same(node.Name, hub)).ToArray();
+        FleetNodeDefinition? other = others
+            .Where(node => !NotReady(node.Name))
             .OrderBy(node => string.Equals(node.Tier, FleetTiers.Standard, StringComparison.OrdinalIgnoreCase) ? 0 : 1)
             .FirstOrDefault();
-        return other is not null
-            ? (other.Tier ?? FleetTiers.Standard, other.Name, null)
-            : (FleetTiers.Standard, null, "no machine other than the one that wrote the code may be used");
+        if (other is not null)
+        {
+            return (other.Tier ?? FleetTiers.Standard, other.Name, null);
+        }
+
+        // Nothing is left among the others, so each of them was passed over for not being ready.
+        passedOver |= others.Length > 0;
+        return (FleetTiers.Standard, null, passedOver
+            ? "the other machines are not ready"
+            : "no machine other than the one that wrote the code may be used");
     }
 }

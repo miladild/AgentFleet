@@ -19,6 +19,9 @@ internal sealed record TestRulingOutcome(string? Note, bool TestCorrected);
 internal sealed partial class PlanRunner
 {
     private static readonly TimeSpan RulingTimeLimit = TimeSpan.FromMinutes(8);
+
+    // The most a ruler's first answer may run to. A ruler on a slow machine wrote more than 3000 tokens of analysis before its verdict.
+    private const int RulingAnswerTokens = 1500;
     private const string TestWrongClass = nameof(TestRulingKind.TestWrong);
     private const string CodeWrongClass = nameof(TestRulingKind.CodeWrong);
     private const string NoVerdictClass = nameof(TestRulingKind.NoVerdict);
@@ -84,6 +87,7 @@ internal sealed partial class PlanRunner
             using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             limit.CancelAfter(RulingTimeLimit);
             using IDisposable? folder = HubProjectFolderScope.For(latest);
+            session.CapAnswer(RulingAnswerTokens);
             StepAgentReply reply = await session.SendAsync(prompt, reviewerTier, ruler, limit.Token);
             answer = await ReadVerdictAsync(session, reply, clock.Elapsed, reviewerTier, ruler, cancellationToken);
             RecordRulerTiming(plan, step, attempt, tier, model, rung, round, ruler, answer.Timing);
@@ -129,6 +133,9 @@ internal sealed partial class PlanRunner
     /// <summary>The second ask is a short answer: it gets half the time of the first.</summary>
     private static readonly TimeSpan RulingFollowUpTimeLimit = TimeSpan.FromMinutes(4);
 
+    // The verdict-only ask gets a shorter cap than the first answer: its reply is the verdict, not the analysis.
+    private const int RulingFollowUpAnswerTokens = 3000;
+
     internal static string RulerReplyForLog(string? text, int limit = RulerReplyLogCharacters)
     {
         string trimmed = (text ?? string.Empty).Trim();
@@ -169,6 +176,7 @@ internal sealed partial class PlanRunner
         {
             using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             limit.CancelAfter(RulingFollowUpTimeLimit);
+            session.CapAnswer(RulingFollowUpAnswerTokens);
             StepAgentReply second = await session.SendAsync(TestRuling.VerdictRequest, reviewerTier, ruler, limit.Token);
             verdict = TestRuling.Parse(second.Text);
             return new RulerAnswer(verdict,

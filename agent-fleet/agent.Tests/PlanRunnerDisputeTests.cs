@@ -135,6 +135,29 @@ public sealed partial class PlanRunnerTests
     }
 
     [Fact]
+    public async Task A_dispute_is_ruled_on_with_a_cap_on_the_first_answer_and_a_shorter_cap_on_the_verdict_only_ask()
+    {
+        string project = NewGitProject();
+        try
+        {
+            var setup = DisputePlan(project, TestsStep(), ImplementationStep("dotnet test"));
+            var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []));
+            var budget = new RulingBudget(2, call => call.Number == 1
+                ? new StepAgentReply("Let me analyze this carefully. The test expects zero to be refused.", 0, false)
+                : new StepAgentReply(CodeWrongRuling, 0, false));
+            var fake = DisputingImplementer(project, message => message == 0, budget);
+            await FrozenRunner(new RulingAgent(fake), workspaces, setup.Options, setup.Health, CheckReadsTheTestFile(project, "CORRECTED"))
+                .RunPlanAsync(setup.Plan.Id, default).WaitAsync(DisputeTimeLimit);
+
+            FakeAuditCall[] asks = fake.Audits.Where(call => call.Role == PlanRunnerToolPolicy.TestRulingRole).ToArray();
+            Assert.Equal(2, asks.Length);
+            Assert.Equal(1500, asks[0].MaxOutputTokens);
+            Assert.Equal(3000, asks[1].MaxOutputTokens);
+        }
+        finally { FailFirstTests.DeleteTree(project); }
+    }
+
+    [Fact]
     public async Task A_ruling_that_the_code_is_wrong_is_fed_back_once_and_a_second_dispute_gets_no_second_ruling()
     {
         string project = NewGitProject();
@@ -201,6 +224,53 @@ public sealed partial class PlanRunnerTests
             Assert.Equal("Unavailable", Assert.Single(after.Events!, e => e.Kind == RunEventKind.TestRuling).FailureClass);
             Assert.Contains(after.Events!, e => e.Kind == RunEventKind.StepParked && e.FailureSignature == "test-suspect");
             Assert.Equal(1, budget.Calls);
+        }
+        finally { FailFirstTests.DeleteTree(project); }
+    }
+
+    [Fact]
+    public async Task A_ruler_whose_last_health_check_failed_is_not_asked_and_the_ruling_is_unavailable_at_once()
+    {
+        string project = NewGitProject();
+        try
+        {
+            var setup = DisputePlan(project, TestsStep(), ImplementationStep("dotnet test"));
+            setup.Health.MarkUnavailable("worker-b", "unreachable");
+            var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []));
+            var budget = new RulingBudget(1, _ => new StepAgentReply(TestWrongRuling, 0, false));
+            var fake = DisputingImplementer(project, message => message == 0, budget);
+            await FrozenRunner(new RulingAgent(fake), workspaces, setup.Options, setup.Health, CheckReadsTheTestFile(project, "CORRECTED"))
+                .RunPlanAsync(setup.Plan.Id, default).WaitAsync(DisputeTimeLimit);
+
+            PlanRecord after = Store.Get(setup.Plan.Id)!;
+            Assert.Equal(0, budget.Calls);
+            Assert.Empty(fake.Audits.Where(call => call.Role == PlanRunnerToolPolicy.TestRulingRole));
+            Assert.Equal(WrongTest, File.ReadAllText(Path.Combine(project, "tests", "LimitTests.cs")));
+            PlanRunEvent ruling = Assert.Single(after.Events!, e => e.Kind == RunEventKind.TestRuling);
+            Assert.Equal("Unavailable", ruling.FailureClass);
+            Assert.Contains("the other machines are not ready", ruling.Detail);
+            Assert.Contains(after.Events!, e => e.Kind == RunEventKind.StepParked && e.FailureSignature == "test-suspect");
+        }
+        finally { FailFirstTests.DeleteTree(project); }
+    }
+
+    [Fact]
+    public async Task A_ruler_with_no_health_snapshot_yet_is_asked_as_before()
+    {
+        string project = NewGitProject();
+        try
+        {
+            var setup = DisputePlan(project, TestsStep(), ImplementationStep("dotnet test"));
+            var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []));
+            var budget = new RulingBudget(1, _ => new StepAgentReply(TestWrongRuling, 0, false));
+            var fake = DisputingImplementer(project, message => message == 0, budget);
+            await FrozenRunner(new RulingAgent(fake), workspaces, setup.Options, setup.Health, CheckReadsTheTestFile(project, "CORRECTED"))
+                .RunPlanAsync(setup.Plan.Id, default).WaitAsync(DisputeTimeLimit);
+
+            PlanRecord after = Store.Get(setup.Plan.Id)!;
+            Assert.Equal(1, budget.Calls);
+            Assert.Equal("worker-b", Assert.Single(fake.Audits, call => call.Role == PlanRunnerToolPolicy.TestRulingRole).Machine);
+            Assert.Equal("TestWrong", Assert.Single(after.Events!, e => e.Kind == RunEventKind.TestRuling).FailureClass);
         }
         finally { FailFirstTests.DeleteTree(project); }
     }

@@ -1593,4 +1593,37 @@ public sealed class FleetStepSessionTests
         Assert.Contains("the whole task", client.Requests[1].Select(TextOf));
         Assert.Equal("done", reply.Text);
     }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(PlanRunnerToolPolicy.StepReviewRole)]
+    [InlineData(PlanRunnerToolPolicy.CheckAuditRole)]
+    public async Task A_message_that_set_no_answer_cap_is_sent_without_one(string? role)
+    {
+        var client = new ScriptedChatClient(_ => null);
+        IStepSession session = Agent(client).OpenSession(role);
+
+        await session.SendAsync("the whole task", "standard", "hub", default);
+
+        Assert.NotEmpty(client.Options);
+        Assert.All(client.Options, options => Assert.Null(options!.MaxOutputTokens));
+    }
+
+    [Fact]
+    public async Task An_answer_cap_reaches_the_model_on_the_message_it_was_set_for_and_no_later_one()
+    {
+        var client = new ScriptedChatClient(_ => null);
+        IStepSession session = Agent(client).OpenSession(PlanRunnerToolPolicy.TestRulingRole);
+
+        session.CapAnswer(1200);
+        await session.SendAsync("the whole task", "standard", "hub", default);
+        session.CapAnswer(300);
+        await session.SendAsync("the verdict alone", "standard", "hub", default);
+        await session.SendAsync("one more message", "standard", "hub", default);
+
+        Assert.Equal(3, client.Options.Count);
+        Assert.Equal(1200, client.Options[0]!.MaxOutputTokens);
+        Assert.Equal(300, client.Options[1]!.MaxOutputTokens);
+        Assert.Null(client.Options[2]!.MaxOutputTokens);
+    }
 }

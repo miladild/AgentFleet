@@ -56,6 +56,12 @@ internal interface IStepSession
     /// <summary>Where the next message's tool calls are counted, so a timed-out attempt can still say what it did. Doubles ignore it.</summary>
     void TrackActivity(StepToolActivity activity) { }
 
+    /// <summary>
+    /// Caps the answer the next message may run to, in tokens; null leaves the answer to the node. The cap is for that one
+    /// message: it is cleared when the message is sent. Doubles ignore it.
+    /// </summary>
+    void CapAnswer(int? maxOutputTokens) { }
+
     Task<StepAgentReply> SendAsync(string message, string tier, string? machine, CancellationToken cancellationToken);
 }
 
@@ -206,12 +212,18 @@ internal sealed class FleetStepSession(AIAgent agent, string? role = null) : ISt
 
     public void TrackActivity(StepToolActivity activity) => _activity = activity;
 
+    private int? _answerCap;
+
+    public void CapAnswer(int? maxOutputTokens) => _answerCap = maxOutputTokens;
+
     public bool HasHistory { get; private set; }
 
     public async Task<StepAgentReply> SendAsync(string message, string tier, string? machine, CancellationToken cancellationToken)
     {
         PlanStepPromptData? data = _promptData;
         _promptData = null;
+        int? answerCap = _answerCap;
+        _answerCap = null;
         _session ??= await _agent.CreateSessionAsync(cancellationToken);
         var properties = new AdditionalPropertiesDictionary { [FleetRoutingChatClient.RunnerTierKey] = tier };
         if (_activity is not null)
@@ -240,7 +252,8 @@ internal sealed class FleetStepSession(AIAgent agent, string? role = null) : ISt
 
         var options = new ChatClientAgentRunOptions(new ChatOptions
         {
-            AdditionalProperties = properties
+            AdditionalProperties = properties,
+            MaxOutputTokens = answerCap
         });
         AgentResponse response;
         try

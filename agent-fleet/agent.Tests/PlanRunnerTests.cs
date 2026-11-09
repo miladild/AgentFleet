@@ -95,18 +95,26 @@ internal sealed class FakeStepAgent(
     }
 }
 
-/// <summary>One message to a check auditor: the role of its conversation, the model it was sent to and its text.</summary>
-internal sealed record FakeAuditCall(string Role, int Number, string Tier, string Message, string? Machine);
+/// <summary>
+/// One message to a check auditor: the role of its conversation, the model it was sent to, its text, and the answer cap it was
+/// sent with (null when none was set).
+/// </summary>
+internal sealed record FakeAuditCall(string Role, int Number, string Tier, string Message, string? Machine, int? MaxOutputTokens = null);
 
 internal sealed class FakeAuditSession(FakeStepAgent owner, string role) : IStepSession
 {
     private int _messages;
+    private int? _answerCap;
 
     public bool HasHistory { get; private set; }
 
+    public void CapAnswer(int? maxOutputTokens) => _answerCap = maxOutputTokens;
+
     public Task<StepAgentReply> SendAsync(string message, string tier, string? machine, CancellationToken cancellationToken)
     {
-        StepAgentReply reply = owner.Audit(new FakeAuditCall(role, ++_messages, tier, message, machine));
+        int? cap = _answerCap;
+        _answerCap = null;
+        StepAgentReply reply = owner.Audit(new FakeAuditCall(role, ++_messages, tier, message, machine, cap));
         HasHistory = true;
         return Task.FromResult(reply);
     }

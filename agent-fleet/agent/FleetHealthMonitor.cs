@@ -128,6 +128,22 @@ internal sealed class FleetHealthMonitor
         return await Task.WhenAll(probes);
     }
 
+    /// <summary>
+    /// The last snapshot taken of a machine, whatever its age, without probing it. False when none has been taken yet.
+    /// The background health check probes every machine once per cache period, so the snapshot is seldom older than that.
+    /// </summary>
+    public bool TryGetCachedNode(string nodeName, [NotNullWhen(true)] out NodeHealthSnapshot? snapshot)
+    {
+        if (_snapshots.TryGetValue(nodeName, out NodeHealthSnapshot? cached))
+        {
+            snapshot = cached;
+            return true;
+        }
+
+        snapshot = null;
+        return false;
+    }
+
     /// <summary>Drops every cached result, so a machine whose address or model changed is probed afresh.</summary>
     public void Forget()
     {

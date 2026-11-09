@@ -92,6 +92,7 @@ internal sealed partial class PlanRunner
             using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             limit.CancelAfter(RulingTimeLimit);
             using IDisposable? folder = HubProjectFolderScope.For(latest);
+            session.CapAnswer(RulingAnswerTokens);
             StepAgentReply reply = await session.SendAsync(prompt, reviewerTier, ruler, limit.Token);
             answer = await ReadVerdictAsync(session, reply, clock.Elapsed, reviewerTier, ruler, cancellationToken);
             RecordRulerTiming(plan, step, attempt, tier, model, rung, round, ruler, answer.Timing);

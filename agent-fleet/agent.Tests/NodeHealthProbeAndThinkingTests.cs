@@ -263,6 +263,14 @@ public sealed class NodeHealthProbeAndThinkingTests : IDisposable
     }
 
     [Fact]
+    public async Task An_answer_cap_the_caller_sets_is_the_output_limit_the_model_is_sent()
+    {
+        JsonElement body = Json(await ChatBodyAsync(thinkingOff: true, new ChatOptions { MaxOutputTokens = 1200 }));
+
+        Assert.Equal(1200, body.GetProperty("options").GetProperty("num_predict").GetInt32());
+    }
+
+    [Fact]
     public async Task A_model_keeps_its_own_behaviour_when_the_node_says_model()
     {
         JsonElement body = Json(await ChatBodyAsync(thinkingOff: false));

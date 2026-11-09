@@ -86,6 +86,30 @@ public sealed class PlanSecondOpinionTests : PlanTestBase
         }
     }
 
+    // Every machine answers its probe except the hosts named, whose probes fail the way an unreachable machine's do.
+    private sealed class SomeNodesDownFactory(params string[] downHosts) : IHttpClientFactory
+    {
+        public HttpClient CreateClient(string name) => new(new SomeNodesDownHandler(downHosts)) { Timeout = Timeout.InfiniteTimeSpan };
+    }
+
+    private sealed class SomeNodesDownHandler(string[] downHosts) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (downHosts.Contains(request.RequestUri!.Host, StringComparer.OrdinalIgnoreCase))
+            {
+                return Task.FromException<HttpResponseMessage>(new HttpRequestException("connection refused"));
+            }
+
+            string body = request.Method == HttpMethod.Post
+                ? "{\"choices\":[{\"message\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}"
+                : "{\"models\":[{\"name\":\"m:latest\"}]}";
+            var content = new StringContent(body, Encoding.UTF8);
+            content.Headers.ContentType = new("application/json");
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
+        }
+    }
+
     private (FleetOptions Options, FleetHealthMonitor Health) HubFleet()
     {
         FleetNodeConfig hub = new("hub", "http://hub.example.test/v1", "m", "hub", "heavy", Fallback: true);
@@ -397,6 +421,122 @@ public sealed class PlanSecondOpinionTests : PlanTestBase
         Assert.NotNull(audit);
         Assert.Equal("worker-b", audit.Machine);
         Assert.NotEqual("hub", audit.Machine);
+    }
+
+    [Fact]
+    public async Task A_second_opinion_is_not_asked_of_a_worker_that_is_not_ready_and_goes_to_the_next_ready_one()
+    {
+        FleetOptions options = OptionsWithNodes(
+            new FleetNodeConfig("hub", "http://hub.example.test/v1", "m", "hub", "heavy", Fallback: true),
+            new FleetNodeConfig("worker-a", "http://worker-a.example.test/v1", "m", "worker", "standard"),
+            new FleetNodeConfig("worker-b", "http://worker-b.example.test/v1", "m", "worker", "standard"),
+            new FleetNodeConfig("worker-c", "http://worker-c.example.test/v1", "m", "worker", "standard"));
+        var health = new FleetHealthMonitor(options, new SomeNodesDownFactory("worker-b.example.test"));
+        await health.GetAllAsync();
+
+        PlanRecord plan = CreateOneStepPlan("test.txt", PlanRecoveryScope.WorkerOnly);
+        Store.Approve(plan.Id, recoveryScope: PlanRecoveryScope.WorkerOnly, autoRetries: 0, review: PlanSecondOpinion.Auto);
+
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            File.WriteAllText(Path.Combine(ProjectDirectory, "test.txt"), "version 1");
+            return Task.FromResult("Done.");
+        })
+        {
+            Auditor = _ => new StepAgentReply("PASS\nLooks good.", 0, false)
+        };
+
+        await RepairRunner(agent, _ => Pass("check"), options, health).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+        FakeAuditCall review = Assert.Single(agent.Audits, a => a.Role == PlanRunnerToolPolicy.StepReviewRole);
+        Assert.Equal("worker-c", review.Machine);
+    }
+
+    [Fact]
+    public async Task A_second_opinion_is_skipped_at_once_and_the_log_says_the_other_machines_are_not_ready()
+    {
+        FleetOptions options = OptionsWithNodes(
+            new FleetNodeConfig("hub", "http://hub.example.test/v1", "m", "hub", "heavy", Fallback: true),
+            new FleetNodeConfig("worker-a", "http://worker-a.example.test/v1", "m", "worker", "standard"),
+            new FleetNodeConfig("worker-b", "http://worker-b.example.test/v1", "m", "worker", "standard"));
+        var health = new FleetHealthMonitor(options, new SomeNodesDownFactory("worker-b.example.test"));
+        await health.GetAllAsync();
+
+        PlanRecord plan = CreateOneStepPlan("test.txt", PlanRecoveryScope.WorkerOnly);
+        Store.Approve(plan.Id, recoveryScope: PlanRecoveryScope.WorkerOnly, autoRetries: 0, review: PlanSecondOpinion.Auto);
+
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            File.WriteAllText(Path.Combine(ProjectDirectory, "test.txt"), "version 1");
+            return Task.FromResult("Done.");
+        });
+
+        await RepairRunner(agent, _ => Pass("check"), options, health).RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.Empty(agent.Audits.Where(a => a.Role == PlanRunnerToolPolicy.StepReviewRole));
+        PlanRunEvent review = Assert.Single(after.Events!, e => e.Kind == RunEventKind.StepReview && e.FailureClass == "Skipped");
+        Assert.Contains("the other machines are not ready", review.Detail);
+    }
+
+    [Fact]
+    public async Task Aggressive_mode_does_not_ask_a_hub_that_is_not_ready_and_uses_the_next_ready_worker()
+    {
+        FleetOptions options = OptionsWithNodes(
+            new FleetNodeConfig("hub", "http://hub.example.test/v1", "m", "hub", "heavy", Fallback: true),
+            new FleetNodeConfig("worker-a", "http://worker-a.example.test/v1", "m", "worker", "standard"),
+            new FleetNodeConfig("worker-b", "http://worker-b.example.test/v1", "m", "worker", "standard"));
+        var health = new FleetHealthMonitor(options, new SomeNodesDownFactory("hub.example.test"));
+        await health.GetAllAsync();
+        FleetModeService mode = ModeService(FleetMode.Aggressive);
+
+        PlanRecord plan = CreateOneStepPlan("test.txt", PlanRecoveryScope.AllowHubRescue);
+        Store.Approve(plan.Id, recoveryScope: PlanRecoveryScope.AllowHubRescue, autoRetries: 0, review: PlanSecondOpinion.Auto);
+
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            File.WriteAllText(Path.Combine(ProjectDirectory, "test.txt"), "version 1");
+            return Task.FromResult("Done.");
+        })
+        {
+            Auditor = _ => new StepAgentReply("PASS\nLooks good.", 0, false)
+        };
+
+        await RepairRunner(agent, _ => Pass("check"), options, health, modeService: mode).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+        FakeAuditCall review = Assert.Single(agent.Audits, a => a.Role == PlanRunnerToolPolicy.StepReviewRole);
+        Assert.Equal("worker-b", review.Machine);
+        Assert.Equal("standard", review.Tier);
+    }
+
+    [Fact]
+    public async Task Without_a_health_monitor_the_second_opinion_keeps_the_existing_choice()
+    {
+        FleetOptions options = OptionsWithNodes(
+            new FleetNodeConfig("hub", "http://hub.example.test/v1", "m", "hub", "heavy", Fallback: true),
+            new FleetNodeConfig("worker-a", "http://worker-a.example.test/v1", "m", "worker", "standard"),
+            new FleetNodeConfig("worker-b", "http://worker-b.example.test/v1", "m", "worker", "standard"));
+
+        PlanRecord plan = CreateOneStepPlan("test.txt", PlanRecoveryScope.WorkerOnly);
+        Store.Approve(plan.Id, recoveryScope: PlanRecoveryScope.WorkerOnly, autoRetries: 0, review: PlanSecondOpinion.Auto);
+
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            File.WriteAllText(Path.Combine(ProjectDirectory, "test.txt"), "version 1");
+            return Task.FromResult("Done.");
+        })
+        {
+            Auditor = _ => new StepAgentReply("PASS\nLooks good.", 0, false)
+        };
+
+        await RepairRunner(agent, _ => Pass("check"), options, health: null).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+        FakeAuditCall review = Assert.Single(agent.Audits, a => a.Role == PlanRunnerToolPolicy.StepReviewRole);
+        Assert.Equal("worker-b", review.Machine);
     }
 
     [Fact]

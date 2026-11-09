@@ -289,6 +289,31 @@ public sealed partial class PlanRunnerTests
     }
 
     [Fact]
+    public async Task A_ruler_is_asked_with_a_cap_on_its_first_answer_and_a_shorter_cap_on_the_verdict_only_ask()
+    {
+        // Measured: a ruler on a slow machine wrote more than 3000 tokens of analysis before its verdict, which took minutes.
+        string project = NewGitProject();
+        try
+        {
+            var setup = DisputePlan(project, StepWithItsOwnTest());
+            var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []));
+            var budget = new RulingBudget(2, call => call.Number == 1
+                ? new StepAgentReply("Let me analyze this carefully. The test is right and the code refuses nothing.", 0, false)
+                : new StepAgentReply(CodeWrongRuling, 0, false));
+            var fake = WritesItsOwnTest(project, budget);
+            int checks = 0;
+            await OwnTestRunner(new RulingAgent(fake), workspaces, setup.Options, setup.Health,
+                    command => command != "dotnet test" ? BuildPassOutput : ++checks < 4 ? TestsFailOutput : TestsPassOutput, roundsPerRung: 3)
+                .RunPlanAsync(setup.Plan.Id, default).WaitAsync(DisputeTimeLimit);
+
+            Assert.Equal(2, fake.Audits.Count);
+            Assert.Equal(1500, fake.Audits[0].MaxOutputTokens);
+            Assert.Equal(3000, fake.Audits[1].MaxOutputTokens);
+        }
+        finally { FailFirstTests.DeleteTree(project); }
+    }
+
+    [Fact]
     public async Task A_ruler_that_gives_no_verdict_twice_is_logged_with_both_replies_and_asked_no_third_time()
     {
         string project = NewGitProject();
