@@ -262,6 +262,9 @@ public sealed partial class PlanRunnerTests : PlanTestBase
         public Exception? SyncFailure { get; set; }
         public int SyncFailures { get; set; }
 
+        /// <summary>How many syncs of each session succeed before its failures start (none by default).</summary>
+        public int SyncsBeforeFailures { get; set; }
+
         /// <summary>The manager's methods in the order they were called, by name.</summary>
         public List<string> Methods { get; } = [];
 
@@ -289,6 +292,7 @@ public sealed partial class PlanRunnerTests : PlanTestBase
                 Answers = WorkerAnswers,
                 SyncFailure = SyncFailure,
                 SyncFailuresRemaining = SyncFailures,
+                SyncsBeforeFailures = SyncsBeforeFailures,
                 RestoreFrozen = FrozenRestore
             };
             Sessions.Add(session);
@@ -322,6 +326,7 @@ public sealed partial class PlanRunnerTests : PlanTestBase
         public bool Answers { get; set; } = true;
         public Exception? SyncFailure { get; set; }
         public int SyncFailuresRemaining { get; set; }
+        public int SyncsBeforeFailures { get; set; }
         public int SyncCalls { get; private set; }
         public int ReconnectCalls { get; private set; }
         public Exception? ReconnectFailure { get; set; }
@@ -334,6 +339,7 @@ public sealed partial class PlanRunnerTests : PlanTestBase
         public Task SyncToHubAsync(CancellationToken cancellationToken)
         {
             SyncCalls++;
+            if (SyncCalls <= SyncsBeforeFailures) return Task.CompletedTask;
             if (SyncFailuresRemaining > 0)
             {
                 SyncFailuresRemaining--;

@@ -1419,10 +1419,7 @@ internal sealed partial class PlanRunner
 
                     if (model.Workspace is not null)
                     {
-                        await SyncToHubWithReconnectAsync(plan, step, attempt, model.Workspace, cancellationToken, cancellationToken);
-                        _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.WorkspaceSynced, tier, model.Machine,
-                            "Synced the worker project after verification; the checked changes are now in the hub checkout.",
-                            modelNode: model.ModelNode, workspaceNode: model.Machine);
+                        await SyncCheckedWorkspaceAsync(plan, step, attempt, tier, model, model.Workspace, cancellationToken);
 
                         if (!IsTestsStep(step) && result.Done && !(isFinalValidation && plan.Steps.Count > 1) && _failFirstMode != FailFirstMode.Off &&
                             _failFirstSnapshots.TryGetValue($"{plan.Id}:{step.Id}", out PlanTools.WorkSnapshot? stepStart))
@@ -1494,6 +1491,19 @@ internal sealed partial class PlanRunner
                     {
                         string? rerun = await RerunKilledTestRunAsync(plan, step, workspace, partialOutput, cancellationToken);
                         failure = TimedOutCheckFailure(workspace.CommandTimeout, partialOutput, plan.WorkingDirectory, rerun);
+                        // The killed run, and its rerun, may have written files into the worker project. The throw above skipped the
+                        // sync that follows a check in the try block, so the files are synced here, as after any other check.
+                        try
+                        {
+                            await SyncCheckedWorkspaceAsync(plan, step, attempt, tier, model, workspace, cancellationToken);
+                        }
+                        catch (Exception syncException) when (syncException is not OperationCanceledException)
+                        {
+                            _logger.LogError(syncException,
+                                "Plan {PlanId} step {StepId}: the worker project could not be synced to the hub after a killed check on {Machine}.",
+                                plan.Id, step.Id, model.Machine);
+                            failure = $"Worker workspace unavailable: verification or sync failed on {model.Machine}: {syncException.Message}";
+                        }
                     }
                     else
                     {
@@ -2977,6 +2987,16 @@ internal sealed partial class PlanRunner
         }
 
         return failure + "The check never finished. " + InfiniteLoopSentence + printed;
+    }
+
+    // The worker project's files go back to the hub after a check, whether it passed or failed (or was killed).
+    private async Task SyncCheckedWorkspaceAsync(PlanRecord plan, PlanStep step, int attempt, string tier, ModelAttemptResult model,
+        IWorkerWorkspaceSession workspace, CancellationToken cancellationToken)
+    {
+        await SyncToHubWithReconnectAsync(plan, step, attempt, workspace, cancellationToken, cancellationToken);
+        _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.WorkspaceSynced, tier, model.Machine,
+            "Synced the worker project after verification; the checked changes are now in the hub checkout.",
+            modelNode: model.ModelNode, workspaceNode: model.Machine);
     }
 
     internal Task SyncToHubWithReconnectAsync(IWorkerWorkspaceSession worker, CancellationToken cancellationToken) =>

@@ -52,6 +52,56 @@ public sealed partial class PlanRunnerTests
         Assert.DoesNotContain(InfiniteLoopSentence, retry, StringComparison.Ordinal);
     }
 
+    // A killed check may have written files into the worker project (test output, temporary files). They reach the hub after the kill,
+    // as after any other check, so the next staging does not meet worker files the hub has never seen.
+    [Fact]
+    public async Task A_killed_check_still_syncs_the_worker_project_back_to_the_hub()
+    {
+        (_, PlanRecord after) = await RunWithKilledCheck("✖ create a new alert\n");
+
+        Assert.Equal(PlanStatus.Done, after.Status);
+        // One sync after each check: the killed one and the one that passed.
+        Assert.Equal(2, after.Events!.Count(runEvent => runEvent.Kind == RunEventKind.WorkspaceSynced &&
+            runEvent.Detail.StartsWith("Synced the worker project after verification", StringComparison.Ordinal)));
+    }
+
+    // When the files of a killed check cannot be synced back, the round fails the way a failed sync after any other check does:
+    // a worker problem that parks the step, not a failed check that the next round would then meet as unsynced files.
+    [Fact]
+    public async Task A_killed_check_whose_files_cannot_be_synced_back_is_an_environment_park()
+    {
+        PlanRecord plan = InterruptedWorkerPlan(out _);
+        var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []))
+        {
+            WorkerAnswers = true,
+            SyncsBeforeFailures = 1,
+            SyncFailures = 1,
+            SyncFailure = new IOException("Worker sync on worker-a found hub-side edits made during this attempt.")
+        };
+        var agent = Agent("I will make the check finish.");
+        Exception timeout = new WorkerCommandTimeoutException("Operation has timed out.",
+            new Renci.SshNet.Common.SshOperationTimeoutException("Operation has timed out."), "✖ create a new alert\n");
+        int checks = 0;
+
+        string Verify(string command)
+        {
+            if (command == "dotnet build" && checks++ == 0) throw timeout;
+            return Pass(command);
+        }
+
+        await Runner(agent, Verify, workerWorkspaces: workspaces).RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Blocked, after.Status);
+        Assert.Equal(StepStatus.Parked, after.Steps[0].Status);
+        PlanRunEvent parked = Assert.Single(after.Events!, runEvent => runEvent.Kind == RunEventKind.StepParked);
+        Assert.Equal("environment", parked.FailureSignature);
+        Assert.Contains("Worker workspace unavailable: verification or sync failed on worker-a", parked.Detail, StringComparison.Ordinal);
+        Assert.Contains("found hub-side edits made during this attempt", parked.Detail, StringComparison.Ordinal);
+        // The step stops in the killed round: its check does not run again on the files that were not synced.
+        Assert.Equal(1, checks);
+    }
+
     [Theory]
     [InlineData("node --import tsx --test test/a.test.ts", "node --import tsx --test --test-force-exit --test-timeout=20000 test/a.test.ts")]
     [InlineData("node --test", "node --test --test-force-exit --test-timeout=20000")]
