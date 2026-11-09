@@ -1720,9 +1720,11 @@ internal sealed partial class PlanRunner
                 plan = _store.Get(plan.Id)!;
 
                 // The best state the project has been in so far is kept; a round that leaves it worse is undone before the
-                // next one, so a repair loop cannot end up further from passing than it has been.
+                // next one, so a repair loop cannot end up further from passing than it has been. A round whose own check passed
+                // is left out: an extra round it was given (the whole-project check, debugging output) puts a message in its
+                // completion, and that message is not a check output, so its failures are not a score the round can be judged by.
                 rollback = null;
-                if (change.After is { } after && RoundScore.Of(outcome.Signature, result.Output ?? result.Message) is { } score)
+                if (!checkPassed && change.After is { } after && RoundScore.Of(outcome.Signature, result.Output ?? result.Message) is { } score)
                 {
                     if (best is null || !score.IsWorseThan(best.Score))
                     {
