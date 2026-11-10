@@ -60,6 +60,14 @@ internal sealed partial class PlanRunner
     }
 
     /// <summary>
+    /// Whether a test run's output shows the Windows crash at node's exit (libuv's UV_HANDLE_CLOSING assertion, raised while a
+    /// connection is still closing). A forced-exit run that hits it says nothing about the tests, so the check is run as written.
+    /// </summary>
+    internal static bool ForcedExitCrashed(string? output) =>
+        output is not null && (output.Contains("UV_HANDLE_CLOSING", StringComparison.Ordinal) ||
+            output.Contains(@"src\win\async.c", StringComparison.Ordinal) || output.Contains("src/win/async.c", StringComparison.Ordinal));
+
+    /// <summary>
     /// The command with the runner's force-exit flags added, or null when it is not a plain node test command or already carries
     /// them. A command that pipes or chains others is left alone: a rerun of part of it would not be the check.
     /// </summary>

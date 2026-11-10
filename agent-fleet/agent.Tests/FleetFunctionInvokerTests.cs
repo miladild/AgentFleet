@@ -977,6 +977,57 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
         Assert.Equal(("run_command", expected), Assert.Single(logged));
     }
 
+    // A worker's test run whose forced exit crashed on Windows (node exits while a connection still closes) runs once more as the
+    // worker wrote it, and that second result is the one the worker gets.
+    [Fact]
+    public async Task A_workers_test_run_whose_forced_exit_crashed_runs_once_more_as_the_worker_wrote_it()
+    {
+        var invoker = NewInvoker();
+        var ran = new List<string>();
+        string[] outputs =
+        [
+            "Exit code: 1\n--- stderr ---\nAssertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\\win\\async.c, line 94",
+            "Exit code: 0\n--- stdout ---\nok"
+        ];
+        var tool = AIFunctionFactory.Create((string command) => { ran.Add(command); return outputs[ran.Count - 1]; }, "run_command", "Runs a command.");
+        var model = CallOnce("run_command", new Dictionary<string, object?> { ["command"] = "node --test test/a.test.js" });
+
+        string[] results = await RunAsync(invoker, model, tool, runner: true).WaitAsync(SafetyLimit);
+
+        Assert.Equal(["node --test --test-force-exit --test-timeout=30000 test/a.test.js", "node --test test/a.test.js"], ran);
+        Assert.Equal([outputs[1]], results);
+    }
+
+    [Fact]
+    public async Task A_workers_test_run_that_fails_without_the_crash_is_not_run_again()
+    {
+        var invoker = NewInvoker();
+        var ran = new List<string>();
+        const string failure = "Exit code: 1\n--- stdout ---\nAssertionError [ERR_ASSERTION]: expected 1 to equal 2";
+        var tool = AIFunctionFactory.Create((string command) => { ran.Add(command); return failure; }, "run_command", "Runs a command.");
+        var model = CallOnce("run_command", new Dictionary<string, object?> { ["command"] = "node --test test/a.test.js" });
+
+        string[] results = await RunAsync(invoker, model, tool, runner: true).WaitAsync(SafetyLimit);
+
+        Assert.Equal(["node --test --test-force-exit --test-timeout=30000 test/a.test.js"], ran);
+        Assert.Equal([failure], results);
+    }
+
+    [Fact]
+    public async Task A_chat_test_run_that_crashes_is_not_run_again()
+    {
+        var invoker = NewInvoker();
+        var ran = new List<string>();
+        const string crashed = "Exit code: 1\n--- stderr ---\nAssertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\\win\\async.c, line 94";
+        var tool = AIFunctionFactory.Create((string command) => { ran.Add(command); return crashed; }, "run_command", "Runs a command.");
+        var model = CallOnce("run_command", new Dictionary<string, object?> { ["command"] = "node --test test/a.test.js" });
+
+        string[] results = await RunAsync(invoker, model, tool, runner: false).WaitAsync(SafetyLimit);
+
+        Assert.Equal(["node --test test/a.test.js"], ran);
+        Assert.Equal([crashed], results);
+    }
+
     // A worker's whole-file write to a test file must register its tests (see PlanRunnerToolPolicy.UnregisteredTestFileRefusal).
     private const string ScriptOnlyTest = "const assert = require('node:assert');\nassert.equal(1 + 1, 2);\n";
     private const string RegisteredTest = "test('adds two numbers', () => {\n  assert.equal(1 + 1, 2);\n});\n";

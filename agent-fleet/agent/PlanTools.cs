@@ -442,14 +442,15 @@ internal sealed partial class PlanTools
     /// Runs a step's own check. A plain node test command runs first with the runner forced to exit: when that run fails, its
     /// output is the check's result and the original command is not run, so a test that leaves a handle open does not cost the
     /// full timeout in every round. When the forced run passes, the original command runs as before, so a hang in it still
-    /// fails the check by timeout. Any other command runs once, as it is.
+    /// fails the check by timeout. When the forced run crashed at node's exit on Windows (see PlanRunner.ForcedExitCrashed), it says
+    /// nothing about the tests, so the original command runs and its result is the check's. Any other command runs once, as it is.
     /// </summary>
     internal async Task<string> RunStepCheckAsync(PlanRecord plan, string command, CancellationToken cancellationToken)
     {
         if (PlanRunner.ForcedExitCommand(command, PlanRunner.FirstRunForcedExitFlags) is { } forced)
         {
             string forcedResult = await _runCommand(forced, plan.WorkingDirectory, cancellationToken);
-            if (!forcedResult.StartsWith("Exit code: 0", StringComparison.Ordinal))
+            if (!forcedResult.StartsWith("Exit code: 0", StringComparison.Ordinal) && !PlanRunner.ForcedExitCrashed(forcedResult))
             {
                 return forcedResult;
             }

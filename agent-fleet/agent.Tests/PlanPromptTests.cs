@@ -141,15 +141,20 @@ public sealed class PlanPromptTests : PlanTestBase
     }
 
     [Fact]
-    public void A_retry_after_the_windows_server_close_crash_says_how_to_close_the_servers_connections()
+    public void A_retry_after_the_windows_server_close_crash_says_to_read_every_response_before_the_server_closes()
     {
         PlanRecord plan = NewApproved();
 
         string prompt = PlanPromptComposition.BuildPrompt(plan, plan.Steps[0], 2,
             "Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\\win\\async.c, line 94");
 
-        Assert.Contains("server.closeAllConnections()", prompt);
-        Assert.Contains("Do not use process.exit", prompt);
+        Assert.Contains("crashed while Node was exiting: a connection was still closing on Windows", prompt);
+        Assert.Contains("await response.text()", prompt);
+        Assert.Contains("await new Promise(resolve => server.close(resolve))", prompt);
+        Assert.Contains("AbortSignal.timeout", prompt);
+        Assert.Contains("do not use process.exit", prompt);
+        Assert.DoesNotContain("keep-alive", prompt);
+        Assert.DoesNotContain("closeAllConnections", prompt);
     }
 
     [Fact]

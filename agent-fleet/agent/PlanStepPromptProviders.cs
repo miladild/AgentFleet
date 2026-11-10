@@ -110,14 +110,15 @@ internal abstract class PlanStepPromptProvider(bool consumesContext = false) : M
                 "boundary lies, and a date or time in a test is a real input to handle), then change that rule.";
         }
 
-        // Measured: two plans stopped on this Windows crash, the test's HTTP server being closed while fetch kept
-        // connections open. The models only edited the test around it, hid it, or rewrote the file as a plain script.
+        // Measured: two plans stopped on this Windows crash at node's exit. The models only edited the test around it, hid it,
+        // or rewrote the file as a plain script.
         if (failure.Contains("UV_HANDLE_CLOSING", StringComparison.Ordinal))
         {
-            yield return "The test run crashes when its HTTP server is closed while fetch still holds keep-alive connections. " +
-                "Fix the test's teardown: call server.closeAllConnections() before server.close(), and wait for close to finish " +
-                "(await new Promise(resolve => server.close(resolve))), in an after() hook or a finally block. Start the server " +
-                "on port 0. Do not use process.exit, and keep the tests written as test('name', ...) so the runner still counts them.";
+            yield return "The test run crashed while Node was exiting: a connection was still closing on Windows. " +
+                "Make every test read or cancel each response body before its server is closed (await response.text() or " +
+                "await response.json()). Close the server with await new Promise(resolve => server.close(resolve)) after the last " +
+                "request has finished, in an after() hook or a finally block. Create no timers and no AbortSignal.timeout, do not " +
+                "use process.exit, and keep the tests written as test('name', ...) so the runner still counts them.";
         }
 
         // Measured: a step's own test read a property of a value that was undefined, and the model blamed the other

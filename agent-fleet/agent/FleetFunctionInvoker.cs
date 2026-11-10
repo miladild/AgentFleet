@@ -175,8 +175,11 @@ internal sealed class FleetFunctionInvoker(
         // A test that opens a server and fails before closing it keeps node's test runner alive, so a worker running its tests again
         // and again in one round waited out the command limit each time. The policy and the file guard above saw the command as the
         // worker wrote it; what runs exits when the tests are done, fails a test that runs past the per-test limit, and prints the errors.
+        // The worker's command as it was written, kept for the rerun below when the forced run crashes at node's exit.
+        string? workerCommand = null;
         if (fromRunner && toolName == "run_command" && forcedExitCommand is not null)
         {
+            workerCommand = context.Arguments["command"]?.ToString();
             context.Arguments["command"] = forcedExitCommand;
         }
 
@@ -201,6 +204,13 @@ internal sealed class FleetFunctionInvoker(
         try
         {
             object? result = await ToolLoopGuard.InvokeAsync(context, fromRunner, cancellationToken);
+            // A forced run that crashed at node's exit on Windows says nothing about the tests, so the worker's command runs once more as written.
+            if (workerCommand is not null && PlanRunner.ForcedExitCrashed(result?.ToString()))
+            {
+                context.Arguments["command"] = workerCommand;
+                result = await ToolLoopGuard.InvokeAsync(context, fromRunner, cancellationToken);
+            }
+
             if (fromRunner)
             {
                 result = ToolLoopGuard.Apply(context, result, toolLoopLogger);
