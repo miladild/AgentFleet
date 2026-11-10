@@ -78,7 +78,10 @@ internal sealed partial class PlanRunner
 
         IReadOnlyList<string> items = TestDispute.FailingItems(checkOutput);
         IReadOnlyList<TestFileText> changed = ReadFilesToReview(latest, step, changedFiles).Select(file => new TestFileText(file.Path, file.Content)).ToArray();
-        string prompt = TestRuling.BuildPrompt(latest, step, TestDispute.Holding(frozen, items), checkOutput, dispute.Reason, changed);
+        IReadOnlyList<TestFileText> holding = TestDispute.Holding(frozen, items);
+        // The file under dispute, when there is exactly one: a lone fenced block in the reply is taken as its text.
+        string? onlyPath = holding.Count == 1 ? holding[0].Path : null;
+        string prompt = TestRuling.BuildPrompt(latest, step, holding, checkOutput, dispute.Reason, changed);
         IStepSession session = _agent.OpenSession(PlanRunnerToolPolicy.TestRulingRole);
         RulerAnswer answer;
         var clock = System.Diagnostics.Stopwatch.StartNew();
@@ -89,7 +92,7 @@ internal sealed partial class PlanRunner
             using IDisposable? folder = HubProjectFolderScope.For(latest);
             session.CapAnswer(RulingAnswerTokens);
             StepAgentReply reply = await session.SendAsync(prompt, reviewerTier, ruler, limit.Token);
-            answer = await ReadVerdictAsync(session, reply, clock.Elapsed, reviewerTier, ruler, cancellationToken);
+            answer = await ReadVerdictAsync(session, reply, clock.Elapsed, reviewerTier, ruler, cancellationToken, onlyPath);
             RecordRulerTiming(plan, step, attempt, tier, model, rung, round, ruler, answer.Timing);
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
@@ -174,7 +177,7 @@ internal sealed partial class PlanRunner
     // analysis and gave no verdict, and each took about seven minutes. The verdict ask used to ask for the files as well, so on a slow
     // machine it ran to its cap, was cut off at four minutes, and its reply was thrown away.
     private async Task<RulerAnswer> ReadVerdictAsync(IStepSession session, StepAgentReply first, TimeSpan firstTook, string reviewerTier,
-        string ruler, CancellationToken cancellationToken)
+        string ruler, CancellationToken cancellationToken, string? onlyPath = null)
     {
         TestRulingVerdict verdict = TestRuling.Parse(first.Text);
         string log = RulerReplyForLog(first.Text);
@@ -195,7 +198,7 @@ internal sealed partial class PlanRunner
             string askedLog = $"{log} Asked again for the verdict alone, it said: {RulerReplyForLog(second.Text, RulerFollowUpLogCharacters)}";
             string askedTiming = $"{timing}; asked again for the verdict alone, it answered after {Duration(clock.Elapsed)} with {(second.Text ?? string.Empty).Length} characters";
             return verdict.Kind == TestRulingKind.TestWrong
-                ? await ReadCorrectedFilesAsync(session, reviewerTier, ruler, askedLog, askedTiming, cancellationToken)
+                ? await ReadCorrectedFilesAsync(session, reviewerTier, ruler, askedLog, askedTiming, cancellationToken, onlyPath)
                 : new RulerAnswer(verdict, askedLog, askedTiming + ".");
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
@@ -208,9 +211,10 @@ internal sealed partial class PlanRunner
 
     // The third ask, in the same conversation: the complete corrected files, with its own cap and time limit. Its failure never throws.
     // A reply with no file, or no reply in time, leaves the ruling with no verdict, and the log says that the verdict was test-wrong and
-    // that no corrected file arrived. That phrase comes first, because the log is cut from its end.
+    // that no corrected file arrived. That phrase comes first, because the log is cut from its end. A reply with no file also says how
+    // many fenced blocks and FILE lines it held, so a log shows whether the ruler wrote the file in a form the reading does not take.
     private async Task<RulerAnswer> ReadCorrectedFilesAsync(IStepSession session, string reviewerTier, string ruler, string log, string timing,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, string? onlyPath = null)
     {
         var clock = System.Diagnostics.Stopwatch.StartNew();
         try
@@ -219,17 +223,19 @@ internal sealed partial class PlanRunner
             limit.CancelAfter(RulingFileTimeLimit);
             session.CapAnswer(RulingFileAnswerTokens);
             StepAgentReply reply = await session.SendAsync(TestRuling.FilesRequest, reviewerTier, ruler, limit.Token);
-            TestRulingVerdict files = TestRuling.ParseFiles(reply.Text);
+            TestRulingVerdict files = TestRuling.ParseFiles(reply.Text, onlyPath);
             string replyTiming = $"{timing}; asked for the corrected file(s), it answered after {Duration(clock.Elapsed)} with {(reply.Text ?? string.Empty).Length} characters";
             if (files.Kind == TestRulingKind.TestWrong)
             {
                 return new RulerAnswer(files, log, replyTiming + ".");
             }
 
+            (int fences, int fileLines) = TestRuling.CountShape(reply.Text);
+            string shape = $"the reply held {fences} fenced block(s) and {fileLines} FILE line(s)";
             string said = string.IsNullOrWhiteSpace(reply.Text) ? "gave no text" : $"said: {RulerReplyForLog(reply.Text, RulerFollowUpLogCharacters)}";
             return new RulerAnswer(TestRulingVerdict.None,
-                $"The verdict was TEST-WRONG, but no corrected file arrived: asked for the corrected file(s), it {said}. {log}",
-                replyTiming + ", and it held no file.");
+                $"The verdict was TEST-WRONG, but no corrected file arrived: asked for the corrected file(s), it {said}. Shape: {shape}. {log}",
+                replyTiming + $", and it held no file: {shape}.");
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {

@@ -178,9 +178,11 @@ internal static partial class TestRuling
 
     /// <summary>
     /// Reads the reply to the request for the complete corrected files: the FILE lines and their fenced blocks, read as Parse reads
-    /// them. The reply may open with the test-wrong verdict line again. A reply with no file is NoVerdict.
+    /// them. The reply may open with the test-wrong verdict line again. When the strict form gives no file, a lenient reading is
+    /// tried (see LenientFilesFrom), which takes onlyPath as the file of a lone fenced block. A reply with no file is NoVerdict.
     /// </summary>
-    public static TestRulingVerdict ParseFiles(string? reply)
+    /// <param name="onlyPath">The one test file under dispute, or null when there is not exactly one.</param>
+    public static TestRulingVerdict ParseFiles(string? reply, string? onlyPath = null)
     {
         if (string.IsNullOrWhiteSpace(reply))
         {
@@ -199,8 +201,34 @@ internal static partial class TestRuling
             position++;
         }
 
+        // A reply that rules the code wrong is not a corrected test, whatever code it holds.
+        if (FindVerdict(lines) is { Kind: CodeWrongVerdict })
+        {
+            return TestRulingVerdict.None;
+        }
+
         List<TestFileText>? files = FilesFrom(lines, position);
+        if (files is not { Count: > 0 })
+        {
+            files = LenientFilesFrom(lines, onlyPath);
+        }
+
         return files is { Count: > 0 } ? new TestRulingVerdict(TestRulingKind.TestWrong, files, string.Empty) : TestRulingVerdict.None;
+    }
+
+    /// <summary>
+    /// How many fenced blocks a reply held (a block that never closes counts as one) and how many of its lines are FILE lines, as the
+    /// lenient reading sees them. Written to the run log when a corrected-files reply gives no file.
+    /// </summary>
+    internal static (int Fences, int FileLines) CountShape(string? reply)
+    {
+        if (string.IsNullOrEmpty(reply))
+        {
+            return (0, 0);
+        }
+
+        string[] lines = LinesOf(reply);
+        return (BlocksOf(lines).Count, lines.Count(line => FileLine().IsMatch(PlainFileLine(line))));
     }
 
     /// <summary>The verdict a reply gives: the line it is on, its kind, and the later lines that repeat the same code-wrong verdict.</summary>
@@ -271,19 +299,8 @@ internal static partial class TestRuling
                 return null;
             }
 
-            string path = file.Groups["path"].Value.Trim();
-            // A path the ruler wrapped in backticks or quotes is still the path; the same file named twice is not clear.
-            if (path.Length >= 2 && path[0] is '`' or '"' or '\'' && path[^1] == path[0])
-            {
-                path = path[1..^1].Trim();
-            }
-
-            path = path.Replace('\\', '/');
-            if (path.StartsWith("./", StringComparison.Ordinal))
-            {
-                path = path[2..];
-            }
-
+            string path = CleanPath(file.Groups["path"].Value);
+            // The same file named twice is not clear.
             if (files.Any(earlier => string.Equals(earlier.Path, path, StringComparison.OrdinalIgnoreCase)))
             {
                 return null;
@@ -294,6 +311,149 @@ internal static partial class TestRuling
         }
 
         return files;
+    }
+
+    // The lenient reading, used when the strict form gives no file. A FILE line (a bullet, bold or backticks around the whole line are
+    // taken off) followed, after blank lines, by a fence that closes is a pair, whatever prose lies between the pairs. A fence that never
+    // closes is not used. The same path named twice makes the reply unclear, as in the strict form. When there is no pair at all and
+    // exactly one test file is under dispute, the reply's one closed fenced block is that file's text. Null when unclear.
+    private static List<TestFileText>? LenientFilesFrom(string[] lines, string? onlyPath)
+    {
+        var files = new List<TestFileText>();
+        for (int position = 0; position < lines.Length; position++)
+        {
+            Match file = FileLine().Match(PlainFileLine(lines[position]));
+            if (!file.Success)
+            {
+                continue;
+            }
+
+            int open = position + 1;
+            while (open < lines.Length && string.IsNullOrWhiteSpace(lines[open]))
+            {
+                open++;
+            }
+
+            if (open >= lines.Length || !OpensFence(lines[open]))
+            {
+                continue;
+            }
+
+            int close = ClosingFence(lines, open);
+            if (close < 0)
+            {
+                continue;
+            }
+
+            string path = CleanPath(file.Groups["path"].Value);
+            if (files.Any(earlier => string.Equals(earlier.Path, path, StringComparison.OrdinalIgnoreCase)))
+            {
+                return null;
+            }
+
+            files.Add(new TestFileText(path, ContentBetween(lines, open, close)));
+            position = close;
+        }
+
+        if (files.Count > 0 || string.IsNullOrWhiteSpace(onlyPath))
+        {
+            return files;
+        }
+
+        (int Open, int Close)[] closed = BlocksOf(lines).Where(block => block.Close >= 0).ToArray();
+        return closed is [var only] ? [new TestFileText(onlyPath, ContentBetween(lines, only.Open, only.Close))] : files;
+    }
+
+    // The fenced blocks of a reply in order, each as the line it opens on and the line that closes it. A block that never closes has
+    // Close -1 and is the last one, because the rest of the reply lies inside it.
+    private static List<(int Open, int Close)> BlocksOf(string[] lines)
+    {
+        var blocks = new List<(int Open, int Close)>();
+        for (int index = 0; index < lines.Length; index++)
+        {
+            if (!OpensFence(lines[index]))
+            {
+                continue;
+            }
+
+            int close = ClosingFence(lines, index);
+            blocks.Add((index, close));
+            if (close < 0)
+            {
+                break;
+            }
+
+            index = close;
+        }
+
+        return blocks;
+    }
+
+    // The line that closes the fence opened on the given line, or -1 when it never closes.
+    private static int ClosingFence(string[] lines, int open)
+    {
+        for (int close = open + 1; close < lines.Length; close++)
+        {
+            if (lines[close].Trim() == "```")
+            {
+                return close;
+            }
+        }
+
+        return -1;
+    }
+
+    private static bool OpensFence(string line) => line.TrimStart().StartsWith("```", StringComparison.Ordinal);
+
+    // The text between a fence's opening and closing lines, with a line break after the last line (empty when the fence holds nothing).
+    private static string ContentBetween(string[] lines, int open, int close) =>
+        close == open + 1 ? string.Empty : string.Join('\n', lines[(open + 1)..close]) + "\n";
+
+    // A FILE line as the lenient reading sees it: a bullet ("- ") and a bold or backtick wrapper around the whole line are taken off.
+    private static string PlainFileLine(string line)
+    {
+        string text = line.Trim();
+        if (text.StartsWith("- ", StringComparison.Ordinal))
+        {
+            text = text[2..].Trim();
+        }
+
+        bool unwrapped = true;
+        while (unwrapped)
+        {
+            unwrapped = false;
+            foreach (string mark in new[] { "**", "`" })
+            {
+                bool wrapped = text.Length > 2 * mark.Length && text.StartsWith(mark, StringComparison.Ordinal) &&
+                    text.EndsWith(mark, StringComparison.Ordinal);
+                if (wrapped)
+                {
+                    text = text[mark.Length..^mark.Length].Trim();
+                    unwrapped = true;
+                }
+            }
+        }
+
+        return text;
+    }
+
+    // The path a FILE line names, cleaned: a path wrapped in backticks or quotes is still the path, backslashes become slashes, and a
+    // leading "./" is dropped.
+    private static string CleanPath(string raw)
+    {
+        string path = raw.Trim();
+        if (path.Length >= 2 && path[0] is '`' or '"' or '\'' && path[^1] == path[0])
+        {
+            path = path[1..^1].Trim();
+        }
+
+        path = path.Replace('\\', '/');
+        if (path.StartsWith("./", StringComparison.Ordinal))
+        {
+            path = path[2..];
+        }
+
+        return path;
     }
 
     /// <summary>

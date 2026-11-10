@@ -94,6 +94,8 @@ internal sealed partial class PlanRunner
 
         IReadOnlyList<string> items = TestDispute.FailingItems(checkOutput);
         IReadOnlyList<TestFileText> holding = TestDispute.Holding(ownTests, items);
+        // The test file under dispute, when there is exactly one: a lone fenced block in the reply is taken as its text.
+        string? onlyPath = holding.Count == 1 ? holding[0].Path : null;
         string[] testPaths = holding.Select(file => file.Path).ToArray();
         IReadOnlyList<TestFileText> changed = ReadFilesToReview(latest, step, changedFiles)
             .Where(file => !testPaths.Contains(file.Path, StringComparer.OrdinalIgnoreCase))
@@ -110,7 +112,7 @@ internal sealed partial class PlanRunner
             using IDisposable? folder = HubProjectFolderScope.For(latest);
             session.CapAnswer(RulingAnswerTokens);
             StepAgentReply reply = await session.SendAsync(prompt, reviewerTier, ruler, limit.Token);
-            answer = await ReadVerdictAsync(session, reply, clock.Elapsed, reviewerTier, ruler, cancellationToken);
+            answer = await ReadVerdictAsync(session, reply, clock.Elapsed, reviewerTier, ruler, cancellationToken, onlyPath);
             RecordRulerTiming(plan, step, attempt, tier, model, rung, round, ruler, answer.Timing);
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
