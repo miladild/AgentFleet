@@ -371,10 +371,16 @@ internal sealed partial class PlanTools
             }
 
             string result = await RunStepCheckAsync(plan, step.Verify, cancellationToken);
-            passed = result.StartsWith("Exit code: 0", StringComparison.Ordinal);
+            // A run whose tests finished with something still open is not a pass, whatever its result lines look like.
+            string? openResource = OpenHandlePreload.ResourceFrom(result);
+            passed = result.StartsWith("Exit code: 0", StringComparison.Ordinal) && openResource is null;
             exitCode = ExitCodeOf(result);
             output = fullCheckOutput ? FailureLocation.ProjectRelative(result, plan.WorkingDirectory)
                 : ShortenCheckOutput(FailureLocation.ProjectRelative(result, plan.WorkingDirectory));
+            if (openResource is not null)
+            {
+                output = $"{output}\n\n{OpenHandlePreload.Explanation(openResource)}";
+            }
             restored.AddRange(await RestoreUnnamedDeletionsAsync(plan, cancellationToken));
         }
 
@@ -459,7 +465,8 @@ internal sealed partial class PlanTools
             }
         }
 
-        return await _runCommand(command, plan.WorkingDirectory, cancellationToken);
+        // The command as written has no force-exit flag, so a test that leaves a handle open could keep it alive: it carries the preload that names the handle.
+        return await _runCommand(OpenHandlePreload.WithPreload(command) ?? command, plan.WorkingDirectory, cancellationToken);
     }
 
     /// <summary>

@@ -39,7 +39,7 @@ public sealed class ForcedExitCrashTests : PlanTestBase
 
         string result = await tools.RunStepCheckAsync(NewPlan(), "node --test test/a.test.js", CancellationToken.None);
 
-        Assert.Equal(["node --test --test-force-exit test/a.test.js", "node --test test/a.test.js"], ran);
+        Assert.Equal(["node --test --test-force-exit test/a.test.js", $"node {OpenHandlePreload.Argument()} --test test/a.test.js"], ran);
         Assert.Equal(Passed, result);
     }
 

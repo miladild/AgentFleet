@@ -28,8 +28,8 @@ internal sealed partial class PlanRunner
     /// </summary>
     internal const string WorkerTestFlags = "--test-force-exit " + WorkerTestTimeoutFlag;
 
-    // The first "--test" flag of a node command, as a whole word (not --test-name-pattern and the like).
-    [GeneratedRegex(@"^(?<head>\s*node\s(?:[^&|;]*?\s)?)--test(?=\s|$)", RegexOptions.CultureInvariant)]
+    // The first "--test" flag of a node command (node, tsx, or either through npx), as a whole word (not --test-name-pattern and the like).
+    [GeneratedRegex(@"^(?<head>\s*(?:npx\s+(?:(?:-y|--yes)\s+)?)?(?:node|tsx)\s(?:[^&|;]*?\s)?)--test(?=\s|$)", RegexOptions.CultureInvariant)]
     private static partial Regex NodeTestFlag();
 
     // The characters that chain or pipe commands in a shell, besides "&&".
@@ -37,9 +37,10 @@ internal sealed partial class PlanRunner
 
     /// <summary>
     /// The command a worker's plain node test call runs: the same command with the per-test limit added after "--test", and the
-    /// force-exit flag too when the worker did not add it. A piped or chained command gets the flags in its first command only, when
-    /// that is a node test command; the rest of the text is kept as the worker wrote it. Null when the command already sets a per-test
-    /// limit, or when its first command is not a node test command. A step's own check is not changed by this (see FirstRunForcedExitFlags).
+    /// force-exit flag too when the worker did not add it. A piped or chained command gets the flags in its first node test command
+    /// (wherever it stands in the line, so after "cd app &amp;&amp;" too); the rest of the text is kept as the worker wrote it. Null when
+    /// the command already sets a per-test limit, or when none of its commands is a node test command. A step's own check is not
+    /// changed by this (see FirstRunForcedExitFlags).
     /// </summary>
     internal static string? WorkerTestCommand(string? command)
     {
@@ -49,14 +50,15 @@ internal sealed partial class PlanRunner
         }
 
         string flags = command.Contains("--test-force-exit", StringComparison.Ordinal) ? WorkerTestTimeoutFlag : WorkerTestFlags;
-        int chain = FirstChainOperator(command);
-        if (chain < 0)
+        if (OpenHandlePreload.FirstNodeTestCommand(command) is not { } place)
         {
-            return WithFlagsAfterTest(command, flags);
+            return null;
         }
 
-        // The first command is the test run; the operator and everything after it are kept as the worker wrote them.
-        return WithFlagsAfterTest(command[..chain], flags) is { } first ? first + command[chain..] : null;
+        // The test run gets the flags; everything before it and after it is kept as the worker wrote it.
+        return WithFlagsAfterTest(command[place.Start..place.End], flags) is { } changed
+            ? string.Concat(command.AsSpan(0, place.Start), changed, command.AsSpan(place.End))
+            : null;
     }
 
     /// <summary>

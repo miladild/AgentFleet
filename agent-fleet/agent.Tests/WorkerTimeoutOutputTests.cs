@@ -150,6 +150,8 @@ public sealed partial class PlanRunnerTests
     }
 
     private const string NodeTestCheck = "node --test test/a.test.js";
+    // The step's own command, run without the force-exit flag, carries the preload that names what keeps a finished test run alive.
+    private static readonly string NodeTestCheckPreloaded = $"node {OpenHandlePreload.Argument()} --test test/a.test.js";
     // The first run of a step's own check exits when the tests are done and adds no per-test limit (a slow test must not fail it).
     private const string NodeTestCheckForced = "node --test --test-force-exit test/a.test.js";
     // The run after a timeout also stops a test that never ends.
@@ -177,7 +179,7 @@ public sealed partial class PlanRunnerTests
         await Runner(agent, Verify, workerWorkspaces: workspaces).RunPlanAsync(plan.Id, default);
 
         string retry = string.Join('\n', agent.Calls.Skip(1).Select(call => call.Prompt));
-        Assert.Equal(new[] { NodeTestCheckForced, NodeTestCheckForced, NodeTestCheck }, commands);
+        Assert.Equal(new[] { NodeTestCheckForced, NodeTestCheckForced, NodeTestCheckPreloaded }, commands);
         Assert.Contains("AssertionError [ERR_ASSERTION]: 404 !== 201", retry, StringComparison.Ordinal);
         Assert.DoesNotContain(KilledCheckMessage, retry, StringComparison.Ordinal);
         Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
@@ -204,7 +206,7 @@ public sealed partial class PlanRunnerTests
         await Runner(agent, Verify).RunPlanAsync(plan.Id, default);
 
         string retry = string.Join('\n', agent.Calls.Skip(1).Select(call => call.Prompt));
-        Assert.Equal(new[] { NodeTestCheckForced, NodeTestCheckForced, NodeTestCheck }, commands);
+        Assert.Equal(new[] { NodeTestCheckForced, NodeTestCheckForced, NodeTestCheckPreloaded }, commands);
         Assert.Contains("AssertionError [ERR_ASSERTION]: 404 !== 201", retry, StringComparison.Ordinal);
         Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
     }
@@ -240,7 +242,7 @@ public sealed partial class PlanRunnerTests
         await Runner(agent, Verify, workerWorkspaces: workspaces).RunPlanAsync(plan.Id, default);
 
         string retry = string.Join('\n', agent.Calls.Skip(1).Select(call => call.Prompt));
-        Assert.Equal(new[] { NodeTestCheckForced, NodeTestCheck, NodeTestCheckRerun, NodeTestCheckForced, NodeTestCheck }, commands);
+        Assert.Equal(new[] { NodeTestCheckForced, NodeTestCheckPreloaded, NodeTestCheckRerun, NodeTestCheckForced, NodeTestCheckPreloaded }, commands);
         Assert.Contains("TypeError: fetch failed (ECONNREFUSED)", retry, StringComparison.Ordinal);
         Assert.Contains(KilledCheckMessage, retry, StringComparison.Ordinal);
         Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);

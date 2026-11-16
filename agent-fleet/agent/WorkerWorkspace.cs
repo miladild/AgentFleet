@@ -1803,7 +1803,9 @@ internal static class WorkspaceTools
     public static Task<string> RunCommandAsync(string command, string? workingDirectory, HubShellOptions options, ILogger logger, CancellationToken cancellationToken) =>
         WorkerWorkspaceContext.Current is { } worker
             ? worker.RunCommandAsync(command, workingDirectory, cancellationToken)
-            : HubShellTools.RunCommandAsync(command, workingDirectory, options, logger, cancellationToken);
+            : HubShellTools.RunCommandAsync(command, workingDirectory, options, logger, cancellationToken,
+                // A command that carries the fleet's own preload is ended once the preload reports an open handle (see OpenHandlePreload).
+                OpenHandlePreload.IsLoadedBy(command) ? OpenHandlePreload.IsMarkerLine : null);
 
     public static string ProjectOverview(string path, int? depth) =>
         WorkerWorkspaceContext.Current is { } worker ? worker.ProjectOverview(path, depth) : ProjectTools.ProjectOverview(path, depth);

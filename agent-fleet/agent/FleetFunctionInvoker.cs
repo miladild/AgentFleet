@@ -196,10 +196,20 @@ internal sealed class FleetFunctionInvoker(
         // worker wrote it; what runs exits when the tests are done, fails a test that runs past the per-test limit, and prints the errors.
         // The worker's command as it was written, kept for the rerun below when the forced run crashes at node's exit.
         string? workerCommand = null;
+        // The command as the worker wrote it, when what runs is not that: the kind of command is read from it, as the rules above did.
+        string? writtenCommand = null;
         if (fromRunner && toolName == "run_command" && forcedExitCommand is not null)
         {
             workerCommand = context.Arguments["command"]?.ToString();
+            writtenCommand = workerCommand;
             context.Arguments["command"] = forcedExitCommand;
+        }
+        else if (fromRunner && toolName == "run_command" && context.Arguments.TryGetValue("command", out object? plainCommand) &&
+                 plainCommand?.ToString() is { } plainText && OpenHandlePreload.WithPreload(plainText) is { } preloaded && preloaded != plainText)
+        {
+            // A node test command that is run without the force-exit flag could stay alive after its tests: the preload names what holds it.
+            writtenCommand = plainText;
+            context.Arguments["command"] = preloaded;
         }
 
         // The user answers a chat tool call before it runs, after the gate and the argument fixes above, so the arguments
@@ -225,7 +235,7 @@ internal sealed class FleetFunctionInvoker(
             ? ActivityOf(context)?.StuckGuard
             : null;
         bool watchedForStuck = stuckGuard is not null &&
-            OutcomeClassifier.CommandFamily(workerCommand ?? ArgumentText(context.Arguments, "command")) == OutcomeClassifier.TestRunFamily;
+            OutcomeClassifier.CommandFamily(writtenCommand ?? ArgumentText(context.Arguments, "command")) == OutcomeClassifier.TestRunFamily;
 
         try
         {
@@ -239,7 +249,7 @@ internal sealed class FleetFunctionInvoker(
                 // A forced run that crashed at node's exit on Windows says nothing about the tests, so the worker's command runs once more as written.
                 if (workerCommand is not null && PlanRunner.ForcedExitCrashed(result?.ToString()))
                 {
-                    context.Arguments["command"] = workerCommand;
+                    context.Arguments["command"] = OpenHandlePreload.WithPreload(workerCommand) ?? workerCommand;
                     result = await ToolLoopGuard.InvokeAsync(context, fromRunner, cancellationToken);
                 }
             }
@@ -247,12 +257,30 @@ internal sealed class FleetFunctionInvoker(
             {
                 // On a worker the runner's time limit comes as an exception, which would reach the model as an opaque failure that
                 // cannot carry a note. A watched test command gets it as a result, worded like the hub's.
-                killed = true;
-                result = $"Error: {exception.Message} The command hit the runner's time limit and was killed." +
-                         (string.IsNullOrWhiteSpace(exception.PartialOutput) ? string.Empty : $"\n--- partial output ---\n{exception.PartialOutput}");
+                if (OpenHandlePreload.ResourceFrom(exception.PartialOutput) is not null)
+                {
+                    // The preload saw the tests finish with something still open: that is the diagnosis, more than the time limit is.
+                    result = "Error: the command was ended because something stayed open after its tests finished.\n" +
+                             $"--- partial output ---\n{exception.PartialOutput}";
+                }
+                else
+                {
+                    killed = true;
+                    result = $"Error: {exception.Message} The command hit the runner's time limit and was killed." +
+                             (string.IsNullOrWhiteSpace(exception.PartialOutput) ? string.Empty : $"\n--- partial output ---\n{exception.PartialOutput}");
+                }
             }
 
             StuckDecision stuck = watchedForStuck ? StuckDecisionFor(stuckGuard!, result?.ToString() ?? string.Empty, killed) : default;
+
+            // A run with the preload that ended because something stayed open after its tests is explained once: the stuck-step guard's own
+            // note follows from the second one, and says the rest.
+            if (fromRunner && toolName == "run_command" && OpenHandlePreload.IsLoadedBy(ArgumentText(context.Arguments, "command")) &&
+                result?.ToString() is { } openText && (!watchedForStuck || stuck.Repeats <= 1) &&
+                OutcomeClassifier.OfRunnerResult(PlanTools.ExitCodeOf(openText), killed, openText) == OutcomeClass.OpenHandle)
+            {
+                result = $"{openText}\n\n[HARNESS] {OpenHandlePreload.Explanation(OpenHandlePreload.ResourceFrom(openText))}";
+            }
 
             if (testRun is { } started)
             {

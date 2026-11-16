@@ -115,7 +115,6 @@ public sealed class FileGuardInvokerTests : ContextTestBase
     }
 
     [Theory]
-    [InlineData("node --test --test-timeout=5000 test/a.test.ts")]
     [InlineData("npm test")]
     [InlineData("ls src")]
     public async Task Any_other_command_of_a_worker_runs_as_it_was_written(string command)

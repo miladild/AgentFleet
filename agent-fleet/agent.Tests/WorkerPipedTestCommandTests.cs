@@ -18,13 +18,26 @@ public sealed class WorkerPipedTestCommandTests
         Assert.Equal(expected, PlanRunner.WorkerTestCommand(command));
 
     [Theory]
-    [InlineData("npm run typecheck && node --test test/a.test.js")]
-    [InlineData("cd app && node --test test/a.test.js")]
-    [InlineData("echo start | node --test test/a.test.js")]
-    [InlineData("node app.js | node --test")]
+    [InlineData("npm run typecheck && node --test test/a.test.js",
+        "npm run typecheck && node --test --test-force-exit --test-timeout=30000 test/a.test.js")]
+    [InlineData("cd app && node --test test/a.test.js", "cd app && node --test --test-force-exit --test-timeout=30000 test/a.test.js")]
+    [InlineData("echo start | node --test test/a.test.js", "echo start | node --test --test-force-exit --test-timeout=30000 test/a.test.js")]
+    [InlineData("dotnet test; node --test test/a.test.js", "dotnet test; node --test --test-force-exit --test-timeout=30000 test/a.test.js")]
+    [InlineData("cd app && node --test test/a.test.js | tail -5; echo done",
+        "cd app && node --test --test-force-exit --test-timeout=30000 test/a.test.js | tail -5; echo done")]
+    [InlineData("cd app && node --test --test-force-exit test/a.test.js", "cd app && node --test --test-timeout=30000 --test-force-exit test/a.test.js")]
+    [InlineData("npx tsx --test test/a.test.ts", "npx tsx --test --test-force-exit --test-timeout=30000 test/a.test.ts")]
+    [InlineData("cd app && node --test test/a.test.js && node --test test/b.test.js",
+        "cd app && node --test --test-force-exit --test-timeout=30000 test/a.test.js && node --test test/b.test.js")]
+    public void The_first_node_test_command_of_a_chain_gets_the_flags_wherever_it_stands(string command, string expected) =>
+        Assert.Equal(expected, PlanRunner.WorkerTestCommand(command));
+
+    [Theory]
     [InlineData("npm test | tail -20")]
-    [InlineData("dotnet test; node --test test/a.test.js")]
-    public void A_chain_whose_first_command_is_not_a_node_test_command_is_left_alone(string command) =>
+    [InlineData("cd app && npm run build")]
+    [InlineData("echo \"node --test\"")]
+    [InlineData("node app.js | tail -3")]
+    public void A_chain_with_no_node_test_command_is_left_alone(string command) =>
         Assert.Null(PlanRunner.WorkerTestCommand(command));
 
     [Theory]

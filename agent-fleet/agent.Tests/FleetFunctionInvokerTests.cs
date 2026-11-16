@@ -959,7 +959,6 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
     [Theory]
     [InlineData("node --test test/a.test.js", "node --test --test-force-exit --test-timeout=30000 test/a.test.js")]
     [InlineData("node --test --test-force-exit test/a.test.js", "node --test --test-timeout=30000 --test-force-exit test/a.test.js")]
-    [InlineData("node --test --test-timeout=5000 test/a.test.js", "node --test --test-timeout=5000 test/a.test.js")]
     [InlineData("node --test test/a.test.js && echo done", "node --test --test-force-exit --test-timeout=30000 test/a.test.js && echo done")]
     public async Task A_workers_node_test_command_runs_with_the_per_test_limit_and_the_attempt_logs_that_command(string requested, string expected)
     {
@@ -975,6 +974,26 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
 
         Assert.Equal([expected], ran);
         Assert.Equal(("run_command", expected), Assert.Single(logged));
+    }
+
+    // A node test command that sets its own per-test limit but not the force-exit flag keeps its text and gains the preload that names
+    // what is left open after its tests. The attempt's counter logs the command as the worker wrote it.
+    [Fact]
+    public async Task A_workers_node_test_command_without_the_force_exit_flag_runs_with_the_preload_and_is_logged_as_written()
+    {
+        const string written = "node --test --test-timeout=5000 test/a.test.js";
+        var invoker = NewInvoker();
+        var activity = new StepToolActivity();
+        var logged = new List<(string Tool, string? Command)>();
+        activity.Observed = (tool, text) => logged.Add((tool, text));
+        var ran = new List<string>();
+        var tool = AIFunctionFactory.Create((string command) => { ran.Add(command); return "ok"; }, "run_command", "Runs a command.");
+        var model = CallOnce("run_command", new Dictionary<string, object?> { ["command"] = written });
+
+        await RunAsync(invoker, model, tool, runner: true, activity: activity).WaitAsync(SafetyLimit);
+
+        Assert.Equal([$"node {OpenHandlePreload.Argument()} --test --test-timeout=5000 test/a.test.js"], ran);
+        Assert.Equal(("run_command", written), Assert.Single(logged));
     }
 
     // A worker's test run whose forced exit crashed on Windows (node exits while a connection still closes) runs once more as the
@@ -994,7 +1013,7 @@ public sealed class FleetFunctionInvokerTests : ContextTestBase
 
         string[] results = await RunAsync(invoker, model, tool, runner: true).WaitAsync(SafetyLimit);
 
-        Assert.Equal(["node --test --test-force-exit --test-timeout=30000 test/a.test.js", "node --test test/a.test.js"], ran);
+        Assert.Equal(["node --test --test-force-exit --test-timeout=30000 test/a.test.js", $"node {OpenHandlePreload.Argument()} --test test/a.test.js"], ran);
         Assert.Equal([outputs[1]], results);
     }
 
