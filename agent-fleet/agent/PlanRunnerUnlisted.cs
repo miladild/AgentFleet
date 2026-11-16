@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+
 namespace AgentFleet;
 
 /// <summary>
@@ -12,6 +14,9 @@ internal sealed partial class PlanRunner
 
     /// <summary>How many file names the extra round lists before it only counts the rest.</summary>
     private const int UnlistedNamesShown = 10;
+
+    /// <summary>The files a step's check runs removed, by plan and step, for the step-done note (see RemoveCheckLeftoversAsync).</summary>
+    private readonly ConcurrentDictionary<string, IReadOnlyList<string>> _leftoversRemoved = new(StringComparer.Ordinal);
 
     /// <summary>
     /// The files this step created that the plan does not name and that a passing check would otherwise accept as they are. These
@@ -78,7 +83,37 @@ internal sealed partial class PlanRunner
         return work with { Files = work.Files.Where(file => atStart.Contains(file.Key)).ToDictionary(file => file.Key, file => file.Value) };
     }
 
+    /// <summary>
+    /// Removes the files a step's check run created in the project folder, right after the check (see TestRunLeftovers), so the
+    /// passing check is not sent back for them. It runs where the check ran: the worker's copy when the step had a worker.
+    /// </summary>
+    private async Task RemoveCheckLeftoversAsync(PlanRecord plan, PlanStep step, IReadOnlyList<string>? before, int attempt, string tier,
+        ModelAttemptResult model, int rung, int round, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(plan.WorkingDirectory))
+        {
+            return;
+        }
+
+        LeftoverRemoval removal = await _tools.RemoveTestRunLeftoversAsync(plan.WorkingDirectory, before, FilesToCreate(plan, step) ?? [], cancellationToken);
+        if (removal.Removed.Count == 0)
+        {
+            return;
+        }
+
+        _leftoversRemoved.AddOrUpdate($"{plan.Id}:{step.Id}", removal.Removed, (_, earlier) => [.. earlier, .. removal.Removed]);
+        _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.LeftoversRemoved, tier, node: model.ModelNode ?? model.Machine,
+            detail: $"A test run created files the plan does not name, and the runner removed them: {UnlistedNames(removal.Removed)}.",
+            modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round, changedFiles: removal.Removed);
+    }
+
+    /// <summary>The sentence the step-done note carries for the files the step's check runs removed, or nothing when none were.</summary>
+    private string LeftoversDetail(PlanRecord plan, PlanStep step) =>
+        _leftoversRemoved.TryGetValue($"{plan.Id}:{step.Id}", out IReadOnlyList<string>? removed)
+            ? $"Test runs created files the plan does not name, and the runner removed them: {UnlistedNames(removed)}."
+            : string.Empty;
+
     /// <summary>A path inside the fleet's own folder or a dependency or version-control folder: the fleet or the tools wrote it, not the step.</summary>
-    private static bool IsFleetOrDependencyPath(string relative) =>
+    internal static bool IsFleetOrDependencyPath(string relative) =>
         relative.Replace('\\', '/').Split('/').Any(part => part is "node_modules" or ".git" or ".agent-fleet");
 }

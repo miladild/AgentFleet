@@ -882,6 +882,58 @@ internal sealed partial class PlanTools
         return new GitState(root, head, entries);
     }
 
+    /// <summary>
+    /// The files in a folder that git lists as untracked and does not ignore, relative to that folder with forward slashes. Null when git
+    /// cannot say (no repository, git missing, no first commit). Runs on the machine the current worker scope selects.
+    /// </summary>
+    internal async Task<IReadOnlyList<string>?> UntrackedFilesAsync(string? workingDirectory, CancellationToken cancellationToken)
+    {
+        // The same folder check the snapshot makes: a folder that is not there has no listing, and git is not asked anything.
+        if (string.IsNullOrWhiteSpace(workingDirectory) || !Directory.Exists(workingDirectory))
+        {
+            return null;
+        }
+
+        try
+        {
+            // Git lists, from the folder it is run in, the untracked files under that folder that no ignore rule covers, with paths
+            // relative to that folder. That holds on any machine, so a worker copy needs no comparison of its root with the hub's.
+            string? listing = Stdout(await _runCommand("git -c core.quotepath=off ls-files --others --exclude-standard", workingDirectory, cancellationToken));
+            return listing?.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => line.TrimEnd('\r').Trim('"').Replace('\\', '/'))
+                .Where(line => line.Length > 0)
+                .ToArray();
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Removes the files a test run created in the project folder (see TestRunLeftovers), given the untracked files listed before the run.
+    /// The listing and the removal run where the current worker scope says: the worker's copy when the run was on a worker, the hub's
+    /// folder otherwise. The project's own delete refuses frozen test files and non-empty folders.
+    /// </summary>
+    internal async Task<LeftoverRemoval> RemoveTestRunLeftoversAsync(string workingDirectory, IReadOnlyList<string>? before, IReadOnlyList<string> plannedPaths, CancellationToken cancellationToken)
+    {
+        IReadOnlyList<string>? after = await UntrackedFilesAsync(workingDirectory, cancellationToken);
+        LeftoverPlan plan = TestRunLeftovers.Plan(workingDirectory, before, after, plannedPaths);
+        if (plan.Fallback)
+        {
+            return new LeftoverRemoval([], plan.Reason);
+        }
+
+        if (plan.Remove.Count == 0)
+        {
+            return new LeftoverRemoval([], null);
+        }
+
+        IReadOnlyList<string> removed = TestRunLeftovers.Remove(workingDirectory, plan.Remove, before!,
+            path => WorkspaceTools.DeleteFile(path).StartsWith("Deleted ", StringComparison.Ordinal));
+        return new LeftoverRemoval(removed, null);
+    }
+
     // The stdout part of a command result, or null when the command did not succeed.
     private static string? Stdout(string result)
     {

@@ -84,6 +84,25 @@ internal sealed class FleetFunctionInvoker(
         return FileGuard.FileToolDenial(toolName, context.Arguments, scope?.WorkingDirectory, scope?.DeclaredPaths ?? []);
     }
 
+    // The step's folder, the untracked files listed before a test run, and the files the step names, or null when the call is not a
+    // test run that a plan step's worker starts.
+    private async Task<(string Folder, IReadOnlyList<string>? Before, IReadOnlyList<string> Planned)?> StartTestRunAsync(
+        FunctionInvocationContext context, bool fromRunner, CancellationToken cancellationToken)
+    {
+        if (!fromRunner || context.Function.Name != "run_command" ||
+            OutcomeClassifier.CommandFamily(context.Arguments.TryGetValue("command", out object? command) ? command?.ToString() : null) != "test-run")
+        {
+            return null;
+        }
+
+        if (planTools.RunningStepScope(context.Messages) is not { } scope || scope.WorkingDirectory is not { } folder)
+        {
+            return null;
+        }
+
+        return (folder, await planTools.UntrackedFilesAsync(folder, cancellationToken), scope.DeclaredPaths);
+    }
+
     private async ValueTask<(object? Result, string Outcome)> InvokeCoreAsync(FunctionInvocationContext context, CancellationToken cancellationToken)
     {
         string toolName = context.Function.Name;
@@ -203,12 +222,24 @@ internal sealed class FleetFunctionInvoker(
 
         try
         {
+            // A test run in a plan step's folder may leave files behind: the ones it created are removed once it ends (see TestRunLeftovers).
+            var testRun = await StartTestRunAsync(context, fromRunner, cancellationToken);
             object? result = await ToolLoopGuard.InvokeAsync(context, fromRunner, cancellationToken);
             // A forced run that crashed at node's exit on Windows says nothing about the tests, so the worker's command runs once more as written.
             if (workerCommand is not null && PlanRunner.ForcedExitCrashed(result?.ToString()))
             {
                 context.Arguments["command"] = workerCommand;
                 result = await ToolLoopGuard.InvokeAsync(context, fromRunner, cancellationToken);
+            }
+
+            if (testRun is { } started)
+            {
+                LeftoverRemoval removal = await planTools.RemoveTestRunLeftoversAsync(started.Folder, started.Before, started.Planned, cancellationToken);
+                if (removal.Removed.Count > 0)
+                {
+                    result = $"{result}\n\n[HARNESS] The test run created files the plan does not name, and they were removed: " +
+                             $"{string.Join(", ", removal.Removed.Take(10))}{(removal.Removed.Count > 10 ? $", and {removal.Removed.Count - 10} more" : string.Empty)}.";
+                }
             }
 
             if (fromRunner)
