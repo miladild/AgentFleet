@@ -1364,6 +1364,9 @@ internal sealed partial class PlanRunner
                 List<string> restoredNow = [];
                 List<string> frozenNow = [];
                 bool isFinalValidation = !IsTestsStep(step) && step.Id == plan.Steps.Max(candidate => candidate.Id);
+                // How long the check ran, and whether the runner's time limit ended it: the check's run-log event records both.
+                var checkClock = new Stopwatch();
+                bool checkTimedOut = false;
                 try
                 {
                     using IDisposable? workerScope = model.Workspace?.Enter();
@@ -1381,6 +1384,7 @@ internal sealed partial class PlanRunner
                         model.Machine, model.ModelNode);
                     if (model.Workspace is not null) await RestoreFrozenTestsAsync(plan, model.Workspace, restoredNow, cancellationToken);
                     else RestoreHubFrozenTests(plan, restoredNow);
+                    checkClock.Start();
                     CheckRun run = model.Workspace is null
                         ? await RunCheckWithRepairsAsync(plan, step, attempt, tier, rung, round, model, cancellationToken)
                         : await RunWithReconnectsAsync(
@@ -1389,6 +1393,7 @@ internal sealed partial class PlanRunner
                             "running the check", cancellationToken, cancellationToken,
                             plan, step, attempt, tier,
                             (exception, token) => IsWorkerCheckTransportFailureAsync(exception, model.Workspace, token));
+                    checkClock.Stop();
                     result = run.Result;
                     checkNote = run.Note;
                     parkReason = run.ParkReason;
@@ -1489,6 +1494,7 @@ internal sealed partial class PlanRunner
                     string failure;
                     if (commandTimedOut && await workspace.AnswersAsync(cancellationToken))
                     {
+                        checkTimedOut = true;
                         string? rerun = await RerunKilledTestRunAsync(plan, step, workspace, partialOutput, cancellationToken);
                         failure = TimedOutCheckFailure(workspace.CommandTimeout, partialOutput, plan.WorkingDirectory, rerun);
                         // The killed run, and its rerun, may have written files into the worker project. The throw above skipped the
@@ -1519,6 +1525,8 @@ internal sealed partial class PlanRunner
                 }
                 finally
                 {
+                    // A check that threw (a timed-out command, a lost connection) still has its time stopped here.
+                    checkClock.Stop();
                     model.Workspace?.Dispose();
                 }
 
@@ -1655,7 +1663,8 @@ internal sealed partial class PlanRunner
                     _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.CheckPassed, tier,
                         node: model.ModelNode ?? model.Machine,
                         detail: IsTestsStep(step) ? $"`{step.Verify}` failed on the new tests as required." : isFinalValidation ? $"Final validation passed: `{step.Verify}`." : $"`{step.Verify}` passed.",
-                        modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round);
+                        modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round,
+                        outcomeClass: CheckOutcomeName(result, checkTimedOut), seconds: checkClock.Elapsed.TotalSeconds);
                     if (isFinalValidation)
                     {
                         _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.FinalValidationPassed, tier,
@@ -1716,7 +1725,8 @@ internal sealed partial class PlanRunner
                 _store.AddEvent(plan.Id, step.Id, attempt,
                     step.Id == plan.Steps.Max(candidate => candidate.Id) ? RunEventKind.FinalValidationFailed : RunEventKind.CheckFailed,
                     tier, node: model.ModelNode ?? model.Machine, detail: lastFailure,
-                    modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round);
+                    modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round,
+                    outcomeClass: CheckOutcomeName(result, checkTimedOut), seconds: checkClock.Elapsed.TotalSeconds);
                 plan = _store.Get(plan.Id)!;
 
                 // The best state the project has been in so far is kept; a round that leaves it worse is undone before the
@@ -3761,6 +3771,18 @@ internal sealed partial class PlanRunner
 
     private string[]? FilesToCreate(PlanRecord plan, PlanStep step) =>
         _filesToCreate.TryGetValue($"{plan.Id}:{step.Id}", out string[]? files) ? files : null;
+
+    // The outcome class of a check's run, by name, for the check's run-log event. A check that passed without reporting an exit code counts as exit 0.
+    private static string CheckOutcomeName(StepCompletion result, bool timedOut)
+    {
+        int? exitCode = result.ExitCode;
+        if (exitCode is null && result.Done)
+        {
+            exitCode = 0;
+        }
+
+        return OutcomeClassifier.Name(OutcomeClassifier.Of(exitCode, timedOut, result.Output ?? result.Message));
+    }
 
     private long? RecordCheck(PlanRecord plan, PlanStep step, int attempt, StepCompletion result, string? node) =>
         _recorder is not null && ContextFor(plan.Id) is { } contextId

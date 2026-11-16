@@ -43,7 +43,7 @@ internal sealed partial class PlanRunner
         }
 
         return new StepCompletion(decision.Accepted, decision.Feedback,
-            decision.Accepted ? check.Output : decision.Feedback + "\n\n" + check.Output, check.Restored);
+            decision.Accepted ? check.Output : decision.Feedback + "\n\n" + check.Output, check.Restored, check.ExitCode);
     }
 
     private static string PlaceholderFeedback(IReadOnlyList<string> placeholders) =>

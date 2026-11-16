@@ -56,6 +56,10 @@ export type PlanRunEvent = {
   changedFiles?: string[] | null;
   /** On a round-classified event: the working time of the round, its model call and its check. */
   durationSeconds?: number | null;
+  /** On a check event: the outcome class of the check's run, by name, such as time-limit; null in older logs. */
+  outcomeClass?: string | null;
+  /** On a check event: how long the check ran, in seconds; null in older logs. */
+  seconds?: number | null;
   /** On a check-healed event: the check as it was, and the check the step has from now on. */
   checkBefore?: string | null;
   checkAfter?: string | null;

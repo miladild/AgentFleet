@@ -494,7 +494,9 @@ internal sealed partial class FleetPlanStore
         string? checkAfter = null,
         string? model = null,
         int? contextCeiling = null,
-        int? loopGuardNotes = null)
+        int? loopGuardNotes = null,
+        string? outcomeClass = null,
+        double? seconds = null)
     {
         string text = detail ?? string.Empty;
         int limit = kind == RunEventKind.FilesChanged ? MaxFilesChangedCharacters
@@ -507,7 +509,7 @@ internal sealed partial class FleetPlanStore
         var entry = new PlanRunEvent(DateTimeOffset.UtcNow, stepId, attempt, kind, tier, node, text, modelNode, workspaceNode,
             failureClass, failureSignature, failureSignatureSize, filesChanged, toolCalls, editToolCalled, rung, round,
             changedFiles is { Count: > 0 } ? changedFiles.Take(MaxChangedFilesPerEvent).ToList() : null, durationSeconds,
-            Shorten(checkBefore), Shorten(checkAfter), model, contextCeiling, loopGuardNotes);
+            Shorten(checkBefore), Shorten(checkAfter), model, contextCeiling, loopGuardNotes, outcomeClass, seconds);
         return Update(id, plan =>
         {
             List<PlanRunEvent> events = [.. plan.Events ?? [], entry];
@@ -994,6 +996,24 @@ internal sealed partial class FleetPlanStore
             if (e.CheckBefore is not null || e.CheckAfter is not null)
             {
                 text.AppendLine($"  > check: `{e.CheckBefore}` -> `{e.CheckAfter}`");
+            }
+
+            // The outcome class and the time a check took, only on the events that recorded them (older events have neither).
+            if (e.OutcomeClass is not null || e.Seconds is not null)
+            {
+                var measured = new List<string>();
+                if (e.OutcomeClass is not null)
+                {
+                    measured.Add($"outcome {e.OutcomeClass}");
+                }
+
+                if (e.Seconds is { } seconds)
+                {
+                    string shown = seconds.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
+                    measured.Add($"took {shown} s");
+                }
+
+                text.AppendLine($"  > {string.Join(", ", measured)}");
             }
         }
 

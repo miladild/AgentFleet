@@ -12,7 +12,8 @@ namespace AgentFleet;
 /// model), steps go in order except within an approved parallel group, and nothing can be completed before the user approves.
 /// </summary>
 /// <param name="Restored">Files the fleet put back from git because the step deleted them and no step names them.</param>
-internal sealed record StepCompletion(bool Done, string Message, string? Output = null, string? Restored = null);
+/// <param name="ExitCode">The exit code the step's check reported, when it ran and reported one; null otherwise.</param>
+internal sealed record StepCompletion(bool Done, string Message, string? Output = null, string? Restored = null, int? ExitCode = null);
 
 internal sealed partial class PlanTools
 {
@@ -360,6 +361,7 @@ internal sealed partial class PlanTools
         List<string> restored = [.. await RestoreUnnamedDeletionsAsync(plan, cancellationToken)];
         bool passed = true;
         string? output = null;
+        int? exitCode = null;
         if (step.Verify is not null)
         {
             if (PlanRunnerToolPolicy.CommandRefusal(step.Verify) is { } refusal)
@@ -370,6 +372,7 @@ internal sealed partial class PlanTools
 
             string result = await RunStepCheckAsync(plan, step.Verify, cancellationToken);
             passed = result.StartsWith("Exit code: 0", StringComparison.Ordinal);
+            exitCode = ExitCodeOf(result);
             output = fullCheckOutput ? FailureLocation.ProjectRelative(result, plan.WorkingDirectory)
                 : ShortenCheckOutput(FailureLocation.ProjectRelative(result, plan.WorkingDirectory));
             restored.AddRange(await RestoreUnnamedDeletionsAsync(plan, cancellationToken));
@@ -417,12 +420,12 @@ internal sealed partial class PlanTools
                 false,
                 $"Step {stepId} is NOT done: its verify command `{step.Verify}` failed (attempt {step.Attempts}). {marker}\n{output}\n\n" +
                 "Read the output, fix the cause, and try again. If you cannot fix it, say so instead of claiming it works.",
-                output);
+                output, ExitCode: exitCode);
         }
 
         if (deferCommit)
         {
-            return new StepCompletion(true, $"Step {stepId} passed its approved check; waiting for the worker sync before marking it done.", output, restoredNote);
+            return new StepCompletion(true, $"Step {stepId} passed its approved check; waiting for the worker sync before marking it done.", output, restoredNote, exitCode);
         }
 
         PlanRecord updated = CommitStepDone(plan.Id, stepId, note);
@@ -435,7 +438,7 @@ internal sealed partial class PlanTools
         reply.Append(next is null
             ? "All steps are done. Give the user a short summary of what changed."
             : $"Next: step {next.Id}, {next.Title}.");
-        return new StepCompletion(true, reply.ToString(), output, restoredNote);
+        return new StepCompletion(true, reply.ToString(), output, restoredNote, exitCode);
     }
 
     /// <summary>
@@ -1356,6 +1359,14 @@ internal sealed partial class PlanTools
     }
 
     private const int MaxCheckSummaryCharacters = 1500;
+
+    // The first line of a command's result: the exit code the shell reported, when it reported one.
+    [GeneratedRegex(@"^Exit code: (-?\d+)")]
+    private static partial Regex ExitCodeLine();
+
+    /// <summary>The exit code a command's result starts with, or null when the result names none (the command did not report one).</summary>
+    internal static int? ExitCodeOf(string result) =>
+        ExitCodeLine().Match(result) is { Success: true } match && int.TryParse(match.Groups[1].ValueSpan, out int code) ? code : null;
 
     // node:test and TAP (✖, "not ok", "ℹ fail 4"), jest and vitest ("Tests: 4 failed"), dotnet test ("Failed!"),
     // pytest ("FAILED"), tsc ("error TS2345").

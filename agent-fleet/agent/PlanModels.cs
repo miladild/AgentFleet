@@ -265,6 +265,8 @@ internal static class RunEventKind
 /// <param name="Model">The configured model recorded when a round was classified.</param>
 /// <param name="ContextCeiling">The configured context length recorded when a round was classified.</param>
 /// <param name="LoopGuardNotes">The count of tool results containing the loop-guard marker for this round; null in older logs.</param>
+/// <param name="OutcomeClass">On a check event: the name of the outcome class the check's run was sorted into (see OutcomeClassifier); null in older logs.</param>
+/// <param name="Seconds">On a check event: how long the check ran, in seconds; null in older logs.</param>
 internal sealed record PlanRunEvent(
     DateTimeOffset AtUtc,
     int? StepId,
@@ -289,7 +291,9 @@ internal sealed record PlanRunEvent(
     string? CheckAfter = null,
     string? Model = null,
     int? ContextCeiling = null,
-    int? LoopGuardNotes = null);
+    int? LoopGuardNotes = null,
+    string? OutcomeClass = null,
+    double? Seconds = null);
 
 /// <summary>
 /// A plan is a durable artifact, not chat text: it is saved as a file, shown to the user
