@@ -1396,6 +1396,8 @@ internal sealed partial class PlanRunner
                         model.Machine, model.ModelNode);
                     if (model.Workspace is not null) await RestoreFrozenTestsAsync(plan, model.Workspace, restoredNow, cancellationToken);
                     else RestoreHubFrozenTests(plan, restoredNow);
+                    // The untracked files before the check: whatever the check's test run adds after it is removed (see RemoveCheckLeftoversAsync).
+                    IReadOnlyList<string>? leftoversBefore = await _tools.UntrackedFilesAsync(plan.WorkingDirectory, cancellationToken);
                     checkClock.Start();
                     CheckRun run = model.Workspace is null
                         ? await RunCheckWithRepairsAsync(plan, step, attempt, tier, rung, round, model, cancellationToken)
@@ -1406,6 +1408,7 @@ internal sealed partial class PlanRunner
                             plan, step, attempt, tier,
                             (exception, token) => IsWorkerCheckTransportFailureAsync(exception, model.Workspace, token));
                     checkClock.Stop();
+                    await RemoveCheckLeftoversAsync(plan, step, leftoversBefore, attempt, tier, model, rung, round, cancellationToken);
                     result = run.Result;
                     checkResult = result;
                     checkNote = run.Note;
@@ -3802,7 +3805,7 @@ internal sealed partial class PlanRunner
                 .Select(candidate => candidate.Id == step.Id ? candidate with { Evidence = evidence } : candidate)
                 .ToArray()
         });
-        return JoinNotes(JoinNotes(StrayDetail(plan, step), restored), PlanEvidenceRules.Detail(evidence));
+        return JoinNotes(JoinNotes(JoinNotes(StrayDetail(plan, step), LeftoversDetail(plan, step)), restored), PlanEvidenceRules.Detail(evidence));
     }
 
     private static bool HasPassedReview(PlanRecord plan, int stepId, int attempt) =>
