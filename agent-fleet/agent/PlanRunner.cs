@@ -125,6 +125,12 @@ internal sealed class StepToolActivity
 
     public void RecordWebLookup(string toolName, string target) => WebLookup?.Invoke(toolName, target);
 
+    /// <summary>
+    /// Told of each test command the model ran, with its family, outcome class and printed output; answers what the stuck-step guard
+    /// makes of it (see <see cref="StuckStepGuard"/>). Null when the guard is off.
+    /// </summary>
+    public Func<string, OutcomeClass, string?, StuckDecision>? StuckGuard { get; set; }
+
     /// <param name="toolName">The tool the model called.</param>
     /// <param name="command">For a command call, the command that runs (after any change the fleet made to it), so the run log shows what a round spent its time on.</param>
     public void Record(string toolName, string? command = null)
@@ -457,6 +463,7 @@ internal sealed partial class PlanRunner
     private readonly Func<string?>? _testWriterNode;
     private readonly EditCheckSettings _editCheck;
     private readonly HarnessOptions _harness;
+    private readonly StuckStepGuard _stuckGuard;
 
     public PlanRunner(
         FleetPlanStore store,
@@ -493,6 +500,7 @@ internal sealed partial class PlanRunner
         _testWriterNode = testWriterNode;
         _editCheck = editCheck ?? new EditCheckSettings();
         _harness = harness ?? new HarnessOptions();
+        _stuckGuard = new StuckStepGuard(_harness);
         _roundsPerRung = Math.Max(1, roundsPerRung);
         _stepClock = stepClock is { } clock && clock > TimeSpan.Zero ? clock : DefaultStepClock;
         _transientDelay = transientDelay ?? DefaultTransientDelay;
@@ -1173,6 +1181,8 @@ internal sealed partial class PlanRunner
             }
 
             bool conversationOver = false;
+            // Rounds of this attempt whose check hit an infrastructure outcome and were not charged to the rung (see StuckGuardEnabled).
+            int unchargedRounds = 0;
             while (!conversationOver)
             {
                 if (plan.RunDeadlineUtc is { } deadline && _utcNow() >= deadline)
@@ -1367,6 +1377,8 @@ internal sealed partial class PlanRunner
                 // How long the check ran, and whether the runner's time limit ended it: the check's run-log event records both.
                 var checkClock = new Stopwatch();
                 bool checkTimedOut = false;
+                // The check's own result, before any rule below turns a passing check into a step sent back.
+                StepCompletion? checkResult = null;
                 try
                 {
                     using IDisposable? workerScope = model.Workspace?.Enter();
@@ -1395,6 +1407,7 @@ internal sealed partial class PlanRunner
                             (exception, token) => IsWorkerCheckTransportFailureAsync(exception, model.Workspace, token));
                     checkClock.Stop();
                     result = run.Result;
+                    checkResult = result;
                     checkNote = run.Note;
                     parkReason = run.ParkReason;
                     if (!ReferenceEquals(run.Step, step))
@@ -1516,6 +1529,7 @@ internal sealed partial class PlanRunner
                         failure = $"Worker workspace unavailable: verification or sync failed on {model.Machine}: {exception.Message}";
                     }
                     result = new StepCompletion(false, failure, failure);
+                    checkResult = result;
                 }
                 catch (FrozenTestsUnrestorableException exception) when (model.Workspace is null)
                 {
@@ -1657,6 +1671,19 @@ internal sealed partial class PlanRunner
                 worked += roundTime;
                 RoundOutcome outcome = await RecordRoundClassifiedAsync(plan, step, attempt, model,
                     result.Output ?? result.Message, result.Done, change.Files, rung, round, (int)Math.Ceiling(roundTime.TotalSeconds));
+
+                // The kind of result the check gave, counted against the attempt's streak of the same infrastructure outcome.
+                StuckDecision stuck = default;
+                bool stuckInfra = false;
+                if (_harness.StuckGuardEnabled)
+                {
+                    StepCompletion given = checkResult ?? result;
+                    OutcomeClass checkClass = CheckOutcomeClass(given, checkTimedOut, textMayTellTimeLimit: true);
+                    stuckInfra = OutcomeClassifier.IsInfra(checkClass);
+                    stuck = ObserveStuck(plan.Id, step.Id, attempt, tier, model.Machine, model.ModelNode, rung, round,
+                        OutcomeClassifier.TestRunFamily, checkClass, given.Output ?? given.Message, "the check");
+                }
+
                 if (result.Done)
                 {
                     _tools.CommitStepDone(plan.Id, step.Id, Summarize(model.Summary));
@@ -1769,7 +1796,16 @@ internal sealed partial class PlanRunner
                 }
                 else if (!extraRound)
                 {
-                    roundsInRung++;
+                    // A round whose check hit the time limit, a crash or an open handle says little about the work: a few per attempt
+                    // are not charged to the rung, so the ladder does not climb for what the environment did.
+                    if (stuckInfra && unchargedRounds < _harness.StuckUnchargedRoundsPerAttempt)
+                    {
+                        unchargedRounds++;
+                    }
+                    else
+                    {
+                        roundsInRung++;
+                    }
                 }
 
                 roundsTotal++;
@@ -1807,6 +1843,21 @@ internal sealed partial class PlanRunner
 
                 rulingNote = ruling.Note ?? rulingNote;
                 if (rulingNote is not null) lastFailure = $"{rulingNote}\n\n{lastFailure}";
+
+                // The same infrastructure outcome again and again gets a note in the next feedback; on the third the conversation ends and
+                // the next round (a new attempt) starts fresh with the diagnosis first. The step is not parked here: the last attempt keeps
+                // its conversation, and the ladder decides below, as always.
+                bool endsConversation = stuck.Action == StuckAction.Stop && attempt < MaxAttemptsPerStep;
+                if (stuck.Action == StuckAction.Note)
+                {
+                    lastFailure = $"{lastFailure}\n\n{stuck.Note}";
+                }
+                else if (stuck.Action == StuckAction.Stop)
+                {
+                    string diagnosis = endsConversation ? stuck.Note! : stuck.Note!.Replace(" " + StuckStepGuard.StopSentence, string.Empty, StringComparison.Ordinal);
+                    lastFailure = $"{diagnosis}\n\n{lastFailure}";
+                }
+
                 // A worker that ran out of time on a round is not given the step's remaining time again when the hub may take it
                 // over: the rescue starts at once (a worker-only plan keeps its worker, as before).
                 bool hubRung = HubRungAvailable(step, hub, hubAllowed, model.ModelNode);
@@ -1821,6 +1872,12 @@ internal sealed partial class PlanRunner
                     {
                         session = null;
                     }
+                }
+
+                if (endsConversation && !conversationOver && !gaveUp)
+                {
+                    conversationOver = true;
+                    session = null;
                 }
 
                 // The call left behind by a stalled round may still be running in this conversation: the next round opens a new one.
@@ -3431,6 +3488,12 @@ internal sealed partial class PlanRunner
                     modelNode: modelMachine, workspaceNode: machine, rung: conversation.Rung, round: conversation.Round);
             }
         };
+        if (_harness.StuckGuardEnabled)
+        {
+            activity.StuckGuard = (family, outcome, output) => ObserveStuck(plan.Id, step.Id, attempt, tier, machine, modelMachine,
+                conversation.Rung, conversation.Round, family, outcome, output, "a test command the model ran");
+        }
+
         EditCheckGate? editCheck = null;
         string? editCheckNote = null;
         try
@@ -3773,7 +3836,12 @@ internal sealed partial class PlanRunner
         _filesToCreate.TryGetValue($"{plan.Id}:{step.Id}", out string[]? files) ? files : null;
 
     // The outcome class of a check's run, by name, for the check's run-log event. A check that passed without reporting an exit code counts as exit 0.
-    private static string CheckOutcomeName(StepCompletion result, bool timedOut)
+    private static string CheckOutcomeName(StepCompletion result, bool timedOut) =>
+        OutcomeClassifier.Name(CheckOutcomeClass(result, timedOut, textMayTellTimeLimit: false));
+
+    // The class of a check's result. The stuck-step guard also reads the runner's own kill message in the text as a time limit
+    // (a check on the hub comes back as that text); the run log's class stays as it was recorded before.
+    private static OutcomeClass CheckOutcomeClass(StepCompletion result, bool timedOut, bool textMayTellTimeLimit)
     {
         int? exitCode = result.ExitCode;
         if (exitCode is null && result.Done)
@@ -3781,7 +3849,28 @@ internal sealed partial class PlanRunner
             exitCode = 0;
         }
 
-        return OutcomeClassifier.Name(OutcomeClassifier.Of(exitCode, timedOut, result.Output ?? result.Message));
+        string output = result.Output ?? result.Message;
+        return textMayTellTimeLimit
+            ? OutcomeClassifier.OfRunnerResult(exitCode, timedOut, output)
+            : OutcomeClassifier.Of(exitCode, timedOut, output);
+    }
+
+    // Counts a test run's result for the step attempt and logs a note or a stop the stuck-step guard gives for it.
+    private StuckDecision ObserveStuck(string planId, int stepId, int attempt, string tier, string? workspace, string? modelNode, int rung, int round,
+        string family, OutcomeClass outcome, string? output, string source)
+    {
+        StuckDecision decision = _stuckGuard.Observe(planId, stepId, attempt, family, outcome, output);
+        if (decision.Action != StuckAction.None)
+        {
+            string what = decision.Action == StuckAction.Stop ? "stop" : "note";
+            _logger.LogWarning("Plan {PlanId} step {StepId} attempt {Attempt}: {Outcome} {Repeats} times in a row ({Source}); the guard gives a {What}.",
+                planId, stepId, attempt, OutcomeClassifier.Name(outcome), decision.Repeats, source, what);
+            _store.AddEvent(planId, stepId, attempt, RunEventKind.StuckGuard, tier, node: modelNode ?? workspace,
+                detail: $"{what} after {decision.Repeats} in a row ({source}): {decision.Note}", modelNode: modelNode, workspaceNode: workspace,
+                rung: rung, round: round, outcomeClass: OutcomeClassifier.Name(outcome));
+        }
+
+        return decision;
     }
 
     private long? RecordCheck(PlanRecord plan, PlanStep step, int attempt, StepCompletion result, string? node) =>

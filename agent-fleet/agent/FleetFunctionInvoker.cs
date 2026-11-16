@@ -201,19 +201,51 @@ internal sealed class FleetFunctionInvoker(
             }
         }
 
+        // A step attempt's test commands are watched for the same kind of result coming back again and again, however each is written.
+        Func<string, OutcomeClass, string?, StuckDecision>? stuckGuard = fromRunner && toolName == "run_command" && (harness ?? DefaultHarness).StuckGuardEnabled
+            ? ActivityOf(context)?.StuckGuard
+            : null;
+        bool watchedForStuck = stuckGuard is not null &&
+            OutcomeClassifier.CommandFamily(workerCommand ?? ArgumentText(context.Arguments, "command")) == OutcomeClassifier.TestRunFamily;
+
         try
         {
-            object? result = await ToolLoopGuard.InvokeAsync(context, fromRunner, cancellationToken);
-            // A forced run that crashed at node's exit on Windows says nothing about the tests, so the worker's command runs once more as written.
-            if (workerCommand is not null && PlanRunner.ForcedExitCrashed(result?.ToString()))
+            object? result;
+            bool killed = false;
+            try
             {
-                context.Arguments["command"] = workerCommand;
                 result = await ToolLoopGuard.InvokeAsync(context, fromRunner, cancellationToken);
+                // A forced run that crashed at node's exit on Windows says nothing about the tests, so the worker's command runs once more as written.
+                if (workerCommand is not null && PlanRunner.ForcedExitCrashed(result?.ToString()))
+                {
+                    context.Arguments["command"] = workerCommand;
+                    result = await ToolLoopGuard.InvokeAsync(context, fromRunner, cancellationToken);
+                }
             }
+            catch (WorkerCommandTimeoutException exception) when (watchedForStuck)
+            {
+                // On a worker the runner's time limit comes as an exception, which would reach the model as an opaque failure that
+                // cannot carry a note. A watched test command gets it as a result, worded like the hub's.
+                killed = true;
+                result = $"Error: {exception.Message} The command hit the runner's time limit and was killed." +
+                         (string.IsNullOrWhiteSpace(exception.PartialOutput) ? string.Empty : $"\n--- partial output ---\n{exception.PartialOutput}");
+            }
+
+            StuckDecision stuck = watchedForStuck ? StuckDecisionFor(stuckGuard!, result?.ToString() ?? string.Empty, killed) : default;
 
             if (fromRunner)
             {
                 result = ToolLoopGuard.Apply(context, result, toolLoopLogger);
+                if (stuck.Action != StuckAction.None)
+                {
+                    // The note goes in the tool's result, like the loop guard's. A stop ends the turn, so the runner checks the step.
+                    result = $"{result}\n\n[Fleet stuck-step guard] {stuck.Note}";
+                    if (stuck.Action == StuckAction.Stop)
+                    {
+                        context.Terminate = true;
+                    }
+                }
+
                 if (PlanRunnerToolPolicy.IsWebLookup(toolName) && result is not null)
                 {
                     // A model that can run commands reads this: the page is marked as data, as the project files are.
@@ -294,6 +326,14 @@ internal sealed class FleetFunctionInvoker(
             throw;
         }
     }
+
+    private static StepToolActivity? ActivityOf(FunctionInvocationContext context) =>
+        context.Options?.AdditionalProperties?.TryGetValue(StepToolActivity.Key, out object? activity) == true ? activity as StepToolActivity : null;
+
+    // What the stuck-step guard makes of a test command's result. A command the runner killed at its time limit says so at the start
+    // of its result (on a worker it is the exception that was turned into one), and the exit code is the result's leading line.
+    private static StuckDecision StuckDecisionFor(Func<string, OutcomeClass, string?, StuckDecision> guard, string text, bool killed) =>
+        guard(OutcomeClassifier.TestRunFamily, OutcomeClassifier.OfRunnerResult(PlanTools.ExitCodeOf(text), killed, text), text);
 
     // The text of a tool argument, or null when the call leaves it out.
     private static string? ArgumentText(IReadOnlyDictionary<string, object?> arguments, string name) =>

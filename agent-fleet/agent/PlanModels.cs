@@ -245,6 +245,9 @@ internal static class RunEventKind
     public const string FrozenTests = "frozen-tests";
     public const string TestDisputed = "test-disputed";
     public const string TestRuling = "test-ruling";
+
+    /// <summary>A note or a stop the stuck-step guard gave after the same time limit, crash or open handle came back again and again.</summary>
+    public const string StuckGuard = "stuck-guard";
 }
 
 /// <summary>

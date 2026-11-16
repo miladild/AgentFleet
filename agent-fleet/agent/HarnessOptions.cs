@@ -33,7 +33,11 @@ internal sealed record HarnessOptions(
     int ArbiterAfterRounds = 2,
     bool EnableWebLookup = true,
     int WebLookupAfterFailures = 2,
-    bool EnableNewPrintCheck = true)
+    bool EnableNewPrintCheck = true,
+    bool StuckGuardEnabled = true,
+    int StuckNoteAfter = 2,
+    int StuckStopAfter = 3,
+    int StuckUnchargedRoundsPerAttempt = 3)
 {
     private const string Prefix = "FLEET_HARNESS_";
 
@@ -44,6 +48,7 @@ internal sealed record HarnessOptions(
         bool Flag(string name, bool fallback) => bool.TryParse(setting(Prefix + name), out bool value) ? value : fallback;
         int Number(string name, int fallback, int minimum, int maximum) =>
             int.TryParse(setting(Prefix + name), NumberStyles.Integer, CultureInfo.InvariantCulture, out int value) && value >= minimum && value <= maximum ? value : fallback;
+        int stuckNoteAfter = Number("STUCK_NOTE_AFTER", defaults.StuckNoteAfter, 1, 10);
 
         return new HarnessOptions(
             Flag("ENABLE_STEP_SPLITTER", defaults.EnableStepSplitter),
@@ -71,7 +76,12 @@ internal sealed record HarnessOptions(
             Number("ARBITER_AFTER_ROUNDS", defaults.ArbiterAfterRounds, 1, 50),
             Flag("ENABLE_WEB_LOOKUP", defaults.EnableWebLookup),
             Number("WEB_LOOKUP_AFTER_FAILURES", defaults.WebLookupAfterFailures, 1, 50),
-            Flag("ENABLE_NEW_PRINT_CHECK", defaults.EnableNewPrintCheck));
+            Flag("ENABLE_NEW_PRINT_CHECK", defaults.EnableNewPrintCheck),
+            Flag("STUCK_GUARD_ENABLED", defaults.StuckGuardEnabled),
+            stuckNoteAfter,
+            // A stop below the note would never be reached after it: it is raised to the note's setting.
+            Math.Max(stuckNoteAfter, Number("STUCK_STOP_AFTER", defaults.StuckStopAfter, 2, 20)),
+            Number("STUCK_UNCHARGED_ROUNDS_PER_ATTEMPT", defaults.StuckUnchargedRoundsPerAttempt, 0, 10));
     }
 
     /// <summary>One line for the run log: every option and its value.</summary>
@@ -88,6 +98,8 @@ internal sealed record HarnessOptions(
             (nameof(StructuredCallTemperature), StructuredCallTemperature.ToString(CultureInfo.InvariantCulture)),
             (nameof(UntouchedSendBacks), UntouchedSendBacks), (nameof(ArbiterAfterRounds), ArbiterAfterRounds),
             (nameof(EnableWebLookup), EnableWebLookup), (nameof(WebLookupAfterFailures), WebLookupAfterFailures),
-            (nameof(EnableNewPrintCheck), EnableNewPrintCheck)
+            (nameof(EnableNewPrintCheck), EnableNewPrintCheck),
+            (nameof(StuckGuardEnabled), StuckGuardEnabled), (nameof(StuckNoteAfter), StuckNoteAfter), (nameof(StuckStopAfter), StuckStopAfter),
+            (nameof(StuckUnchargedRoundsPerAttempt), StuckUnchargedRoundsPerAttempt)
         }.Select(option => $"{option.Name}={(option.Value is bool flag ? (flag ? "on" : "off") : option.Value)}"));
 }

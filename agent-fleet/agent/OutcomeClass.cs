@@ -86,6 +86,13 @@ internal static partial class OutcomeClassifier
         return OutcomeClass.OtherError;
     }
 
+    /// <summary>
+    /// The class of a command's result as the runner reports it: <see cref="Of"/>, where a result that starts with the runner's own
+    /// message for a command it killed at the time limit counts as timed out too (a hub command comes back as that text, not as a flag).
+    /// </summary>
+    internal static OutcomeClass OfRunnerResult(int? exitCode, bool timedOut, string output) =>
+        Of(exitCode, timedOut || (output.TrimStart().StartsWith("Error:", StringComparison.OrdinalIgnoreCase) && CheckDefects.IsTimeout(output)), output);
+
     /// <summary>Whether the class is an infrastructure outcome (a time limit, a crash, a rejected cleanup or an open handle), not a result of the work.</summary>
     internal static bool IsInfra(OutcomeClass outcome) =>
         outcome is OutcomeClass.TimeLimit or OutcomeClass.Crash or OutcomeClass.CleanupRejected or OutcomeClass.OpenHandle;
@@ -104,6 +111,9 @@ internal static partial class OutcomeClassifier
         _ => throw new ArgumentOutOfRangeException(nameof(outcome), outcome, "Not a known outcome class.")
     };
 
+    /// <summary>The family <see cref="CommandFamily"/> gives a test runner's command.</summary>
+    internal const string TestRunFamily = "test-run";
+
     /// <summary>The family of a shell command: "test-run" for a test runner, "build" for a build tool, otherwise "other". Case-insensitive.</summary>
     internal static string CommandFamily(string? command)
     {
@@ -114,7 +124,7 @@ internal static partial class OutcomeClassifier
 
         if (TestRunners.Any(runner => command.Contains(runner, StringComparison.OrdinalIgnoreCase)))
         {
-            return "test-run";
+            return TestRunFamily;
         }
 
         return BuildTool().IsMatch(command) ? "build" : "other";
