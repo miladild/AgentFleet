@@ -1717,6 +1717,10 @@ internal sealed partial class PlanRunner
                 {
                     lastFailure = $"{lastFailure}\n\n{typecheckNote}";
                 }
+                if (!result.Done && FailureHints.For(result.Output ?? result.Message) is { } failureHint)
+                {
+                    lastFailure = $"{lastFailure}\n\n{failureHint}";
+                }
 
                 if (EnvironmentBlockReason(lastFailure) is { } environmentReason)
                 {
