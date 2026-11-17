@@ -285,6 +285,11 @@ internal sealed class FleetFunctionInvoker(
             if (testRun is { } started)
             {
                 LeftoverRemoval removal = await planTools.RemoveTestRunLeftoversAsync(started.Folder, started.Before, started.Planned, cancellationToken);
+                if (removal.Skipped is { } skippedReason)
+                {
+                    toolLoopLogger.LogWarning("A worker's test run left files that were not removed: {Reason}", skippedReason);
+                }
+
                 if (removal.Removed.Count > 0)
                 {
                     result = $"{result}\n\n[HARNESS] The test run created files the plan does not name, and they were removed: " +

@@ -158,6 +158,8 @@ public sealed class PlanRunLeftoversTests : PlanTestBase
         Assert.True(filesKept, "without a listing from git the files are left for the worker to delete");
         Assert.Single(after.Events!, runEvent => runEvent.Kind == UnlistedKind);
         Assert.DoesNotContain(after.Events!, runEvent => runEvent.Kind == RunEventKind.LeftoversRemoved);
+        // A folder that is not a git repository has no listing by nature, so the skip is not written to the run log.
+        Assert.DoesNotContain(after.Events!, runEvent => runEvent.Kind == RunEventKind.LeftoversSkipped);
     }
 
     [Fact]

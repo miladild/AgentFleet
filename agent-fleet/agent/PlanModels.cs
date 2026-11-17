@@ -211,6 +211,7 @@ internal static class RunEventKind
     public const string Stopped = "stopped";
     public const string FilesChanged = "files-changed";
     public const string LeftoversRemoved = "leftovers-removed";
+    public const string LeftoversSkipped = "leftovers-skipped";
     public const string ParallelStarted = "parallel-started";
     public const string ParallelFallback = "parallel-fallback";
     public const string Waiting = "waiting";

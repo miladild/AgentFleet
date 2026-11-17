@@ -127,6 +127,9 @@ public sealed class OutcomeClassifierTests
     [InlineData("NPM RUN TEST:unit")]
     [InlineData("npx vitest run")]
     [InlineData("pytest -q tests")]
+    [InlineData("node --experimental-strip-types --test test/a.test.ts")]
+    [InlineData("node --import ./setup.mjs --test test/a.test.mjs")]
+    [InlineData("cd app && node --import tsx --test-timeout=30000 --test test/a.test.ts")]
     public void Test_runner_commands_are_test_runs(string command)
     {
         Assert.Equal("test-run", OutcomeClassifier.CommandFamily(command));

@@ -98,6 +98,15 @@ internal sealed partial class PlanRunner
         LeftoverRemoval removal = await _tools.RemoveTestRunLeftoversAsync(plan.WorkingDirectory, before, FilesToCreate(plan, step) ?? [], cancellationToken);
         if (removal.Removed.Count == 0)
         {
+            // A folder that is not a git repository has no listing by nature, and saying so on every run would be noise.
+            if (removal.Skipped is { } reason && (before is not null || Directory.Exists(Path.Combine(plan.WorkingDirectory, ".git"))))
+            {
+                // Said in the run log, so files left in the project can be explained afterwards.
+                _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.LeftoversSkipped, tier, node: model.ModelNode ?? model.Machine,
+                    detail: $"The runner did not remove any files a test run created: {reason}", modelNode: model.ModelNode, workspaceNode: model.Machine,
+                    rung: rung, round: round);
+            }
+
             return;
         }
 

@@ -122,7 +122,8 @@ internal static partial class OutcomeClassifier
             return "other";
         }
 
-        if (TestRunners.Any(runner => command.Contains(runner, StringComparison.OrdinalIgnoreCase)))
+        // node's own runner with any flags before --test (an import, a type-stripping flag) is a test run as well as the fixed spellings.
+        if (TestRunners.Any(runner => command.Contains(runner, StringComparison.OrdinalIgnoreCase)) || OpenHandlePreload.IsNodeTestRun(command))
         {
             return TestRunFamily;
         }
