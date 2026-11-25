@@ -32,8 +32,11 @@ internal sealed partial class PlanRunner
     /// <summary>Whether a command's output says its program could not be found, as opposed to a check that ran and failed.</summary>
     internal static bool CommandMissing(string output) => MissingCommand().IsMatch(output);
 
-    /// <summary>A failing whole-project check: the command, its trimmed output and the failing item names the output printed.</summary>
-    private sealed record FinalCheckFailure(string Command, string Output, IReadOnlyList<string> FailingItems);
+    /// <summary>
+    /// A failing whole-project check: the command, its trimmed output, the failing item names the output printed, and the files this
+    /// step lists that the output names (relative paths).
+    /// </summary>
+    private sealed record FinalCheckFailure(string Command, string Output, IReadOnlyList<string> FailingItems, IReadOnlyList<string> OwnFiles);
 
     // A path-like token with a source or test extension, as a check prints it (for example "test/old.test.ts:12:3").
     [GeneratedRegex(@"(?<![\w./\\-])[\w./\\-]+\.(?:cjs|cs|cts|c|cpp|go|h|java|jsx|js|kt|mjs|mts|php|py|rb|rs|tsx|ts)(?![\w-])", RegexOptions.IgnoreCase)]
@@ -44,7 +47,7 @@ internal sealed partial class PlanRunner
     /// failure, or null when the check passed or did not run. It does not run when the rule does not apply: the tests step of
     /// test-first mode, the last step itself, a plan of one step, a last step without a usable Verify, a last step whose Verify
     /// is this step's, and a plan without a project folder. A failure that names a file a later step lists is expected until that
-    /// step is written, so it is not a failure here. A command that cannot run (a timeout, a worker that cannot be reached) is
+    /// step is written, so it is not a failure here, unless it also names a file this step lists: that one is this step's own. A command that cannot run (a timeout, a worker that cannot be reached) is
     /// logged and treated as a pass: the check must never fail a step by itself. A command whose program is missing on the worker
     /// (measured: "tsc: not found" on one worker, so a step that broke an old test was taken and the plan blocked at its last step)
     /// runs again on the hub's copy, which holds the step's changes; missing there too, it is logged and treated as a pass.
@@ -80,12 +83,18 @@ internal sealed partial class PlanRunner
                 return null;
             }
 
-            if (passed || NamesLaterStepFile(plan, step, output))
+            if (passed)
             {
                 return null;
             }
 
-            return new FinalCheckFailure(command, output, PlanFailure.FailureSignature(output).Items);
+            (IReadOnlyList<string> ownFiles, bool namesLaterFile) = NamedFiles(plan, step, output);
+            if (ownFiles.Count == 0 && namesLaterFile)
+            {
+                return null;
+            }
+
+            return new FinalCheckFailure(command, output, PlanFailure.FailureSignature(output).Items, ownFiles);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -107,19 +116,20 @@ internal sealed partial class PlanRunner
     }
 
     /// <summary>
-    /// Whether the failure output names a source or test file that a step after this one lists in its Files. The names are
-    /// compared with the declared paths the same way the runner compares any name with a declared path.
+    /// The source and test files a failure output names, sorted into the files this step lists (Own, relative paths) and whether it
+    /// also names a file only a step after this one lists. The names are compared with the declared paths the same way the runner
+    /// compares any name with a declared path. A file both this step and a later step list is this step's: the step wrote it, so a
+    /// failure in it is the step's to fix now (measured: a step was accepted with a type error standing in its own file because
+    /// a later step listed the file too, and the error hid the real fault of the next step).
     /// </summary>
-    private static bool NamesLaterStepFile(PlanRecord plan, PlanStep step, string output)
+    private static (IReadOnlyList<string> Own, bool NamesLater) NamedFiles(PlanRecord plan, PlanStep step, string output)
     {
+        string[] own = FleetPlanContext.DeclaredPaths(plan, step).ToArray();
         string[] later = plan.Steps.Where(candidate => candidate.Id > step.Id)
             .SelectMany(candidate => FleetPlanContext.DeclaredPaths(plan, candidate))
             .ToArray();
-        if (later.Length == 0)
-        {
-            return false;
-        }
-
+        var ownNamed = new List<string>();
+        bool namesLater = false;
         foreach (Match token in SourcePathToken().Matches(output))
         {
             string full;
@@ -132,13 +142,21 @@ internal sealed partial class PlanRunner
                 continue;
             }
 
-            if (later.Any(declared => FleetPlanContext.Names(declared, full)))
+            if (own.Any(declared => FleetPlanContext.Names(declared, full)))
             {
-                return true;
+                string relative = Path.GetRelativePath(plan.WorkingDirectory!, full).Replace('\\', '/');
+                if (!ownNamed.Contains(relative, StringComparer.OrdinalIgnoreCase))
+                {
+                    ownNamed.Add(relative);
+                }
+            }
+            else if (later.Any(declared => FleetPlanContext.Names(declared, full)))
+            {
+                namesLater = true;
             }
         }
 
-        return false;
+        return (ownNamed, namesLater);
     }
 
     /// <summary>Whether the extra round for a failing whole-project check already ran in this attempt.</summary>
@@ -170,8 +188,13 @@ internal sealed partial class PlanRunner
         return new StepCompletion(false, note, note, result.Restored);
     }
 
-    private static string FinalCheckRoundMessage(FinalCheckFailure failure) =>
-        $"The check for this step passed, but the project's final check (`{failure.Command}`) fails now. It runs the whole project, " +
-        "so a change in this step probably broke something that already worked. Fix what this step broke; do not change the tests " +
-        "that were passing before unless the step's text says to. Output:\n" + failure.Output;
+    private static string FinalCheckRoundMessage(FinalCheckFailure failure)
+    {
+        string own = failure.OwnFiles.Count == 0
+            ? string.Empty
+            : $" The output names {string.Join(", ", failure.OwnFiles.Select(file => $"`{file}`"))}, which this step lists, so the fault is in this step's own work: fix it there.";
+        return $"The check for this step passed, but the project's final check (`{failure.Command}`) fails now. It runs the whole project, " +
+               $"so a change in this step probably broke something that already worked.{own} Fix what this step broke; do not change the tests " +
+               "that were passing before unless the step's text says to. Output:\n" + failure.Output;
+    }
 }

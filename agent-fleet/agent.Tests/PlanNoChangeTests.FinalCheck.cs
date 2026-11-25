@@ -27,15 +27,18 @@ public sealed partial class PlanNoChangeTests
     }
 
     // Step 1 edits a.txt; step 2 edits b.txt, which may break the whole project; the last step edits c.txt and b.txt.
-    private PlanRecord ThreeStepPlan(string[] lastFiles) =>
+    private PlanRecord ThreeStepPlan(string[] lastFiles) => ThreeStepPlan(["b.txt"], lastFiles);
+
+    // The same, with the files the middle step lists named too (to make a file that the middle and the last step both list).
+    private PlanRecord ThreeStepPlan(string[] middleFiles, string[] lastFiles) =>
         Store.Approve(Store.Create("Three-step plan", "goal", ProjectDirectory, ["a"], ["q?"], ["r"], null, null,
             [
                 Listed("setup", "check1", "a.txt"),
-                Listed("break", "check2", "b.txt"),
+                Listed("break", "check2", middleFiles),
                 Listed("last", FinalCheckCommand, lastFiles)
             ]).Id)!;
 
-    private FakeStepAgent ThreeStepAgent(string breakText, string repairText, bool lastStepEditsSource = false) => new((prompt, _, _) =>
+    private FakeStepAgent ThreeStepAgent(string breakText, string repairText, bool lastStepEditsSource = false, params string[] middleStepAlsoWrites) => new((prompt, _, _) =>
     {
         if (prompt.Contains("project's final check", StringComparison.Ordinal))
         {
@@ -48,6 +51,10 @@ public sealed partial class PlanNoChangeTests
         else if (prompt.Contains("This step (2 of 3)", StringComparison.Ordinal))
         {
             WriteProjectFile("b.txt", breakText);
+            foreach (string file in middleStepAlsoWrites)
+            {
+                WriteProjectFile(file, "middle step");
+            }
         }
         else
         {
@@ -180,6 +187,61 @@ public sealed partial class PlanNoChangeTests
         Assert.Equal(0, FinalCheckRounds(plan.Id));
         Assert.Single(agent.Sessions[1].Messages);
         Assert.Equal(3, commands.Count(command => command == FinalCheckCommand));
+    }
+
+    // Measured: a step's own file failed the project's type check, a later step listed the same file, and the failure was waved
+    // through as "expected until that step is written". The step was accepted with the error standing.
+    [Fact]
+    public async Task A_failure_that_names_a_file_this_step_lists_gives_a_round_even_when_a_later_step_lists_it_too()
+    {
+        SeedFiles("a.txt", "b.txt", "c.txt");
+        PlanRecord plan = ThreeStepPlan(["b.txt", "src/limits.ts"], ["c.txt", "src/limits.ts"]);
+        var commands = new List<string>();
+        FakeStepAgent agent = ThreeStepAgent(breakText: "broken", repairText: "fixed", lastStepEditsSource: true, "src/limits.ts");
+        const string namesSharedFile = "Exit code: 1\n--- stdout ---\nsrc/limits.ts(4,71): error TS2307: Cannot find module './types.js'\nFAILED rejects zero";
+
+        await RepairRunner(agent, ThreeStepVerify(commands, namesSharedFile)).RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.Equal(1, FinalCheckRounds(plan.Id));
+        string extra = agent.Sessions[1].Messages[1].Text;
+        Assert.Contains("the project's final check (`final`) fails now", extra, StringComparison.Ordinal);
+        Assert.Contains("`src/limits.ts`", extra, StringComparison.Ordinal);
+        Assert.Contains("which this step lists", extra, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_failure_that_names_a_later_steps_file_and_one_this_step_lists_gives_a_round()
+    {
+        SeedFiles("a.txt", "b.txt", "c.txt");
+        PlanRecord plan = ThreeStepPlan(["b.txt", "src/own.ts"], ["c.txt", "src/limits.ts"]);
+        var commands = new List<string>();
+        FakeStepAgent agent = ThreeStepAgent(breakText: "broken", repairText: "fixed", lastStepEditsSource: true, "src/own.ts");
+        const string namesBoth = "Exit code: 1\n--- stdout ---\nFAIL src/limits.ts\nFAIL src/own.ts\nFAILED rejects zero";
+
+        await RepairRunner(agent, ThreeStepVerify(commands, namesBoth)).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+        Assert.Equal(1, FinalCheckRounds(plan.Id));
+        string extra = agent.Sessions[1].Messages[1].Text;
+        Assert.Contains("`src/own.ts`", extra, StringComparison.Ordinal);
+        Assert.DoesNotContain("`src/limits.ts`", extra, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_failure_in_a_file_only_a_later_step_lists_is_still_expected_when_this_step_lists_other_source_files()
+    {
+        SeedFiles("a.txt", "b.txt", "c.txt");
+        PlanRecord plan = ThreeStepPlan(["b.txt", "src/own.ts"], ["c.txt", "src/limits.ts"]);
+        var commands = new List<string>();
+        FakeStepAgent agent = ThreeStepAgent(breakText: "broken", repairText: "fixed", lastStepEditsSource: true, "src/own.ts");
+        const string namesLaterFileOnly = "Exit code: 1\n--- stdout ---\nFAIL src/limits.ts\nFAILED rejects zero";
+
+        await RepairRunner(agent, ThreeStepVerify(commands, namesLaterFileOnly)).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
+        Assert.Equal(0, FinalCheckRounds(plan.Id));
     }
 
     [Fact]
