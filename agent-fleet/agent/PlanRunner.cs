@@ -1130,8 +1130,11 @@ internal sealed partial class PlanRunner
         int ownTestRounds = 0;
         // A ruling is given once per step, so its note leads every later failure of the step, not only the next one: measured, a
         // ruler named the exact fix, the next answer made no tool call, and the seven rounds after it never saw the ruling again.
-        // A code-wrong ruling from before the runner's own retry of this step is kept (see CarriedRulingNote).
-        string? rulingNote = CarriedRulingNote(plan.Id, step.Id);
+        // A code-wrong ruling from before the runner's own retry of this step is kept (see CarriedRulingOf), for as long as the check
+        // fails with the error it was made for (see RulingFailure).
+        CarriedRuling? carriedRuling = CarriedRulingOf(plan.Id, step.Id);
+        string? rulingNote = carriedRuling?.Note;
+        string? rulingLine = carriedRuling?.FailureLine;
         if (rulingNote is not null && !string.IsNullOrWhiteSpace(lastFailure)) lastFailure = $"{rulingNote}\n\n{lastFailure}";
         TimeSpan worked = TimeSpan.FromSeconds(earlierEvents
             .Where(runEvent => runEvent.Kind == RunEventKind.RoundClassified).Sum(runEvent => runEvent.DurationSeconds ?? 0));
@@ -1848,7 +1851,21 @@ internal sealed partial class PlanRunner
                     best = null;
                 }
 
-                rulingNote = ruling.Note ?? rulingNote;
+                string checkTextNow = result.Output ?? result.Message;
+                if (ruling.Note is not null)
+                {
+                    rulingNote = ruling.Note;
+                    rulingLine = RulingFailure.Line(checkTextNow);
+                }
+                else if (rulingNote is not null && !RulingFailure.StillApplies(rulingLine, checkTextNow))
+                {
+                    // The failure the ruling was made for is gone and the check fails with another error: the note would send the
+                    // worker after something that is no longer there (measured, 13 rounds). The ruling is not given again.
+                    RecordRulingDropped(plan, step, attempt, tier, model, rung, round, rulingLine, RulingFailure.Line(checkTextNow));
+                    rulingNote = null;
+                    rulingLine = null;
+                }
+
                 if (rulingNote is not null) lastFailure = $"{rulingNote}\n\n{lastFailure}";
 
                 // The same infrastructure outcome again and again gets a note in the next feedback; on the third the conversation ends and

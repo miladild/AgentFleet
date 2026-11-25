@@ -466,7 +466,11 @@ not that test. The ruler answers one of two ways:
   gets its rounds back once. A correction that is the same as the old file is refused, and so is one written over a frozen
   file that changed while the ruler was working.
 - `CODE-WRONG`, with a paragraph saying what the code must do to satisfy the test. The paragraph goes into the next
-  round's feedback. The test stands, and the step gets no second ruling.
+  round's feedback, and into the feedback of every later round (also after the runner's own retry of the step) for as
+  long as the check fails with the error line it failed with when the ruling was made. When the check fails with a
+  different error line, the paragraph describes something that is no longer there, so it is dropped and a `test-ruling`
+  event of class `Dropped` says so. The test stands, and the step gets no second ruling while the paragraph is still
+  being given.
 
 A ruler that cannot be reached, a ruling that times out, a reply with no clear verdict, and a correction the guard
 refuses all change nothing, and the repair ladder goes on as usual. Every ruling is recorded in the run log as a

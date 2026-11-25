@@ -113,7 +113,7 @@ internal sealed partial class PlanRunner
             case TestRulingKind.CodeWrong:
                 string note = $"An independent model read the disputed test and found it right: {verdict.Paragraph}";
                 RecordRuling(plan, step, attempt, tier, model, rung, round, CodeWrongClass,
-                    $"The ruler ({ruler}) found the test right: {Summarize(verdict.Paragraph)}{RulingNoteMarker}{note}", ruler);
+                    $"The ruler ({ruler}) found the test right: {Summarize(verdict.Paragraph)}{RulingFailureText(checkOutput)}{RulingNoteMarker}{note}", ruler);
                 return new TestRulingOutcome(note, false);
             case TestRulingKind.TestWrong:
                 return ApplyCorrection(latest, step, attempt, tier, model, rung, round, verdict, frozen, items, ruler);

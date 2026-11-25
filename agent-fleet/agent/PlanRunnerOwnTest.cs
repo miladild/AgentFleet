@@ -134,7 +134,7 @@ internal sealed partial class PlanRunner
             case TestRulingKind.CodeWrong:
                 string note = $"An independent model read the failing test this step wrote and found it right, so the code must change: {verdict.Paragraph}";
                 RecordRuling(plan, step, attempt, tier, model, rung, round, CodeWrongClass,
-                    $"{why} The ruler ({ruler}) found the test right: {Summarize(verdict.Paragraph)}{RulingNoteMarker}{note}", ruler);
+                    $"{why} The ruler ({ruler}) found the test right: {Summarize(verdict.Paragraph)}{RulingFailureText(checkOutput)}{RulingNoteMarker}{note}", ruler);
                 return new TestRulingOutcome(note, false);
             case TestRulingKind.TestWrong:
                 return await ApplyOwnTestCorrectionAsync(latest, step, attempt, tier, model, rung, round, verdict, holding, items, ruler, why,
