@@ -75,6 +75,7 @@ fallback, found 2."
 | `ponytail` | `off`, `lite`, `full` or `ultra`: asks this machine's model to make small, correct coding changes and avoid speculative work. Missing means `off`. |
 | `visionMode` | Vision machines only. `ondemand` (the default when missing): the health check only asks the machine for its model list, so the vision model loads when an image arrives and leaves after Ollama's own idle time. `off`: nothing contacts the machine, so it takes no graphics memory; images get a note that says it is turned off. Its address and model are kept. `always`: checked like a text machine, so the model stays loaded. Before this setting existed a vision machine stayed loaded all the time, which is `always`; a vision machine without the setting now follows `ondemand`. Turn a machine off or on under Machines, or with `Set-FleetVision.ps1`. A machine that is turned off does not make the fleet's status degraded. |
 | `thinking` | `off` (default) or `model`. A model that thinks before it answers is told not to (`off`); `model` leaves it to the model. A small model can spend its whole answer (4096 tokens) on thinking and end the turn with no tool call and no text: measured on a 9B worker, one turn in three. Choose `model` only for a machine whose model does better thinking. |
+| `ollamaUpdate` | Optional. How the Setup tab may update Ollama on this machine. See [Updating Ollama](#updating-ollama). Missing means it cannot, and the Setup tab shows the manual steps instead. |
 | `workspace` | Optional. Where approved plan steps run their file tools and checks on this machine, over SSH. See [Worker workspace](#worker-workspace). Not allowed on the hub or a vision node. |
 
 At least one text node (not vision) is required.
@@ -111,6 +112,66 @@ Set it in **Config > Machines**, or by hand:
 A workspace with any of these missing or invalid is rejected when the configuration is saved or loaded.
 
 A plan step whose tier has no worker with a workspace uses the nearest tier that has one: the tier above first, then the tier below. The run log says which machine was used and why, and the step's tier is unchanged. The hub never holds a workspace, so a step asked for the heavy tier on a fleet whose only heavy machine is the hub runs on a standard or light worker that has one.
+
+#### Updating Ollama
+
+The Setup tab of the Config panel has an **Ollama versions** panel. It lists each distinct Ollama address (machines that
+share an address are listed once) with whether it answers and the version it reports (`GET /api/version` on that machine).
+
+- **Check for updates** is the only thing that contacts GitHub. It asks `https://api.github.com/repos/ollama/ollama/releases/latest`
+  once, with a generic user agent and no credentials, reads the tag, the publish date and the SHA-256 GitHub lists for each
+  file, and keeps the answer in memory. Drafts and pre-releases are ignored. Nothing contacts GitHub at start-up, on a timer,
+  or when the page opens.
+- **Update** (per machine) and **Update all** are enabled only when the release has been checked, the machine answers, its
+  version is older than the release (never a downgrade, never a reinstall of the same version), an update method is set for
+  it, and no plan is running or approved. A confirmation says that Ollama is restarted on the machine and model use is
+  interrupted. Machines are updated one at a time, in the background; a second update cannot start while one runs. Each start
+  and finish is written to the log with the machine, the old version and the new one.
+- A machine with no update method shows the verified download address, its SHA-256, and the silent install command for its
+  platform, to run by hand.
+
+The download address and file name are built by the backend from the checked release (the version must be three plain
+numbers, the file name must be on a fixed list), never from the request. Nothing is run before the file's SHA-256 equals the
+one in the release; a release that lists no digest for the file is refused.
+
+```json
+"ollamaUpdate": {
+  "method": "ssh-linux",
+  "host": "192.0.2.21",
+  "port": 22,
+  "user": "fleet-updater",
+  "keyPath": "C:\\Users\\me\\.ssh\\fleet-updater",
+  "hostKey": "SHA256:..."
+}
+```
+
+| `method` | What it does |
+|---|---|
+| `none` (default) | The panel only shows the version and the manual steps. |
+| `local` | The machine the fleet runs on, **Windows only**. Downloads `OllamaSetup.exe` into a new temporary folder, checks its SHA-256, stops the `ollama` and `ollama app` processes, runs the installer silently (`/SILENT /NORESTART`), then waits up to five minutes for the machine to report the new version, starting `ollama serve` hidden if nothing answers. The temporary folder is deleted afterwards. It is not offered when the fleet runs as a Windows service, because the installer would put Ollama in the service account's profile; run the fleet as a scheduled task, or update by hand. |
+| `ssh-linux` | A Linux machine with systemd, over SSH. Needs `host`, `user`, `keyPath` and a pinned `hostKey` (`SHA256:...`, a machine with another key is refused). |
+
+Windows machines other than the fleet's own, and macOS, are not updated from the panel; they get the manual steps.
+
+**The `ssh-linux` account.** It is not the worker workspace account: that account is deliberately unprivileged and is refused
+if it has administrator rights. Make a separate account for updates, key login only, with passwordless sudo for exactly these
+commands and nothing else (replace `fleet-updater` and the home folder; the file is always `~/.ollama-update/ollama-linux-amd64.tar.zst`):
+
+```
+fleet-updater ALL=(root) NOPASSWD: /usr/bin/true, \
+  /usr/bin/systemctl stop ollama, /usr/bin/systemctl start ollama, \
+  /usr/bin/rm -rf /usr/lib/ollama, \
+  /usr/bin/tar -I zstd -xf /home/fleet-updater/.ollama-update/ollama-linux-amd64.tar.zst -C /usr
+```
+
+The machine needs `curl` and `zstd`. The fleet first checks `sudo -n true`, `curl` and `zstd`, then downloads the file with
+`curl -fsSL` into `~/.ollama-update` (mode 700), checks it with `sha256sum -c`, runs `sudo systemctl stop ollama`,
+`sudo rm -rf /usr/lib/ollama`, `sudo tar -I zstd -xf <file> -C /usr` and `sudo systemctl start ollama` (each run as `sudo -n`,
+so a missing sudo rule fails at once instead of waiting for a password), waits for the new version, and removes the file. Systemd override files are left alone. If a step fails after Ollama was stopped, the fleet
+tries to start it again, and the job says exactly what failed. Run `ssh-keyscan` and `ssh-keygen -lf -` against the machine,
+on a network you trust, to read the host key fingerprint to pin.
+
+The block is kept when the Config panel saves the machines. A hand edit applies at start-up.
 
 ### `tools`
 
@@ -403,6 +464,9 @@ The backend answers these on port 8000. They are what the web UI and the VS Code
 | `PATCH /api/fleet-config/nodes/{name}/context` | Change only one node's `contextLength` with `{ "contextLength": 24576, "ifVersion": "..." }`; a stale version returns `409`. A successful save creates the normal timestamped config backup. |
 | `GET /api/setup/hub` | This computer's name and private addresses (for the worker setup commands) |
 | `POST /api/setup/pull` `{url, model}`, `GET /api/setup/pulls`, `POST /api/setup/pulls/{id}/cancel` | Download a model onto a machine in the background, and follow or cancel it |
+| `GET /api/setup/ollama-versions` | Each distinct Ollama address: its machines, whether it answers, its version, whether it may be updated now and if not why, and the manual steps. Contacts only the fleet's own machines |
+| `POST /api/setup/ollama-versions/check` | The one call that contacts GitHub: looks up the newest stable Ollama release and keeps it in memory |
+| `POST /api/setup/ollama-update` `{url}` or `{all: true}`, `GET /api/setup/ollama-updates` | Update one machine, or every machine that may be updated, one at a time in the background (`202`; `409` when nothing was checked, a plan is running or approved, an update is already running, or the machine may not be updated), and follow the jobs |
 | `POST /api/setup/start-ollama` | Start the Ollama app on this computer (not when the backend runs as a Windows service) |
 | `GET`, `PUT /api/setup/sandbox` | The sandbox settings; a PUT applies them at once |
 | `POST /api/setup/sandbox/key`, `/test`, `/install-key`, `/prepare` | Make the fleet's SSH key, test a sandbox setting, add the key to a machine with its password (used once, never stored), download the container images |

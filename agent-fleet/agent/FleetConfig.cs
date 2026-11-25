@@ -45,6 +45,9 @@ internal static class FleetTiers
 /// spent its whole 4096-token answer on thinking and ended with no tool call and no text, minutes lost on a slow
 /// machine. "model": the model's own behaviour, for a machine whose model is better thinking.
 /// </param>
+/// <param name="OllamaUpdate">
+/// Optional: how the web UI may update Ollama on this machine. Missing means it cannot, and the UI shows the manual steps.
+/// </param>
 internal sealed record FleetNodeConfig(
     string Name,
     string Url,
@@ -59,7 +62,77 @@ internal sealed record FleetNodeConfig(
     string? Ponytail = null,
     FleetWorkerWorkspaceConfig? Workspace = null,
     string? Thinking = null,
-    string? VisionMode = null);
+    string? VisionMode = null,
+    FleetOllamaUpdateConfig? OllamaUpdate = null);
+
+/// <summary>
+/// How Ollama is updated on one machine from the web UI (see OllamaUpdateService). "none" (the default): not at all.
+/// "local": the machine this backend runs on, Windows only. "ssh-linux": a Linux machine reached over SSH with a
+/// dedicated account that may run exactly the update commands through sudo. This account is never the worker
+/// workspace account, which is deliberately unprivileged.
+/// </summary>
+/// <param name="Method">none, local or ssh-linux.</param>
+/// <param name="HostKey">ssh-linux: the machine's pinned host key fingerprint ("SHA256:..."). Required, so a different machine answering is refused.</param>
+internal sealed record FleetOllamaUpdateConfig(
+    string? Method = null,
+    string? Host = null,
+    int Port = 22,
+    string? User = null,
+    string? KeyPath = null,
+    string? HostKey = null)
+{
+    public const string None = "none";
+    public const string Local = "local";
+    public const string SshLinux = "ssh-linux";
+
+    private static readonly System.Text.RegularExpressions.Regex UserPattern = new("^[a-z_][a-z0-9_-]{0,31}$", System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly System.Text.RegularExpressions.Regex HostKeyPattern = new("^SHA256:[A-Za-z0-9+/]{20,64}={0,2}$", System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly System.Text.RegularExpressions.Regex HostPattern = new("^[A-Za-z0-9][A-Za-z0-9.:_-]{0,252}$", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>The method with its case and spacing settled; a missing one is "none".</summary>
+    public string EffectiveMethod => string.IsNullOrWhiteSpace(Method) ? None : Method.Trim().ToLowerInvariant();
+
+    /// <summary>True when the web UI may run an update for this machine.</summary>
+    public bool CanUpdate => EffectiveMethod is Local or SshLinux;
+
+    public FleetOllamaUpdateConfig Normalized() => this with
+    {
+        Method = EffectiveMethod,
+        Host = Host?.Trim(),
+        User = User?.Trim(),
+        KeyPath = KeyPath?.Trim(),
+        HostKey = HostKey?.Trim()
+    };
+
+    /// <summary>What is wrong with the block, in words for the person editing the file, or null when it is usable.</summary>
+    public string? Problem(string nodeName)
+    {
+        switch (EffectiveMethod)
+        {
+            case None:
+            case Local:
+                return null;
+            case SshLinux:
+                if (string.IsNullOrWhiteSpace(Host) || !HostPattern.IsMatch(Host.Trim()) ||
+                    string.IsNullOrWhiteSpace(User) || string.IsNullOrWhiteSpace(KeyPath) ||
+                    string.IsNullOrWhiteSpace(HostKey) || Port is < 1 or > 65535)
+                {
+                    return $"Node '{nodeName}' ollamaUpdate (ssh-linux) needs a host, a user, a key path, a pinned SHA256 host key and a valid port.";
+                }
+
+                if (!UserPattern.IsMatch(User.Trim()) || string.Equals(User.Trim(), "root", StringComparison.Ordinal))
+                {
+                    return $"Node '{nodeName}' ollamaUpdate user must be a dedicated account (not root), 1 to 32 lowercase letters, digits, underscores or hyphens.";
+                }
+
+                return HostKeyPattern.IsMatch(HostKey.Trim())
+                    ? null
+                    : $"Node '{nodeName}' ollamaUpdate hostKey must be the machine's SHA256 fingerprint, for example SHA256:abc...";
+            default:
+                return $"Node '{nodeName}' has ollamaUpdate method '{Method}': choose none, local or ssh-linux.";
+        }
+    }
+}
 
 /// <summary>SSH workspace for approved plan work. Configure only a dedicated, non-admin worker account.</summary>
 internal sealed record FleetWorkerWorkspaceConfig(

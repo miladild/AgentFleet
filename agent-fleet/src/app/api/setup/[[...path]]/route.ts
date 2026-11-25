@@ -1,11 +1,12 @@
+import { setupPathAllowed } from "../setupPaths";
+
 const BACKEND_URL = (process.env.AGENT_URL || "http://localhost:8000/").replace(/\/$/, "");
 
-// The setup checklist and the fixes it can make: model downloads, starting Ollama, and the sandbox settings.
-const ALLOWED = /^(|hub|pull|pulls|pulls\/[0-9a-f]{16}\/cancel|start-ollama|sandbox|sandbox\/(key|test|install-key|prepare))$/;
+// The setup checklist and the fixes it can make: model downloads, starting Ollama, Ollama updates, and the sandbox settings.
 
 async function forward(request: Request, path: string[] | undefined, method: "GET" | "POST" | "PUT") {
   const joined = (path ?? []).join("/");
-  if (!ALLOWED.test(joined)) return new Response("Not found", { status: 404 });
+  if (!setupPathAllowed(joined)) return new Response("Not found", { status: 404 });
   const search = new URL(request.url).search;
   try {
     // Nothing here is logged: the key install request carries a password for one SSH sign-in.

@@ -35,6 +35,8 @@ type FleetConfigNode = {
   visionMode?: string | null;
   workspace?: WorkerWorkspaceConfig | null;
   clearWorkspace?: boolean;
+  /** How the Setup tab may update Ollama on this machine. Edited in fleet.config.json; carried through a save unchanged. */
+  ollamaUpdate?: { method?: string | null; host?: string | null; port?: number; user?: string | null; keyPath?: string | null; hostKey?: string | null } | null;
 };
 
 type WorkerWorkspaceConfig = {

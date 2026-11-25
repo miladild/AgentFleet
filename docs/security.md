@@ -126,6 +126,10 @@ Practical limits:
 - **From your other apps** reads the MCP settings of VS Code, Claude Desktop, Claude Code, Cursor and Windsurf for the
   backend's account. Only those files, and only their MCP servers; secret values are never sent to the browser, but an
   imported entry with a secret written into it is copied into `fleet.config.json` as it is.
+- **Ollama updates** contact GitHub (`api.github.com`, and `github.com` for the download) only when you press Check for
+  updates and then confirm an Update. There is no timer and no start-up call. A download is run only after its SHA-256
+  equals the one in the release, over SSH only with a dedicated key-only account whose passwordless sudo covers exactly
+  the update commands (see [Updating Ollama](configuration.md#updating-ollama)). The calls are guarded like the rest of the API.
 - `web_search` and `web_fetch` send queries to DuckDuckGo and fetch pages you or the model choose in ordinary chat; they
   are unavailable to unattended plan steps. Switch them off in the Config panel for a fully offline fleet.
 

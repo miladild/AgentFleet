@@ -253,6 +253,28 @@ internal sealed class FleetConfigStore
         return normalized;
     }
 
+    /// <summary>
+    /// A machine as the web UI saved it, with what the UI does not send taken from the machine as it was saved before: a
+    /// block the form never shows (the worker workspace, the Ollama update account) must survive a save from the form.
+    /// </summary>
+    internal static FleetNodeConfig MergeNode(FleetConfigNodeUpdate node, FleetNodeConfig? previous) =>
+        new(
+            node.Name.Trim(),
+            node.Url.Trim(),
+            node.Model.Trim(),
+            node.Purpose,
+            node.Tier,
+            node.Vision,
+            node.Fallback,
+            node.ContextLength,
+            node.Api,
+            node.Caveman ?? previous?.Caveman,
+            node.Ponytail ?? previous?.Ponytail,
+            node.ClearWorkspace ? null : node.Workspace ?? previous?.Workspace,
+            node.Thinking ?? previous?.Thinking,
+            NodeVisionMode.Resolve(node.Vision, node.VisionMode, previous?.VisionMode),
+            node.ClearOllamaUpdate ? null : node.OllamaUpdate ?? previous?.OllamaUpdate);
+
     // The web_fetch entry is kept whole: its host lists are edited only through the file, never by a switch in the panel.
     internal static Dictionary<string, FleetToolConfig>? MergeToolSwitches(
         IReadOnlyDictionary<string, FleetToolConfig> current,
@@ -311,6 +333,7 @@ internal sealed class FleetConfigStore
                 Caveman = AgentStylePrompt.Normalize(node.Caveman),
                 Ponytail = AgentStylePrompt.Normalize(node.Ponytail),
                 Thinking = string.IsNullOrWhiteSpace(node.Thinking) ? null : node.Thinking.Trim().ToLowerInvariant(),
+                OllamaUpdate = node.OllamaUpdate?.Normalized(),
                 // A vision machine always has a mode (ondemand when none is given); a text machine keeps only what was written, so Validate can refuse it.
                 VisionMode = node.Vision
                     ? NodeVisionMode.Normalize(node.VisionMode)
@@ -458,6 +481,11 @@ internal sealed class FleetConfigStore
                 {
                     throw new InvalidOperationException($"Node '{node.Name}' has visionMode '{node.VisionMode}': choose {NodeVisionMode.Choices}.");
                 }
+            }
+
+            if (node.OllamaUpdate?.Problem(node.Name) is { } updateProblem)
+            {
+                throw new InvalidOperationException(updateProblem);
             }
 
             if (!AgentStylePrompt.IsValid(node.Ponytail))

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { CopyCommand, DownloadButton, type SetupCheck, type SetupReport, announceFleetChanged } from "./setupApi";
 import { formatSetupFitSummary, type FitLatestResult } from "./fitPresentation";
 import type { WeeklyProbeConfig } from "./weeklyPresentation";
+import { OllamaVersions } from "./OllamaVersions";
 import { WeeklyProbeSettings } from "./WeeklyProbeSettings";
 
 type NodeLite = { name: string; url: string; model: string; vision: boolean; fallback: boolean };
@@ -319,6 +320,8 @@ export function SetupSettings({
       <p className="text-[11px] text-neutral-600">
         The same checks run from a terminal with scripts/Test-Fleet.ps1. More in docs/getting-started.md and docs/troubleshooting.md.
       </p>
+
+      <OllamaVersions />
 
       <WeeklyProbeSettings settings={weeklyProbe} onSaved={onWeeklySaved} />
     </div>

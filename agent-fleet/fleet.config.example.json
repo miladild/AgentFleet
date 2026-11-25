@@ -11,7 +11,8 @@
       "tier": "heavy",
       "fallback": true,
       "caveman": "off",
-      "ponytail": "off"
+      "ponytail": "off",
+      "ollamaUpdate": { "method": "local" }
     },
     {
       "name": "worker1",
@@ -20,7 +21,15 @@
       "purpose": "A second machine for ordinary coding work: bug fixes, small features, running plan steps.",
       "tier": "standard",
       "caveman": "off",
-      "ponytail": "off"
+      "ponytail": "off",
+      "ollamaUpdate": {
+        "method": "ssh-linux",
+        "host": "192.0.2.21",
+        "port": 22,
+        "user": "fleet-updater",
+        "keyPath": "C:/Users/you/.ssh/fleet-updater_ed25519",
+        "hostKey": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      }
     },
     {
       "name": "worker2",

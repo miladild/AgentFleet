@@ -49,6 +49,11 @@ builder.Services.AddHttpClient(WebTools.HttpClientName, client =>
 // The diagram checker starts a Node process on first use, so allow it some time.
 builder.Services.AddHttpClient(FrontendDiagramValidator.HttpClientName, client =>
     client.Timeout = TimeSpan.FromSeconds(30));
+// The Ollama update check and downloads happen only when the owner clicks a button (see OllamaUpdateService).
+builder.Services.AddHttpClient(OllamaUpdateService.ReleaseClientName, client =>
+    client.Timeout = TimeSpan.FromSeconds(20));
+builder.Services.AddHttpClient(OllamaUpdateService.DownloadClientName, client =>
+    client.Timeout = Timeout.InfiniteTimeSpan);
 builder.Services.AddSingleton<FleetPlanStore>();
 builder.Services.AddSingleton<MeasuringMachines>();
 builder.Services.AddSingleton<FleetHealthMonitor>();
@@ -838,7 +843,7 @@ app.MapGet("/api/fleet-config", () =>
         version = fleetConfigStore.Version,
         defaultContextLength,
         triageModel = config.TriageModel,
-        nodes = config.Nodes.Select(node => new { node.Name, node.Url, node.Model, node.Purpose, node.Tier, node.Vision, node.Fallback, node.ContextLength, node.Api, node.Caveman, node.Ponytail, node.Workspace, node.Thinking, node.VisionMode }),
+        nodes = config.Nodes.Select(node => new { node.Name, node.Url, node.Model, node.Purpose, node.Tier, node.Vision, node.Fallback, node.ContextLength, node.Api, node.Caveman, node.Ponytail, node.Workspace, node.Thinking, node.VisionMode, node.OllamaUpdate }),
         tools = ToolsPayload(config),
         mcpServers = config.McpServerMap,
         // What actually happened at the last startup, which can differ from the saved
@@ -957,25 +962,7 @@ app.MapPut("/api/fleet-config", async (FleetConfigUpdateRequest request, Cancell
             TriageModel = request.TriageModel?.Trim() is { Length: > 0 } triageModel ? triageModel : current.TriageModel,
             Nodes = request.Nodes is { Count: > 0 }
                 ? request.Nodes.Select(node =>
-                {
-                    string name = node.Name.Trim();
-                    FleetNodeConfig? previous = current.Nodes.FirstOrDefault(candidate => candidate.Name == name);
-                    return new FleetNodeConfig(
-                        name,
-                        node.Url.Trim(),
-                        node.Model.Trim(),
-                        node.Purpose,
-                        node.Tier,
-                        node.Vision,
-                        node.Fallback,
-                        node.ContextLength,
-                        node.Api,
-                        node.Caveman ?? previous?.Caveman,
-                        node.Ponytail ?? previous?.Ponytail,
-                        node.ClearWorkspace ? null : node.Workspace ?? previous?.Workspace,
-                        node.Thinking ?? previous?.Thinking,
-                        NodeVisionMode.Resolve(node.Vision, node.VisionMode, previous?.VisionMode));
-                }).ToList()
+                    FleetConfigStore.MergeNode(node, current.Nodes.FirstOrDefault(candidate => candidate.Name == node.Name.Trim()))).ToList()
                 : current.Nodes,
             Tools = updatedTools ?? current.Tools,
             // Unlike nodes and tools, an empty object here is meaningful: it removes every server.
@@ -1029,7 +1016,7 @@ app.MapPut("/api/fleet-config", async (FleetConfigUpdateRequest request, Cancell
             version,
             defaultContextLength,
             triageModel = saved.TriageModel,
-            nodes = saved.Nodes.Select(node => new { node.Name, node.Url, node.Model, node.Purpose, node.Tier, node.Vision, node.Fallback, node.ContextLength, node.Api, node.Caveman, node.Ponytail, node.Workspace, node.Thinking, node.VisionMode }),
+            nodes = saved.Nodes.Select(node => new { node.Name, node.Url, node.Model, node.Purpose, node.Tier, node.Vision, node.Fallback, node.ContextLength, node.Api, node.Caveman, node.Ponytail, node.Workspace, node.Thinking, node.VisionMode, node.OllamaUpdate }),
             tools = ToolsPayload(saved),
             mcpServers = saved.McpServerMap,
             mcpStatus = toolRegistry.Mcp.Statuses,
@@ -1663,6 +1650,16 @@ app.MapPost("/api/tools/import", async (McpImportRequest request, CancellationTo
 // so a first-time user does not need a terminal. RequestGuard keeps other websites out, as for the rest.
 ModelPullService modelPulls = app.Services.GetRequiredService<ModelPullService>();
 modelPulls.Finished += _ => healthMonitor.Forget();
+// Updating Ollama on a machine: only on the owner's click, never while a plan is running or approved.
+var ollamaUpdates = new OllamaUpdateService(
+    httpClientFactory,
+    () => fleetConfigStore.Current,
+    new HttpOllamaVersionProbe(httpClientFactory),
+    new WindowsOllamaHost(),
+    new SshRemoteShellFactory(),
+    () => planStore.List().Any(plan => plan.Status is PlanStatus.Running or PlanStatus.Approved),
+    loggerFactory.CreateLogger("AgentFleet.OllamaUpdate"));
+ollamaUpdates.Finished += _ => healthMonitor.Forget();
 var modelRegressionNotifier = webhookNotifier is null
     ? null
     : new ModelRegressionNotifier(webhookNotifier, fitProbeService.LabDirectory, loggerFactory.CreateLogger("AgentFleet.ModelResults"));
@@ -1771,6 +1768,8 @@ app.MapPost("/api/setup/pull", (ModelPullRequest request) =>
 app.MapGet("/api/setup/pulls", () => Results.Json(modelPulls.List()));
 
 app.MapPost("/api/setup/pulls/{id}/cancel", (string id) => modelPulls.Cancel(id) ? Results.Ok() : Results.NotFound());
+
+OllamaUpdateEndpoints.Map(app, ollamaUpdates);
 
 app.MapPost("/api/setup/start-ollama", async (CancellationToken cancellationToken) =>
 {
@@ -2008,7 +2007,9 @@ internal sealed record FleetConfigNodeUpdate(
     FleetWorkerWorkspaceConfig? Workspace = null,
     bool ClearWorkspace = false,
     string? Thinking = null,
-    string? VisionMode = null);
+    string? VisionMode = null,
+    FleetOllamaUpdateConfig? OllamaUpdate = null,
+    bool ClearOllamaUpdate = false);
 
 internal sealed record FleetConfigUpdateRequest(
     string? TriageModel,
