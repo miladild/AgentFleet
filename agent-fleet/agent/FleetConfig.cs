@@ -89,10 +89,12 @@ internal sealed record FleetOllamaUpdateConfig(
     private static readonly System.Text.RegularExpressions.Regex HostKeyPattern = new("^SHA256:[A-Za-z0-9+/]{20,64}={0,2}$", System.Text.RegularExpressions.RegexOptions.Compiled);
     private static readonly System.Text.RegularExpressions.Regex HostPattern = new("^[A-Za-z0-9][A-Za-z0-9.:_-]{0,252}$", System.Text.RegularExpressions.RegexOptions.Compiled);
 
-    /// <summary>The method with its case and spacing settled; a missing one is "none".</summary>
+    /// <summary>The method with its case and spacing settled; a missing one is "none". Computed, so never written to the config file.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
     public string EffectiveMethod => string.IsNullOrWhiteSpace(Method) ? None : Method.Trim().ToLowerInvariant();
 
-    /// <summary>True when the web UI may run an update for this machine.</summary>
+    /// <summary>True when the web UI may run an update for this machine. Computed, so never written to the config file.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
     public bool CanUpdate => EffectiveMethod is Local or SshLinux;
 
     public FleetOllamaUpdateConfig Normalized() => this with

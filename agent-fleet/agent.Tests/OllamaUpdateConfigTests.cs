@@ -48,6 +48,20 @@ public sealed class OllamaUpdateConfigTests : IDisposable
     }
 
     [Fact]
+    public void The_methods_computed_properties_are_not_written_to_the_config_file()
+    {
+        Write(Ssh());
+        FleetConfigStore store = Open();
+
+        store.Save(store.Current);
+
+        string saved = File.ReadAllText(ConfigPath);
+        Assert.Contains("\"ollamaUpdate\"", saved);
+        Assert.DoesNotContain("effectiveMethod", saved, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("canUpdate", saved, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void A_node_without_the_block_has_no_update_method_and_the_block_is_not_written()
     {
         File.WriteAllText(ConfigPath, """{"triageModel":"t","mode":"conservative","planModeEnabled":false,"tools":{},"nodes":[{"name":"hub","url":"http://127.0.0.1:11434/v1","model":"m","purpose":"local","fallback":true}]}""");
