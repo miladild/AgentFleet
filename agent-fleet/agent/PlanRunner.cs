@@ -1438,7 +1438,7 @@ internal sealed partial class PlanRunner
                     else if (parkReason is null)
                     {
                         // The check failed: type errors in the step's files may be the reason (see PlanRunnerTypecheck).
-                        typecheckNote = await TypecheckHintAsync(plan, step, attempt, tier, model, rung, round, cancellationToken);
+                        typecheckNote = await TypecheckHintAsync(plan, step, attempt, tier, model, rung, round, result.Output ?? result.Message, cancellationToken);
                     }
 
                     if (model.Workspace is not null)

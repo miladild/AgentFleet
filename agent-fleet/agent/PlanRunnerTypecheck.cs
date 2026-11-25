@@ -71,12 +71,13 @@ internal sealed partial class PlanRunner
     }
 
     /// <summary>
-    /// The type errors in the files the step lists, or null when the project has no typecheck script, the step's own check is a
-    /// type check, the type check passes, or it prints nothing about those files. It only adds evidence: a command that cannot run
-    /// is logged and never fails or holds a step.
+    /// What a type check says about a failed check, or null when the step's own check is a type check or there is nothing to say: the
+    /// errors the project's typecheck script prints for the files the step lists, then the errors the compiler prints for the step's own
+    /// test files, which the script may not read (see PlanRunnerTypecheckTestFiles). Each part only adds evidence: a command that cannot
+    /// run is logged and never fails or holds a step.
     /// </summary>
     private async Task<string?> TypecheckHintAsync(PlanRecord plan, PlanStep step, int attempt, string tier, ModelAttemptResult model,
-        int rung, int round, CancellationToken cancellationToken)
+        int rung, int round, string? checkOutput, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(plan.WorkingDirectory) || (step.Verify ?? string.Empty).Contains("typecheck", StringComparison.OrdinalIgnoreCase) ||
             (step.Verify ?? string.Empty).Contains("tsc", StringComparison.OrdinalIgnoreCase))
@@ -84,9 +85,21 @@ internal sealed partial class PlanRunner
             return null;
         }
 
+        string? scriptHint = await TypecheckScriptHintAsync(plan, step, attempt, tier, model, rung, round, cancellationToken);
+        string? testFilesHint = await TypecheckTestFilesHintAsync(plan, step, attempt, tier, model, rung, round, checkOutput, scriptHint, cancellationToken);
+        return scriptHint is null ? testFilesHint : testFilesHint is null ? scriptHint : $"{scriptHint}\n\n{testFilesHint}";
+    }
+
+    /// <summary>
+    /// The type errors in the files the step lists, or null when the project has no typecheck script, the type check passes, or it
+    /// prints nothing about those files.
+    /// </summary>
+    private async Task<string?> TypecheckScriptHintAsync(PlanRecord plan, PlanStep step, int attempt, string tier, ModelAttemptResult model,
+        int rung, int round, CancellationToken cancellationToken)
+    {
         try
         {
-            string package = Path.Combine(plan.WorkingDirectory, "package.json");
+            string package = Path.Combine(plan.WorkingDirectory!, "package.json");
             if (!File.Exists(package) || !HasTypecheckScript(File.ReadAllText(package)))
             {
                 return null;
