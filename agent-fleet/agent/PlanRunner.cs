@@ -1717,7 +1717,7 @@ internal sealed partial class PlanRunner
                 {
                     lastFailure = $"{lastFailure}\n\n{typecheckNote}";
                 }
-                if (!result.Done && FailureHints.For(result.Output ?? result.Message) is { } failureHint)
+                if (!result.Done && FailureHints.For(result.Output ?? result.Message, plan.WorkingDirectory) is { } failureHint)
                 {
                     lastFailure = $"{lastFailure}\n\n{failureHint}";
                 }

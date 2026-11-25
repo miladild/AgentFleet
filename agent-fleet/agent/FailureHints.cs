@@ -18,9 +18,10 @@ internal static partial class FailureHints
     /// The hints for a check's failure text, or null when no rule applies. node's assert prints "Values have same structure but are
     /// not reference-equal" when a test compares two arrays or objects with strictEqual or equal: the values match, the comparison is
     /// wrong. A test that uses it, describe or another export of node:test without importing it fails with "X is not defined" and
-    /// runs no test at all.
+    /// runs no test at all. With the project folder, a status check that gets 404 where a 2xx was expected is traced to its fetch call, and
+    /// a call with no method (so a GET) is named.
     /// </summary>
-    internal static string? For(string? failure)
+    internal static string? For(string? failure, string? projectFolder = null)
     {
         if (string.IsNullOrEmpty(failure))
         {
@@ -40,6 +41,11 @@ internal static partial class FailureHints
             string name = missing.Groups["name"].Value;
             hints.Add($"Hint: the test file uses {name} but does not import it, so no test runs. Add {name} to the import from \"node:test\" " +
                       $"at the top of the test file (for example: import {{ describe, it }} from \"node:test\"). Change only that import line.");
+        }
+
+        if (MissingHttpVerb(failure, projectFolder) is { } verbHint)
+        {
+            hints.Add(verbHint);
         }
 
         return hints.Count == 0 ? null : string.Join("\n\n", hints);
