@@ -102,7 +102,7 @@ internal sealed partial class PlanRunner
             .Select(file => new TestFileText(file.Path, file.Content)).ToArray();
         string said = string.IsNullOrWhiteSpace(model.Summary) ? "(nothing)" : Cut(model.Summary.Trim(), MaxRulerReplyCharacters);
         string prompt = TestRuling.BuildPrompt(latest, step, holding, checkOutput, said, changed, ownTest: true);
-        IStepSession session = _agent.OpenSession(PlanRunnerToolPolicy.TestRulingRole);
+        IStepSession session = _agent.OpenSession(RulerRoleFor(ruler));
         RulerAnswer answer;
         var clock = System.Diagnostics.Stopwatch.StartNew();
         try

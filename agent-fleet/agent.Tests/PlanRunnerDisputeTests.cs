@@ -30,7 +30,7 @@ public sealed partial class PlanRunnerTests
         public Task<StepAgentReply> RunStepAsync(string prompt, string tier, CancellationToken token) => inner.RunStepAsync(prompt, tier, token);
         public IStepSession OpenSession() => inner.OpenSession();
         public IStepSession OpenSession(string? role) =>
-            role is PlanRunnerToolPolicy.TestRulingRole or PlanRunnerToolPolicy.StepReviewRole ? inner.OpenSession(role) : inner.OpenSession();
+            role is PlanRunnerToolPolicy.TestRulingRole or PlanRunnerToolPolicy.TestRulingPromptOnlyRole or PlanRunnerToolPolicy.StepReviewRole ? inner.OpenSession(role) : inner.OpenSession();
     }
 
     // How many times the ruler may be asked, and what it answers. A call beyond the expected number is counted as a violation
@@ -69,7 +69,7 @@ public sealed partial class PlanRunnerTests
         })
         {
             CallsOf = call => (call.Session == 1 || disputeFreshConversations && call.Session > 1) && disputeAt(call.Message) ? [DisputeCall] : [],
-            Auditor = call => call.Role == PlanRunnerToolPolicy.TestRulingRole
+            Auditor = call => call.Role is PlanRunnerToolPolicy.TestRulingRole or PlanRunnerToolPolicy.TestRulingPromptOnlyRole
                 ? budget.Answer(call)
                 : new StepAgentReply("The check is sound.", 0, false)
         };
@@ -80,13 +80,16 @@ public sealed partial class PlanRunnerTests
             ? File.ReadAllText(Path.Combine(project, "tests", "LimitTests.cs")).Contains(passMarker, StringComparison.Ordinal) ? TestsPassOutput : TestsFailOutput
             : BuildPassOutput;
 
+    // The reviewer's context window; a test sets it to try a machine with a small one.
+    private int? ReviewerWindow { get; set; }
+
     // The step's worker, and a second worker of the same tier that rules on a dispute (a ruler is never the machine that wrote the code).
     private (PlanRecord Plan, FleetOptions Options, FleetHealthMonitor Health) DisputePlan(string project, params PlanStepInput[] steps)
     {
         var worker = new FleetNodeConfig("worker-a", "http://worker.example.test/v1", "m", "worker", "standard",
             Workspace: new FleetWorkerWorkspaceConfig("worker.example.test", "worker", "C:/fleet-test/worker-key.pem",
                 "SHA256:synthetic-host-key", "/tmp/fleet-test/workspaces", "linux"));
-        var reviewer = new FleetNodeConfig("worker-b", "http://reviewer.example.test/v1", "m", "worker", "standard");
+        var reviewer = new FleetNodeConfig("worker-b", "http://reviewer.example.test/v1", "m", "worker", "standard", ContextLength: ReviewerWindow);
         FleetOptions options = OptionsWithNodes(worker, reviewer);
         var health = new FleetHealthMonitor(options, new HealthyNodeFactory());
         PlanRecord plan = NewPlan(steps);

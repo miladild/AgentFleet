@@ -35,6 +35,12 @@ internal static partial class PlanRunnerToolPolicy
     /// <summary>The role of a model that did not write a disputed frozen test or the code under it, and rules on it.</summary>
     public const string TestRulingRole = "test-ruling";
 
+    /// <summary>
+    /// The same ruler on a machine with a small context window (see MachineProfile): it is offered no tool and answers from the prompt,
+    /// which already holds what it needs. One model call instead of a call for each file it would read.
+    /// </summary>
+    public const string TestRulingPromptOnlyRole = "test-ruling-prompt-only";
+
     // The reviewer and the ruler read. They cannot run a command, write a file or call anything else.
     private static readonly HashSet<string> ReviewTools = new(StringComparer.Ordinal)
     {
@@ -52,6 +58,11 @@ internal static partial class PlanRunnerToolPolicy
         if (fromRunner && IsWebLookup(toolName))
         {
             return webOffered && role is null;
+        }
+
+        if (fromRunner && role == TestRulingPromptOnlyRole)
+        {
+            return false;
         }
 
         if (fromRunner && role is StepReviewRole or TestRulingRole)
@@ -125,6 +136,11 @@ internal static partial class PlanRunnerToolPolicy
             return ReviewTools.Contains(toolName)
                 ? null
                 : $"Blocked: `{toolName}` is not available while a step is being reviewed. You can read files and answer in words.";
+        }
+
+        if (role == TestRulingPromptOnlyRole)
+        {
+            return $"Blocked: `{toolName}` is not available here. Answer from the text you were given.";
         }
 
         if (role == TestRulingRole)

@@ -47,6 +47,14 @@ public sealed class DisputeToolPolicyTests
     }
 
     [Fact]
+    public void A_ruler_with_no_tool_to_read_with_is_offered_nothing_and_refused_everything()
+    {
+        Assert.Empty(Offered(fromRunner: true, role: PlanRunnerToolPolicy.TestRulingPromptOnlyRole, disputeOffered: true));
+        Assert.NotNull(PlanRunnerToolPolicy.Refusal("read_file", null, PlanRunnerToolPolicy.TestRulingPromptOnlyRole));
+        Assert.NotNull(PlanRunnerToolPolicy.Refusal("write_file", null, PlanRunnerToolPolicy.TestRulingPromptOnlyRole));
+    }
+
+    [Fact]
     public void The_ruler_and_the_reviewer_are_offered_only_the_read_only_tools()
     {
         Assert.Equal(Sorted(ReadOnlyTools), Offered(fromRunner: true, role: PlanRunnerToolPolicy.TestRulingRole, disputeOffered: true));

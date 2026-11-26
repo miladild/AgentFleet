@@ -77,13 +77,13 @@ public sealed class OllamaTimingsTests
         Assert.Equal("the machine reported no model call", activity.DescribeEnd());
 
         activity.RecordModelCall(new OllamaCallTiming(1200, 3.0, 0, 0.0, 1.0, 5.0, "stop"));
-        Assert.Equal("prompt 1200 tokens, answer 0 tokens, ended: stop", activity.DescribeEnd());
+        Assert.Equal("1 model call, prompt 1200 tokens, answer 0 tokens, ended: stop", activity.DescribeEnd());
 
         activity.RecordModelCall(new OllamaCallTiming(50, 1.0, 1500, 20.0, 0.0, 21.0, "length"));
-        Assert.Equal("prompt 1250 tokens, answer 1500 tokens, ended: length", activity.DescribeEnd());
+        Assert.Equal("2 model calls, prompt 1250 tokens, answer 1500 tokens, ended: length", activity.DescribeEnd());
 
         var unreported = new StepToolActivity();
         unreported.RecordModelCall(new OllamaCallTiming(10, 1.0, 5, 1.0, 0.0, 2.0));
-        Assert.Equal("prompt 10 tokens, answer 5 tokens, ended: no reason reported", unreported.DescribeEnd());
+        Assert.Equal("1 model call, prompt 10 tokens, answer 5 tokens, ended: no reason reported", unreported.DescribeEnd());
     }
 }

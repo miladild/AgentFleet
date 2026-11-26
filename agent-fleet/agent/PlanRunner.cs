@@ -127,7 +127,7 @@ internal sealed class StepToolActivity
         {
             return ModelCalls == 0
                 ? "the machine reported no model call"
-                : $"prompt {_total.PromptTokens} tokens, answer {_total.EvalTokens} tokens, ended: {_doneReason ?? "no reason reported"}";
+                : $"{ModelCalls} model call{(ModelCalls == 1 ? string.Empty : "s")}, prompt {_total.PromptTokens} tokens, answer {_total.EvalTokens} tokens, ended: {_doneReason ?? "no reason reported"}";
         }
     }
 

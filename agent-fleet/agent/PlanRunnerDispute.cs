@@ -82,7 +82,7 @@ internal sealed partial class PlanRunner
         // The file under dispute, when there is exactly one: a lone fenced block in the reply is taken as its text.
         string? onlyPath = holding.Count == 1 ? holding[0].Path : null;
         string prompt = TestRuling.BuildPrompt(latest, step, holding, checkOutput, dispute.Reason, changed);
-        IStepSession session = _agent.OpenSession(PlanRunnerToolPolicy.TestRulingRole);
+        IStepSession session = _agent.OpenSession(RulerRoleFor(ruler));
         RulerAnswer answer;
         var clock = System.Diagnostics.Stopwatch.StartNew();
         try
@@ -167,6 +167,14 @@ internal sealed partial class PlanRunner
     /// 49 of 131 minutes in a live run and three of seven returned nothing, and nothing in the log said why.
     /// </summary>
     internal const string RulerTimingEvent = "ruler-timing";
+
+    // The ruler reads files with tools, except on a machine whose window is small, where it answers from the prompt (see MachineProfile).
+    private string RulerRoleFor(string ruler)
+    {
+        FleetNodeDefinition? node = _fleetOptions?.Nodes.FirstOrDefault(candidate => string.Equals(candidate.Name, ruler, StringComparison.OrdinalIgnoreCase));
+        MachineProfile profile = MachineProfile.For(node);
+        return profile.RulerReadsFiles ? PlanRunnerToolPolicy.TestRulingRole : PlanRunnerToolPolicy.TestRulingPromptOnlyRole;
+    }
 
     // Each ruler ask is followed by its own activity, so the log can say how that ask ended and what it held (see StepToolActivity.DescribeEnd).
     private static StepToolActivity TrackAsk(IStepSession session)

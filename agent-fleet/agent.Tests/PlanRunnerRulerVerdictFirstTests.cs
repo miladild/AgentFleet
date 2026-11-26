@@ -10,7 +10,7 @@ public sealed partial class PlanRunnerTests
     private const string CorrectedFilesOnlyReply = "FILE: tests/LimitTests.cs\n```csharp\n" + CorrectedTest + "```";
 
     private static FakeAuditCall[] RulerAsks(FakeStepAgent fake) =>
-        fake.Audits.Where(call => call.Role == PlanRunnerToolPolicy.TestRulingRole).ToArray();
+        fake.Audits.Where(call => call.Role is PlanRunnerToolPolicy.TestRulingRole or PlanRunnerToolPolicy.TestRulingPromptOnlyRole).ToArray();
 
     [Fact]
     public async Task A_ruler_whose_code_wrong_follow_up_asks_for_the_verdict_alone_with_a_400_token_cap_and_no_third_ask()
@@ -114,6 +114,29 @@ public sealed partial class PlanRunnerTests
             Assert.Equal("NoVerdict", ruling.FailureClass);
             Assert.Contains("The verdict was TEST-WRONG, but no corrected file arrived", ruling.Detail, StringComparison.Ordinal);
             Assert.Contains("Nothing changes", ruling.Detail, StringComparison.Ordinal);
+        }
+        finally { FailFirstTests.DeleteTree(project); }
+    }
+
+    [Theory]
+    [InlineData(16384, PlanRunnerToolPolicy.TestRulingPromptOnlyRole)]
+    [InlineData(24576, PlanRunnerToolPolicy.TestRulingRole)]
+    [InlineData(null, PlanRunnerToolPolicy.TestRulingRole)]
+    public async Task A_ruler_on_a_machine_with_a_small_window_rules_from_the_prompt_with_no_tool_to_read_with(int? window, string expectedRole)
+    {
+        string project = NewGitProject();
+        try
+        {
+            ReviewerWindow = window;
+            var setup = DisputePlan(project, TestsStep(), ImplementationStep("dotnet test"));
+            var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []));
+            var budget = new RulingBudget(1, _ => new StepAgentReply(TestWrongRuling, 0, false));
+            var fake = DisputingImplementer(project, message => message == 0, budget);
+            await FrozenRunner(new RulingAgent(fake), workspaces, setup.Options, setup.Health, CheckReadsTheTestFile(project, "CORRECTED"))
+                .RunPlanAsync(setup.Plan.Id, default).WaitAsync(DisputeTimeLimit);
+
+            Assert.Equal(expectedRole, Assert.Single(RulerAsks(fake)).Role);
+            Assert.Equal(0, budget.Violations);
         }
         finally { FailFirstTests.DeleteTree(project); }
     }
