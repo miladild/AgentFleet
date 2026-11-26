@@ -39,6 +39,21 @@ public sealed class TestRunLeftoversTests : IDisposable
         Assert.False(Directory.Exists(Full("data")), "the folder the run made is empty now and goes too");
     }
 
+    [Theory]
+    [InlineData("alerts-00a1155f-08f0-4b35-a906-c5c082b766ea.json")]
+    [InlineData("test/tmp/alerts-00a1155f-08f0-4b35-a906-c5c082b766ea.json")]
+    [InlineData("data/cache.tmp")]
+    [InlineData("build/temp/out.json")]
+    public void A_file_a_test_run_wrote_with_a_generated_id_or_into_a_tmp_folder_is_removed(string relative)
+    {
+        Write(relative);
+
+        LeftoverPlan plan = TestRunLeftovers.Plan(_root, [], [relative], []);
+
+        Assert.False(plan.Fallback);
+        Assert.Equal([relative], plan.Remove);
+    }
+
     [Fact]
     public void A_file_that_was_there_before_the_run_is_kept()
     {

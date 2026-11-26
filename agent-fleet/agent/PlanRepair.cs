@@ -127,12 +127,7 @@ internal static partial class RepairLadder
     {
         string[] parts = path.Replace('\\', '/').Split('/');
         string name = parts[^1];
-        // What a test run leaves behind: a file named with a generated id, a temporary file, or anything in a tmp or temp folder.
-        // Measured: rounds were classed as progress for 40 to 72 stray files a test wrote into the project while the failing test stayed the same.
-        return GeneratedId().IsMatch(name) ||
-               name.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase) ||
-               parts[..^1].Any(part => part.Equals("tmp", StringComparison.OrdinalIgnoreCase) || part.Equals("temp", StringComparison.OrdinalIgnoreCase)) ||
-               name.EndsWith(".lock", StringComparison.OrdinalIgnoreCase) ||
+        return name.EndsWith(".lock", StringComparison.OrdinalIgnoreCase) ||
                name.EndsWith(".tsbuildinfo", StringComparison.OrdinalIgnoreCase) ||
                name.EndsWith(".log", StringComparison.OrdinalIgnoreCase) ||
                name.Equals("package-lock.json", StringComparison.OrdinalIgnoreCase) ||
@@ -143,6 +138,24 @@ internal static partial class RepairLadder
                name.Equals("go.sum", StringComparison.OrdinalIgnoreCase) ||
                name.Equals("poetry.lock", StringComparison.OrdinalIgnoreCase);
     }
+
+    /// <summary>
+    /// What a test run leaves behind: a file named with a generated id, a temporary file, or anything in a tmp or temp folder.
+    /// Measured: rounds were classed as progress for 40 to 72 stray files a test wrote into the project while the failing test stayed
+    /// the same. Only the progress count uses this: such a file is still a stray file for the leftover cleaner and the unlisted-file
+    /// report, which must keep seeing it (<see cref="IsIncidentalFile"/> is what those two share).
+    /// </summary>
+    public static bool IsTestRunLeftover(string path)
+    {
+        string[] parts = path.Replace('\\', '/').Split('/');
+        string name = parts[^1];
+        return GeneratedId().IsMatch(name) ||
+               name.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase) ||
+               parts[..^1].Any(part => part.Equals("tmp", StringComparison.OrdinalIgnoreCase) || part.Equals("temp", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>A changed file that is not progress on the step: an incidental file or what a test run left behind.</summary>
+    public static bool IsNotProgress(string path) => IsIncidentalFile(path) || IsTestRunLeftover(path);
 
     [GeneratedRegex(@"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex GeneratedId();

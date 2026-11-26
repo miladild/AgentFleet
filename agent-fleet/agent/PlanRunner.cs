@@ -2430,7 +2430,7 @@ internal sealed partial class PlanRunner
 
     // A package manager's lock file or a build cache rewritten as a side effect is not progress on the step.
     private IReadOnlyList<string> MeaningfulFiles(PlanRecord plan, PlanStep step, IEnumerable<string> changedFiles) =>
-        changedFiles.Where(file => !RepairLadder.IsIncidentalFile(file) || StepNames(plan, step, file)).ToArray();
+        changedFiles.Where(file => !RepairLadder.IsNotProgress(file) || StepNames(plan, step, file)).ToArray();
 
     private const string UnverifiedNoChange = "no-change";
     private const string UnverifiedNoTest = "no-test";

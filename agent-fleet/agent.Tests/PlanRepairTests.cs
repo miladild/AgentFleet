@@ -1360,10 +1360,6 @@ public sealed class PlanRepairLogicTests
     [InlineData("pnpm-lock.yaml", true)]
     [InlineData("tsconfig.tsbuildinfo", true)]
     [InlineData("debug.log", true)]
-    [InlineData("test/tmp/alerts-00a1155f-08f0-4b35-a906-c5c082b766ea.json", true)]
-    [InlineData("alerts-00a1155f-08f0-4b35-a906-c5c082b766ea.json.tmp", true)]
-    [InlineData("data/cache.tmp", true)]
-    [InlineData("build/temp/out.json", true)]
     [InlineData("src/template.ts", false)]
     [InlineData("test/alerts.test.ts", false)]
     [InlineData("src/server/marketHours.ts", false)]
@@ -1371,6 +1367,30 @@ public sealed class PlanRepairLogicTests
     [InlineData("docs/lockfile.md", false)]
     public void Lock_files_and_build_caches_are_not_progress(string path, bool incidental) =>
         Assert.Equal(incidental, RepairLadder.IsIncidentalFile(path));
+
+    // What a test run leaves behind counts as no progress, but is not an "incidental" file: the leftover cleaner and the unlisted-file
+    // report must still see it (TestRunLeftoversTests and the unlisted tests hold the other half).
+    [Theory]
+    [InlineData("test/tmp/alerts-00a1155f-08f0-4b35-a906-c5c082b766ea.json", true)]
+    [InlineData("alerts-00a1155f-08f0-4b35-a906-c5c082b766ea.json.tmp", true)]
+    [InlineData("data/cache.tmp", true)]
+    [InlineData("build/temp/out.json", true)]
+    [InlineData("package-lock.json", true)]
+    [InlineData("src/template.ts", false)]
+    [InlineData("test/alerts.test.ts", false)]
+    [InlineData("docs/lockfile.md", false)]
+    public void Files_a_test_run_leaves_behind_and_incidental_files_are_not_progress(string path, bool notProgress)
+    {
+        Assert.Equal(notProgress, RepairLadder.IsNotProgress(path));
+        Assert.Equal(RepairLadder.IsTestRunLeftover(path) || RepairLadder.IsIncidentalFile(path), notProgress);
+    }
+
+    [Theory]
+    [InlineData("test/tmp/alerts-00a1155f-08f0-4b35-a906-c5c082b766ea.json")]
+    [InlineData("alerts-00a1155f-08f0-4b35-a906-c5c082b766ea.json.tmp")]
+    [InlineData("build/temp/out.json")]
+    public void A_test_run_leftover_is_not_an_incidental_file_so_the_cleaner_and_the_unlisted_report_keep_seeing_it(string path) =>
+        Assert.False(RepairLadder.IsIncidentalFile(path));
 
     [Fact]
     public void Failing_names_are_read_back_from_a_stored_signature_and_a_hash_has_none()

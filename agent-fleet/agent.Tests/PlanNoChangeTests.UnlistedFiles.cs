@@ -57,6 +57,33 @@ public sealed partial class PlanNoChangeTests
         Assert.DoesNotContain(after.Events!, e => e.Kind == RunEventKind.StepDone && e.Detail.Contains("does not name", StringComparison.Ordinal));
     }
 
+    [Theory]
+    [InlineData("alerts-00a1155f-08f0-4b35-a906-c5c082b766ea.json")]
+    [InlineData("tmp/out.txt")]
+    public async Task A_file_with_a_generated_id_or_in_a_tmp_folder_is_still_reported_as_a_file_the_plan_does_not_name(string stray)
+    {
+        File.WriteAllText(Path.Combine(ProjectDirectory, "a.txt"), "old a");
+        PlanRecord plan = OneStepPlan(StepListing("edit a", "a.txt"));
+        int round = 0;
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            round++;
+            File.WriteAllText(Path.Combine(ProjectDirectory, "a.txt"), $"new {round}");
+            if (round == 1)
+            {
+                WriteProjectFile(stray);
+            }
+
+            return Task.FromResult("Changed a.");
+        });
+
+        await RepairRunner(agent, _ => Pass("check")).RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        Assert.Equal(1, UnlistedRounds(plan.Id));
+        Assert.Contains(after.Events!, e => e.Kind == UnlistedKind && e.Detail.Contains(stray.Split('/')[^1], StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task A_file_still_there_after_the_extra_round_does_not_send_the_step_back_and_the_step_done_note_names_it()
     {
