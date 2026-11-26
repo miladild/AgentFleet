@@ -81,7 +81,7 @@ internal sealed partial class PlanRunner
         IReadOnlyList<TestFileText> holding = TestDispute.Holding(frozen, items);
         // The file under dispute, when there is exactly one: a lone fenced block in the reply is taken as its text.
         string? onlyPath = holding.Count == 1 ? holding[0].Path : null;
-        string prompt = TestRuling.BuildPrompt(latest, step, holding, checkOutput, dispute.Reason, changed);
+        string prompt = TestRuling.BuildPrompt(latest, step, holding, checkOutput, dispute.Reason, changed, maxCharacters: RulerProfile(ruler).RulerPromptCharacters);
         IStepSession session = _agent.OpenSession(RulerRoleFor(ruler));
         RulerAnswer answer;
         var clock = System.Diagnostics.Stopwatch.StartNew();
@@ -169,10 +169,12 @@ internal sealed partial class PlanRunner
     internal const string RulerTimingEvent = "ruler-timing";
 
     // The ruler reads files with tools, except on a machine whose window is small, where it answers from the prompt (see MachineProfile).
+    private MachineProfile RulerProfile(string ruler) =>
+        MachineProfile.For(_fleetOptions?.Nodes.FirstOrDefault(candidate => string.Equals(candidate.Name, ruler, StringComparison.OrdinalIgnoreCase)));
+
     private string RulerRoleFor(string ruler)
     {
-        FleetNodeDefinition? node = _fleetOptions?.Nodes.FirstOrDefault(candidate => string.Equals(candidate.Name, ruler, StringComparison.OrdinalIgnoreCase));
-        MachineProfile profile = MachineProfile.For(node);
+        MachineProfile profile = RulerProfile(ruler);
         return profile.RulerReadsFiles ? PlanRunnerToolPolicy.TestRulingRole : PlanRunnerToolPolicy.TestRulingPromptOnlyRole;
     }
 

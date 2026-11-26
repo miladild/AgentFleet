@@ -438,6 +438,50 @@ public sealed class TestDisputeTests : PlanTestBase
     }
 
     [Fact]
+    public void A_prompt_with_a_budget_drops_the_changed_files_first_and_keeps_the_tests_whole()
+    {
+        PlanRecord plan = NewPlan(Step("limit"));
+        TestFileText[] tests = [new("tests/A.cs", "// " + new string('t', 6000)), new("tests/B.cs", "// " + new string('t', 6000))];
+        TestFileText[] changed = [new("src/a.cs", new string('~', 15000)), new("src/b.cs", new string('~', 15000))];
+
+        string prompt = TestRuling.BuildPrompt(plan, plan.Steps[0], tests, RejectsFailure, "reason", changed, maxCharacters: 20000);
+
+        Assert.True(prompt.Length <= 20000, $"the prompt has {prompt.Length} characters");
+        Assert.Contains(new string('t', 6000), prompt);
+        int shown = prompt.Count(character => character == '~');
+        Assert.True(shown > 0, "the changed files are cut, not removed, while there is room");
+        Assert.True(shown < 30000 - 5000, $"the changed files still take {shown} characters");
+    }
+
+    [Fact]
+    public void A_prompt_with_a_budget_cuts_test_files_and_output_when_the_changed_files_are_not_enough()
+    {
+        PlanRecord plan = NewPlan(Step("limit"));
+        TestFileText[] tests = [new("tests/A.cs", "// " + new string('t', 12000)), new("tests/B.cs", "// " + new string('t', 12000))];
+        string output = new string('o', 4000);
+        TestFileText[] changed = [new("src/a.cs", new string('~', 15000))];
+
+        string prompt = TestRuling.BuildPrompt(plan, plan.Steps[0], tests, output, "reason", changed, maxCharacters: 12000);
+
+        Assert.True(prompt.Length <= 12000, $"the prompt has {prompt.Length} characters");
+        Assert.DoesNotContain("~", prompt);
+        Assert.Contains(new string('t', 2500), prompt);
+        Assert.DoesNotContain(new string('t', 5000), prompt);
+        Assert.Contains("VERDICT: TEST-WRONG", prompt);
+    }
+
+    [Fact]
+    public void A_prompt_that_fits_its_budget_is_the_same_as_one_without_a_budget()
+    {
+        PlanRecord plan = NewPlan(Step("limit"));
+
+        string without = TestRuling.BuildPrompt(plan, plan.Steps[0], FrozenFiles, RejectsFailure, "reason", []);
+        string within = TestRuling.BuildPrompt(plan, plan.Steps[0], FrozenFiles, RejectsFailure, "reason", [], maxCharacters: 100000);
+
+        Assert.Equal(without, within);
+    }
+
+    [Fact]
     public void The_prompt_cuts_long_test_files_and_output()
     {
         PlanRecord plan = NewPlan(Step("limit"));

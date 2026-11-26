@@ -32,6 +32,14 @@ public sealed class MachineProfileTests
     public void The_setting_overrides_the_window_for_every_machine(string value, int window, bool reads) =>
         Assert.Equal(reads, MachineProfile.For(Node(window), _ => value).RulerReadsFiles);
 
+    [Theory]
+    [InlineData(16384, 32652)]   // (16384 - 5500 tokens kept for the answers) * 3 characters
+    [InlineData(24576, 57228)]
+    [InlineData(6000, 8000)]     // a very small window still gets the least prompt
+    [InlineData(null, null)]     // an unknown window is not cut
+    public void A_rulers_prompt_is_cut_to_what_leaves_room_for_its_answers_in_the_window(int? window, int? characters) =>
+        Assert.Equal(characters, MachineProfile.For(Node(window), NoSetting).RulerPromptCharacters);
+
     [Fact]
     public void The_reason_says_what_decided_it()
     {

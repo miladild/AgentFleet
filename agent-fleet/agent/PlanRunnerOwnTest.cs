@@ -101,7 +101,7 @@ internal sealed partial class PlanRunner
             .Where(file => !testPaths.Contains(file.Path, StringComparer.OrdinalIgnoreCase))
             .Select(file => new TestFileText(file.Path, file.Content)).ToArray();
         string said = string.IsNullOrWhiteSpace(model.Summary) ? "(nothing)" : Cut(model.Summary.Trim(), MaxRulerReplyCharacters);
-        string prompt = TestRuling.BuildPrompt(latest, step, holding, checkOutput, said, changed, ownTest: true);
+        string prompt = TestRuling.BuildPrompt(latest, step, holding, checkOutput, said, changed, ownTest: true, maxCharacters: RulerProfile(ruler).RulerPromptCharacters);
         IStepSession session = _agent.OpenSession(RulerRoleFor(ruler));
         RulerAnswer answer;
         var clock = System.Diagnostics.Stopwatch.StartNew();
