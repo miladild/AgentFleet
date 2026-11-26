@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace AgentFleet;
 
@@ -31,7 +32,7 @@ internal sealed record RepairDecision(RepairMove Move, int ToRung, string Why);
 /// 1 the requested tier, 2 the hub model continuing the same conversation, 3 a fresh conversation on the hub that starts
 /// from a brief. A plan that does not allow hub rescue has no hub rung: its third rung is a fresh conversation on a worker.
 /// </summary>
-internal static class RepairLadder
+internal static partial class RepairLadder
 {
     public const int DefaultRoundsPerRung = 3;
     public const int RequestedTierRung = 1;
@@ -124,8 +125,14 @@ internal static class RepairLadder
     /// </summary>
     public static bool IsIncidentalFile(string path)
     {
-        string name = path.Replace('\\', '/').Split('/')[^1];
-        return name.EndsWith(".lock", StringComparison.OrdinalIgnoreCase) ||
+        string[] parts = path.Replace('\\', '/').Split('/');
+        string name = parts[^1];
+        // What a test run leaves behind: a file named with a generated id, a temporary file, or anything in a tmp or temp folder.
+        // Measured: rounds were classed as progress for 40 to 72 stray files a test wrote into the project while the failing test stayed the same.
+        return GeneratedId().IsMatch(name) ||
+               name.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase) ||
+               parts[..^1].Any(part => part.Equals("tmp", StringComparison.OrdinalIgnoreCase) || part.Equals("temp", StringComparison.OrdinalIgnoreCase)) ||
+               name.EndsWith(".lock", StringComparison.OrdinalIgnoreCase) ||
                name.EndsWith(".tsbuildinfo", StringComparison.OrdinalIgnoreCase) ||
                name.EndsWith(".log", StringComparison.OrdinalIgnoreCase) ||
                name.Equals("package-lock.json", StringComparison.OrdinalIgnoreCase) ||
@@ -136,6 +143,9 @@ internal static class RepairLadder
                name.Equals("go.sum", StringComparison.OrdinalIgnoreCase) ||
                name.Equals("poetry.lock", StringComparison.OrdinalIgnoreCase);
     }
+
+    [GeneratedRegex(@"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex GeneratedId();
 
     /// <summary>A round whose check ran and failed (a model call that never got that far has no round number).</summary>
     public static bool IsVerdictRound(PlanRunEvent runEvent) =>

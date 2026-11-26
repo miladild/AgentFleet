@@ -59,6 +59,8 @@ public sealed partial class PlanNoChangeTests
         Assert.Contains("Duplicate identifier 'history'", retry, StringComparison.Ordinal);
         Assert.Contains("src/a.ts(3,11)", retry, StringComparison.Ordinal);
         Assert.Contains("src/a.ts(9,3)", retry, StringComparison.Ordinal);
+        Assert.Contains("`history` is declared twice in src/a.ts (lines 3 and 9)", retry, StringComparison.Ordinal);
+        Assert.Contains("rename the other one", retry, StringComparison.Ordinal);
         Assert.Contains("The other declaration is here.", retry, StringComparison.Ordinal);
         Assert.DoesNotContain("Cannot find name 'later'", retry, StringComparison.Ordinal);
         Assert.Equal(1, TypecheckHints(plan.Id));
@@ -177,6 +179,29 @@ public sealed partial class PlanNoChangeTests
     [InlineData("", false)]
     public void A_typecheck_script_is_found_in_the_package_file(string packageJson, bool expected) =>
         Assert.Equal(expected, PlanRunner.HasTypecheckScript(packageJson));
+
+    [Fact]
+    public void A_name_declared_twice_in_one_file_is_explained_with_what_to_rename()
+    {
+        string advice = PlanRunner.DuplicateMemberAdvice(
+        [
+            "src/server/alerts.ts(28,11): error TS2300: Duplicate identifier 'history'.",
+            "src/server/alerts.ts(129,3): error TS2300: Duplicate identifier 'history'."
+        ]);
+
+        Assert.Contains("`history` is declared twice in src/server/alerts.ts (lines 28 and 129)", advice, StringComparison.Ordinal);
+        Assert.Contains("`_history`", advice, StringComparison.Ordinal);
+        Assert.Contains("`this.history`", advice, StringComparison.Ordinal);
+        Assert.StartsWith("\n", advice, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("src/a.ts(3,11): error TS2300: Duplicate identifier 'x'.")]
+    [InlineData("src/a.ts(3,11): error TS2300: Duplicate identifier 'x'.|src/b.ts(9,3): error TS2300: Duplicate identifier 'x'.")]
+    [InlineData("src/a.ts(3,11): error TS2322: Type 'a' is not assignable to type 'b'.|src/a.ts(9,3): error TS2322: Type 'a' is not assignable to type 'b'.")]
+    [InlineData("")]
+    public void No_advice_is_given_when_no_name_is_declared_twice_in_the_same_file(string errors) =>
+        Assert.Equal(string.Empty, PlanRunner.DuplicateMemberAdvice(errors.Split('|')));
 
     [Fact]
     public void Only_the_type_errors_in_the_listed_files_are_kept_with_their_continuation_lines()

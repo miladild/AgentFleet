@@ -92,6 +92,39 @@ internal sealed partial class PlanRunner
         return LimitRepeatedHint(plan, step, attempt, tier, model, rung, round, hint);
     }
 
+    // "src/a.ts(28,11): error TS2300: Duplicate identifier 'history'."
+    [GeneratedRegex(@"^(?<path>[^\s(][^(]*)\((?<line>\d+),\d+\): error TS2300: Duplicate identifier '(?<name>[^']+)'", RegexOptions.CultureInvariant)]
+    private static partial Regex DuplicateIdentifier();
+
+    /// <summary>
+    /// What to do about a name used twice in one file: the error says where, and a small model that is only told where keeps
+    /// editing around it. Measured in three runs: a class had a private field and a method with the same name, so a call of the
+    /// method failed with "is not a function", the hint named both lines in nine rounds and the worker never renamed either.
+    /// Empty when no name appears twice in a file.
+    /// </summary>
+    internal static string DuplicateMemberAdvice(IEnumerable<string> errorLines)
+    {
+        var advice = new List<string>();
+        foreach (IGrouping<(string Path, string Name), int> group in errorLines
+            .Select(line => DuplicateIdentifier().Match(line))
+            .Where(match => match.Success)
+            .GroupBy(match => (match.Groups["path"].Value, match.Groups["name"].Value), match => int.Parse(match.Groups["line"].Value, System.Globalization.CultureInfo.InvariantCulture)))
+        {
+            int[] lines = group.Distinct().Order().ToArray();
+            if (lines.Length < 2)
+            {
+                continue;
+            }
+
+            advice.Add($"`{group.Key.Name}` is declared twice in {group.Key.Path} (lines {string.Join(" and ", lines)}). A class cannot have a field and a " +
+                       $"method with the same name, and the field hides the method, so a call such as `store.{group.Key.Name}()` fails with \"is not a function\". " +
+                       $"Keep the name that the step text and the tests use for the public method, and rename the other one (for example the private field to `_{group.Key.Name}`) " +
+                       "in every place it is used, including each `this." + group.Key.Name + "`.");
+        }
+
+        return advice.Count == 0 ? string.Empty : "\n" + string.Join('\n', advice);
+    }
+
     /// <summary>How many times in a row a step is sent the same type errors. Measured: one hint went out in 14 of 16 rounds and was never acted on.</summary>
     internal const int MaxIdenticalHints = 3;
 
@@ -150,11 +183,12 @@ internal sealed partial class PlanRunner
             }
 
             string errors = string.Join('\n', lines);
+            string advice = DuplicateMemberAdvice(lines);
             _store.AddEvent(plan.Id, step.Id, attempt, TypecheckHintKind, tier, node: model.ModelNode ?? model.Machine,
-                detail: $"`{TypecheckScriptCommand}` reports errors in this step's files, sent back with the failed check:\n{errors}",
+                detail: $"`{TypecheckScriptCommand}` reports errors in this step's files, sent back with the failed check:\n{errors}{advice}",
                 modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round);
             return $"The project's type check (`{TypecheckScriptCommand}`) rejects this step's files. The test run does not type check, " +
-                   $"so these errors may be the real reason the tests fail:\n{errors}";
+                   $"so these errors may be the real reason the tests fail:\n{errors}{advice}";
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
