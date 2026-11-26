@@ -111,8 +111,9 @@ internal sealed partial class PlanRunner
             limit.CancelAfter(RulingTimeLimit);
             using IDisposable? folder = HubProjectFolderScope.For(latest);
             session.CapAnswer(RulingAnswerTokens);
+            StepToolActivity firstAsk = TrackAsk(session);
             StepAgentReply reply = await session.SendAsync(prompt, reviewerTier, ruler, limit.Token);
-            answer = await ReadVerdictAsync(session, reply, clock.Elapsed, reviewerTier, ruler, cancellationToken, onlyPath);
+            answer = await ReadVerdictAsync(session, reply, clock.Elapsed, reviewerTier, ruler, cancellationToken, onlyPath, firstAsk);
             RecordRulerTiming(plan, step, attempt, tier, model, rung, round, ruler, answer.Timing);
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)

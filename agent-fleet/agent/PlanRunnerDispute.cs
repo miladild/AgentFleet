@@ -91,8 +91,9 @@ internal sealed partial class PlanRunner
             limit.CancelAfter(RulingTimeLimit);
             using IDisposable? folder = HubProjectFolderScope.For(latest);
             session.CapAnswer(RulingAnswerTokens);
+            StepToolActivity firstAsk = TrackAsk(session);
             StepAgentReply reply = await session.SendAsync(prompt, reviewerTier, ruler, limit.Token);
-            answer = await ReadVerdictAsync(session, reply, clock.Elapsed, reviewerTier, ruler, cancellationToken, onlyPath);
+            answer = await ReadVerdictAsync(session, reply, clock.Elapsed, reviewerTier, ruler, cancellationToken, onlyPath, firstAsk);
             RecordRulerTiming(plan, step, attempt, tier, model, rung, round, ruler, answer.Timing);
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
@@ -167,6 +168,16 @@ internal sealed partial class PlanRunner
     /// </summary>
     internal const string RulerTimingEvent = "ruler-timing";
 
+    // Each ruler ask is followed by its own activity, so the log can say how that ask ended and what it held (see StepToolActivity.DescribeEnd).
+    private static StepToolActivity TrackAsk(IStepSession session)
+    {
+        var activity = new StepToolActivity();
+        session.TrackActivity(activity);
+        return activity;
+    }
+
+    private static string AskEnd(StepToolActivity? ask) => ask is null ? string.Empty : $" ({ask.DescribeEnd()})";
+
     private void RecordRulerTiming(PlanRecord plan, PlanStep step, int attempt, string tier, ModelAttemptResult model, int rung, int round,
         string ruler, string text) =>
         _store.AddEvent(plan.Id, step.Id, attempt, RulerTimingEvent, tier, node: ruler, detail: text, modelNode: model.ModelNode,
@@ -177,12 +188,14 @@ internal sealed partial class PlanRunner
     // analysis and gave no verdict, and each took about seven minutes. The verdict ask used to ask for the files as well, so on a slow
     // machine it ran to its cap, was cut off at four minutes, and its reply was thrown away.
     private async Task<RulerAnswer> ReadVerdictAsync(IStepSession session, StepAgentReply first, TimeSpan firstTook, string reviewerTier,
-        string ruler, CancellationToken cancellationToken, string? onlyPath = null)
+        string ruler, CancellationToken cancellationToken, string? onlyPath = null, StepToolActivity? firstAsk = null)
     {
         TestRulingVerdict verdict = TestRuling.Parse(first.Text);
-        string log = RulerReplyForLog(first.Text);
-        string timing = $"The ruler ({ruler}) answered after {Duration(firstTook)} with {(first.Text ?? string.Empty).Length} characters";
-        if (verdict.Kind != TestRulingKind.NoVerdict || string.IsNullOrWhiteSpace(first.Text))
+        // An empty reply is asked again like a reply with no verdict line: measured, a ruler answered with no text at all, twice in one
+        // run, and each time the ruling ended there with nothing said about why.
+        string log = string.IsNullOrWhiteSpace(first.Text) ? "It gave no text." : RulerReplyForLog(first.Text);
+        string timing = $"The ruler ({ruler}) answered after {Duration(firstTook)} with {(first.Text ?? string.Empty).Length} characters{AskEnd(firstAsk)}";
+        if (verdict.Kind != TestRulingKind.NoVerdict)
         {
             return new RulerAnswer(verdict, log, timing + ".");
         }
@@ -193,10 +206,11 @@ internal sealed partial class PlanRunner
             using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             limit.CancelAfter(RulingFollowUpTimeLimit);
             session.CapAnswer(RulingVerdictAnswerTokens);
+            StepToolActivity secondAsk = TrackAsk(session);
             StepAgentReply second = await session.SendAsync(TestRuling.VerdictRequest, reviewerTier, ruler, limit.Token);
             verdict = TestRuling.ParseVerdictOnly(second.Text);
             string askedLog = $"{log} Asked again for the verdict alone, it said: {RulerReplyForLog(second.Text, RulerFollowUpLogCharacters)}";
-            string askedTiming = $"{timing}; asked again for the verdict alone, it answered after {Duration(clock.Elapsed)} with {(second.Text ?? string.Empty).Length} characters";
+            string askedTiming = $"{timing}; asked again for the verdict alone, it answered after {Duration(clock.Elapsed)} with {(second.Text ?? string.Empty).Length} characters{AskEnd(secondAsk)}";
             return verdict.Kind == TestRulingKind.TestWrong
                 ? await ReadCorrectedFilesAsync(session, reviewerTier, ruler, askedLog, askedTiming, cancellationToken, onlyPath)
                 : new RulerAnswer(verdict, askedLog, askedTiming + ".");
@@ -222,9 +236,10 @@ internal sealed partial class PlanRunner
             using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             limit.CancelAfter(RulingFileTimeLimit);
             session.CapAnswer(RulingFileAnswerTokens);
+            StepToolActivity filesAsk = TrackAsk(session);
             StepAgentReply reply = await session.SendAsync(TestRuling.FilesRequest, reviewerTier, ruler, limit.Token);
             TestRulingVerdict files = TestRuling.ParseFiles(reply.Text, onlyPath);
-            string replyTiming = $"{timing}; asked for the corrected file(s), it answered after {Duration(clock.Elapsed)} with {(reply.Text ?? string.Empty).Length} characters";
+            string replyTiming = $"{timing}; asked for the corrected file(s), it answered after {Duration(clock.Elapsed)} with {(reply.Text ?? string.Empty).Length} characters{AskEnd(filesAsk)}";
             if (files.Kind == TestRulingKind.TestWrong)
             {
                 return new RulerAnswer(files, log, replyTiming + ".");

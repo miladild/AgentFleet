@@ -86,12 +86,14 @@ internal sealed class StepToolActivity
     public int ModelCalls { get; private set; }
 
     private OllamaCallTiming _total;
+    private string? _doneReason;
 
     public void RecordModelCall(OllamaCallTiming timing)
     {
         lock (this)
         {
             ModelCalls++;
+            _doneReason = string.IsNullOrWhiteSpace(timing.DoneReason) ? _doneReason : timing.DoneReason;
             _total = new OllamaCallTiming(_total.PromptTokens + timing.PromptTokens, _total.PromptEvalSeconds + timing.PromptEvalSeconds,
                 _total.EvalTokens + timing.EvalTokens, _total.EvalSeconds + timing.EvalSeconds, _total.LoadSeconds + timing.LoadSeconds, _total.TotalSeconds + timing.TotalSeconds);
         }
@@ -111,6 +113,21 @@ internal sealed class StepToolActivity
             System.Globalization.CultureInfo c = System.Globalization.CultureInfo.InvariantCulture;
             return string.Create(c, $"{ModelCalls} model call{(ModelCalls == 1 ? string.Empty : "s")}: prompt {_total.PromptTokens} tokens in {_total.PromptEvalSeconds:0.0} s ({Rate(_total.PromptTokens, _total.PromptEvalSeconds)}), " +
                 $"answer {_total.EvalTokens} tokens in {_total.EvalSeconds:0.0} s ({Rate(_total.EvalTokens, _total.EvalSeconds)}), model load {_total.LoadSeconds:0.0} s, total {_total.TotalSeconds:0.0} s.");
+        }
+    }
+
+    /// <summary>
+    /// How the last model call ended and what it held, as Ollama reports it: the prompt tokens, the answer tokens and the reason it
+    /// stopped ("stop" for a finished answer, "length" for one cut by its cap). Says so when no call reported anything, so a reply
+    /// with no text can be told from a call that never reached the machine.
+    /// </summary>
+    public string DescribeEnd()
+    {
+        lock (this)
+        {
+            return ModelCalls == 0
+                ? "the machine reported no model call"
+                : $"prompt {_total.PromptTokens} tokens, answer {_total.EvalTokens} tokens, ended: {_doneReason ?? "no reason reported"}";
         }
     }
 

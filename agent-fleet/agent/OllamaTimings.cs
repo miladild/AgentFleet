@@ -3,7 +3,8 @@ using OllamaSharp.Models.Chat;
 namespace AgentFleet;
 
 /// <summary>One model call as Ollama reports it at the end of its reply: tokens and seconds, split into reading the prompt and writing the answer.</summary>
-internal readonly record struct OllamaCallTiming(long PromptTokens, double PromptEvalSeconds, long EvalTokens, double EvalSeconds, double LoadSeconds, double TotalSeconds);
+internal readonly record struct OllamaCallTiming(long PromptTokens, double PromptEvalSeconds, long EvalTokens, double EvalSeconds, double LoadSeconds, double TotalSeconds,
+    string? DoneReason = null);
 
 internal static class OllamaTimings
 {
@@ -12,6 +13,6 @@ internal static class OllamaTimings
     /// <summary>The timings in an Ollama reply (the raw object of a chat response or of its last streamed update), or null for anything else.</summary>
     public static OllamaCallTiming? From(object? raw) => raw is ChatDoneResponseStream done
         ? new OllamaCallTiming(done.PromptEvalCount, done.PromptEvalDuration / NanosecondsPerSecond, done.EvalCount, done.EvalDuration / NanosecondsPerSecond,
-            done.LoadDuration / NanosecondsPerSecond, done.TotalDuration / NanosecondsPerSecond)
+            done.LoadDuration / NanosecondsPerSecond, done.TotalDuration / NanosecondsPerSecond, done.DoneReason)
         : null;
 }

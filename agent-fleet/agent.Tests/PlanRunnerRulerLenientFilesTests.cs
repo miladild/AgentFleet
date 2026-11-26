@@ -112,6 +112,31 @@ public sealed class RulerLenientFilesReadingTests
     }
 
     [Fact]
+    public void A_code_wrong_line_with_a_file_line_and_a_fenced_block_still_gives_the_file()
+    {
+        string reply = "VERDICT: CODE-WRONG\nThe test must create its folder first.\n\nFILE: tests/A.cs\n" + ClassBlock;
+        TestRulingVerdict verdict = TestRuling.ParseFiles(reply, "tests/A.cs");
+        Assert.Equal(TestRulingKind.TestWrong, verdict.Kind);
+        Assert.Equal(new[] { "tests/A.cs" }, verdict.Files.Select(file => file.Path).ToArray());
+        Assert.Equal("public class A { }\n", verdict.Files[0].Text);
+    }
+
+    [Fact]
+    public void A_code_wrong_line_with_a_file_line_directly_above_its_fence_gives_the_file_without_a_disputed_path()
+    {
+        TestRulingVerdict verdict = TestRuling.ParseFiles("VERDICT: CODE-WRONG\nFILE: tests/A.cs\n" + ClassBlock);
+        Assert.Equal(TestRulingKind.TestWrong, verdict.Kind);
+        Assert.Equal(new[] { "tests/A.cs" }, verdict.Files.Select(file => file.Path).ToArray());
+    }
+
+    [Fact]
+    public void A_code_wrong_paragraph_with_a_file_line_but_no_fenced_block_is_no_file()
+    {
+        Assert.Equal(TestRulingKind.NoVerdict,
+            TestRuling.ParseFiles("VERDICT: CODE-WRONG\nThe code must change.\nFILE: tests/A.cs", "tests/A.cs").Kind);
+    }
+
+    [Fact]
     public void Two_fenced_blocks_with_no_file_line_are_no_verdict_even_with_a_disputed_path()
     {
         Assert.Equal(TestRulingKind.NoVerdict, TestRuling.ParseFiles("```\na\n```\nand\n```\nb\n```", "tests/A.cs").Kind);

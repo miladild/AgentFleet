@@ -201,8 +201,10 @@ internal static partial class TestRuling
             position++;
         }
 
-        // A reply that rules the code wrong is not a corrected test, whatever code it holds.
-        if (FindVerdict(lines) is { Kind: CodeWrongVerdict })
+        // This reply answers a request for the corrected files after the verdict was settled as test-wrong, so a code-wrong line in it
+        // is the ruler contradicting itself, not a new ruling. A reply that only argues the code is wrong, with no FILE line naming a
+        // file, is still not a corrected test, whatever code it holds. A file it does name is read and the keep check judges it.
+        if (FindVerdict(lines) is { Kind: CodeWrongVerdict } && CountShape(reply).FileLines == 0)
         {
             return TestRulingVerdict.None;
         }

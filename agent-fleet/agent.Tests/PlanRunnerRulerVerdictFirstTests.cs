@@ -119,6 +119,63 @@ public sealed partial class PlanRunnerTests
     }
 
     [Fact]
+    public async Task A_ruler_whose_first_reply_is_empty_is_asked_once_for_the_verdict_alone_and_that_verdict_is_used()
+    {
+        string project = NewGitProject();
+        try
+        {
+            var setup = DisputePlan(project, TestsStep(), ImplementationStep("dotnet test"));
+            var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []));
+            var budget = new RulingBudget(2, call => call.Number == 1
+                ? new StepAgentReply(string.Empty, 0, false)
+                : new StepAgentReply(CodeWrongRuling, 0, false));
+            var fake = DisputingImplementer(project, message => message == 0, budget);
+            await FrozenRunner(new RulingAgent(fake), workspaces, setup.Options, setup.Health, CheckReadsTheTestFile(project, "CORRECTED"))
+                .RunPlanAsync(setup.Plan.Id, default).WaitAsync(DisputeTimeLimit);
+
+            FakeAuditCall[] asks = RulerAsks(fake);
+            Assert.Equal(2, asks.Length);
+            Assert.Equal(400, asks[1].MaxOutputTokens);
+            Assert.Contains("no VERDICT line", asks[1].Message, StringComparison.Ordinal);
+            Assert.Equal(0, budget.Violations);
+
+            PlanRecord after = Store.Get(setup.Plan.Id)!;
+            Assert.Equal("CodeWrong", Assert.Single(after.Events!, e => e.Kind == RunEventKind.TestRuling).FailureClass);
+            // The sentence the log readers know stays first; the end of each ask follows it.
+            PlanRunEvent timing = Assert.Single(after.Events!, e => e.Kind == PlanRunner.RulerTimingEvent);
+            Assert.Contains("answered after", timing.Detail, StringComparison.Ordinal);
+            Assert.Contains("with 0 characters (", timing.Detail, StringComparison.Ordinal);
+            Assert.Contains("asked again for the verdict alone, it answered after", timing.Detail, StringComparison.Ordinal);
+        }
+        finally { FailFirstTests.DeleteTree(project); }
+    }
+
+    [Fact]
+    public async Task A_ruler_that_answers_with_nothing_twice_is_no_verdict_after_two_asks_and_says_so()
+    {
+        string project = NewGitProject();
+        try
+        {
+            var setup = DisputePlan(project, TestsStep(), ImplementationStep("dotnet test"));
+            var workspaces = new FakeWorkerWorkspaceManager(new WorkerWorkspaceRecoveryAnalysis([], [], []));
+            var budget = new RulingBudget(2, _ => new StepAgentReply(string.Empty, 0, false));
+            var fake = DisputingImplementer(project, message => message == 0, budget);
+            await FrozenRunner(new RulingAgent(fake), workspaces, setup.Options, setup.Health, CheckReadsTheTestFile(project, "CORRECTED"))
+                .RunPlanAsync(setup.Plan.Id, default).WaitAsync(DisputeTimeLimit);
+
+            Assert.Equal(2, RulerAsks(fake).Length);
+            Assert.Equal(WrongTest, File.ReadAllText(Path.Combine(project, "tests", "LimitTests.cs")));
+            PlanRecord after = Store.Get(setup.Plan.Id)!;
+            PlanRunEvent ruling = Assert.Single(after.Events!, e => e.Kind == RunEventKind.TestRuling);
+            Assert.Equal("NoVerdict", ruling.FailureClass);
+            Assert.Contains("It gave no text.", ruling.Detail, StringComparison.Ordinal);
+            // One ruling that ended without an answer is one unresolved ask, however many times the ruler was asked inside it.
+            Assert.Equal(1, PlanRunner.UnresolvedAsks(after.Events!));
+        }
+        finally { FailFirstTests.DeleteTree(project); }
+    }
+
+    [Fact]
     public async Task A_ruler_whose_first_answer_has_a_verdict_gets_no_follow_up_and_no_third_ask()
     {
         string project = NewGitProject();
