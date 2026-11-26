@@ -194,7 +194,8 @@ internal sealed partial class PlanRunner
             ? string.Empty
             : $" The output names {string.Join(", ", failure.OwnFiles.Select(file => $"`{file}`"))}, which this step lists, so the fault is in this step's own work: fix it there.";
         return $"The check for this step passed, but the project's final check (`{failure.Command}`) fails now. It runs the whole project, " +
-               $"so a change in this step probably broke something that already worked.{own} Fix what this step broke; do not change the tests " +
-               "that were passing before unless the step's text says to. Output:\n" + failure.Output;
+               $"so a change in this step or in an earlier one probably broke something that already worked.{own} Find what broke it and fix it " +
+               "there, even in a file this step does not list: a call whose arguments or name changed in an earlier step is a common cause. " +
+               "Do not change the tests that were passing before unless the step's text says to. Output:\n" + failure.Output;
     }
 }

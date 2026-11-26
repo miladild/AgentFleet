@@ -99,6 +99,9 @@ public sealed partial class PlanNoChangeTests
         string extra = agent.Sessions[1].Messages[1].Text;
         Assert.Contains("the project's final check (`final`) fails now", extra, StringComparison.Ordinal);
         Assert.Contains("FAIL test/old.test.ts", extra, StringComparison.Ordinal);
+        // The break may have been made by an earlier step: the note must not tell the worker that only this step is to blame.
+        Assert.Contains("this step or in an earlier one", extra, StringComparison.Ordinal);
+        Assert.DoesNotContain("Fix what this step broke", extra, StringComparison.Ordinal);
         Assert.Contains(after.Events!, runEvent => runEvent.Kind == FinalCheckKind && runEvent.StepId == 2 &&
             runEvent.Detail.Contains("`final`", StringComparison.Ordinal) && runEvent.Detail.Contains("rejects zero", StringComparison.Ordinal));
     }

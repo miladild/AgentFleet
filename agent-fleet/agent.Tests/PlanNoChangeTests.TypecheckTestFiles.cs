@@ -111,6 +111,58 @@ public sealed partial class PlanNoChangeTests
         Assert.Contains(TestFileTypeError, RetryPrompts(agent), StringComparison.Ordinal);
     }
 
+    private const string OldTestError = "test/old.test.ts(14,37): error TS2554: Expected 0-1 arguments, but got 2.";
+
+    // A test that already existed fails with an assertion, not a type error: the code it calls changed its signature in an earlier step.
+    private static string AssertionIn(string where) =>
+        $"Exit code: 1\n--- stdout ---\n✖ HTTP serves the board (83 ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n  503 !== 200\n      at TestContext.<anonymous> ({where}:30:12)\nℹ fail 1";
+
+    [Theory]
+    [InlineData("relative")]
+    [InlineData("absolute")]
+    public async Task A_failing_test_file_the_step_does_not_list_is_type_checked_whatever_the_kind_of_failure(string form)
+    {
+        WriteProjectFile("tsconfig.json", ProjectOptions);
+        string where = form == "relative" ? "test\\old.test.ts" : Path.Combine(ProjectDirectory, "test", "old.test.ts");
+        var (plan, agent, commands, verify) = TestFilesPlan("Exit code: 2\n--- stdout ---\n" + OldTestError + "\nsrc/other.ts(4,1): error TS2304: Cannot find name 'later'.",
+            checkFailure: AssertionIn(where));
+        SeedFiles("test/old.test.ts");
+
+        await RepairRunner(agent, verify).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal($"{CompilerStart}--noEmit --incremental false {ProjectFlags} test/old.test.ts", Assert.Single(CompilerRuns(commands)));
+        string retry = RetryPrompts(agent);
+        Assert.Contains(OldTestError, retry, StringComparison.Ordinal);
+        Assert.Contains("already existed", retry, StringComparison.Ordinal);
+        Assert.DoesNotContain("Cannot find name 'later'", retry, StringComparison.Ordinal);
+        Assert.Equal(1, TypecheckHints(plan.Id));
+    }
+
+    [Fact]
+    public async Task A_test_file_the_failure_names_that_is_not_in_the_project_or_not_a_test_gets_no_compiler_run()
+    {
+        WriteProjectFile("tsconfig.json", ProjectOptions);
+        var (plan, agent, commands, verify) = TestFilesPlan(CompilerPasses,
+            checkFailure: AssertionIn("test\\missing.test.ts") + "\n      at src\\a.ts:3:1\n      at node_modules\\x\\y.test.ts:1:1");
+
+        await RepairRunner(agent, verify).RunPlanAsync(plan.Id, default);
+
+        Assert.Empty(CompilerRuns(commands));
+        Assert.Equal(0, TypecheckHints(plan.Id));
+    }
+
+    [Fact]
+    public async Task A_failure_that_names_only_a_test_file_the_step_lists_keeps_the_old_gate()
+    {
+        WriteProjectFile("tsconfig.json", ProjectOptions);
+        var (plan, agent, commands, verify) = TestFilesPlan(TestFileErrors, checkFailure: AssertionIn("test\\a.test.ts"));
+
+        await RepairRunner(agent, verify).RunPlanAsync(plan.Id, default);
+
+        Assert.Empty(CompilerRuns(commands));
+        Assert.Equal(0, TypecheckHints(plan.Id));
+    }
+
     [Theory]
     [InlineData("Exit code: 1\n--- stdout ---\n✖ keeps the alert (3 ms)\n  AssertionError: 1 !== 2\nℹ fail 1")]
     [InlineData("Exit code: 1\n--- stdout ---\n  SyntaxError: Unexpected token '}'")]

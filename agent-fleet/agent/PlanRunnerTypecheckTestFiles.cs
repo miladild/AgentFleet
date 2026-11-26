@@ -41,7 +41,7 @@ internal sealed partial class PlanRunner
     private async Task<string?> TypecheckTestFilesHintAsync(PlanRecord plan, PlanStep step, int attempt, string tier, ModelAttemptResult model,
         int rung, int round, string? checkOutput, string? scriptHint, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrEmpty(checkOutput) || !TypecheckRuntimeError().IsMatch(checkOutput))
+        if (string.IsNullOrEmpty(checkOutput))
         {
             return null;
         }
@@ -54,8 +54,15 @@ internal sealed partial class PlanRunner
                 return null;
             }
 
-            (string Full, string Relative)[] tests = TypecheckTestFiles(plan, step)
+            // The step's own test files are checked for a TypeError or a ReferenceError; a test file the step does not list but the failing
+            // check names is checked for any failure: it existed before the step, so a call in it that no longer matches the code is a type error
+            // whatever it fails with (measured: an assertion on a 503, ten rounds of reading the wrong code).
+            (string Full, string Relative)[] own = TypecheckRuntimeError().IsMatch(checkOutput) ? TypecheckTestFiles(plan, step) : [];
+            (string Full, string Relative)[] named = NamedTestFiles(plan, step, checkOutput);
+            (string Full, string Relative)[] tests = own.Concat(named)
                 .Where(file => scriptHint is null || !scriptHint.Contains(file.Relative, StringComparison.Ordinal))
+                .DistinctBy(file => file.Relative, StringComparer.OrdinalIgnoreCase)
+                .Take(TypecheckTestFilesMax)
                 .ToArray();
             if (tests.Length == 0)
             {
@@ -71,25 +78,71 @@ internal sealed partial class PlanRunner
             }
 
             // Only the test files: the step's other files are covered by the typecheck script's errors.
-            string[] named = tests.Select(file => file.Full).ToArray();
-            string[] lines = TypecheckErrorLines(output, path => NamesDeclared(plan, named, path)).Take(TypecheckLinesShown).ToArray();
+            string[] checkedFiles = tests.Select(file => file.Full).ToArray();
+            string[] lines = TypecheckErrorLines(output, path => NamesDeclared(plan, checkedFiles, path)).Take(TypecheckLinesShown).ToArray();
             if (lines.Length == 0)
             {
                 return null;
             }
 
             string errors = string.Join('\n', lines);
+            bool onlyNamed = tests.All(test => named.Any(file => file.Relative.Equals(test.Relative, StringComparison.OrdinalIgnoreCase)) &&
+                                               !own.Any(file => file.Relative.Equals(test.Relative, StringComparison.OrdinalIgnoreCase)));
             _store.AddEvent(plan.Id, step.Id, attempt, TypecheckHintKind, tier, node: model.ModelNode ?? model.Machine,
-                detail: $"The step's test files, type-checked with the project's own compiler options, report errors:\n{errors}",
+                detail: (onlyNamed
+                    ? "The failing check names test files this step does not list; type-checked with the project's own compiler options, they report errors:"
+                    : "The step's test files, type-checked with the project's own compiler options, report errors:") + $"\n{errors}",
                 modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round);
-            return "The test run does not type check. The compiler, run on this step's test files with the project's own options, " +
-                   $"reports these errors, which may be the real reason the tests fail:\n{errors}";
+            return onlyNamed
+                ? "The failing check names test files that this step does not list and that already existed. The test run does not type check. " +
+                  "The compiler, run on them with the project's own options, reports these errors: the code they call no longer matches them, " +
+                  $"because this step or an earlier one changed it. Fix the code, not the test, unless the step's text says to change the test:\n{errors}"
+                : "The test run does not type check. The compiler, run on this step's test files with the project's own options, " +
+                  $"reports these errors, which may be the real reason the tests fail:\n{errors}";
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             _logger.LogWarning(exception, "Plan {PlanId} step {StepId}: the type check of the test files could not run, so the failed check goes back without it.", plan.Id, step.Id);
             return null;
         }
+    }
+
+    // A TypeScript file path as a test runner prints it in a failure: relative ("test\app.test.ts:30:12") or absolute ("F:\p\test\app.test.ts:30:12").
+    [GeneratedRegex(@"(?:[A-Za-z]:)?[^\s:()'""<>|*?]+\.(?:ts|tsx|mts|cts)(?=:\d|\)|\s|$)", RegexOptions.CultureInvariant)]
+    private static partial Regex PrintedTypeScriptPath();
+
+    // The test files the failed check names that the step does not list, that exist in the project and can be named on a command line.
+    private static (string Full, string Relative)[] NamedTestFiles(PlanRecord plan, PlanStep step, string checkOutput)
+    {
+        string root = Path.GetFullPath(plan.WorkingDirectory!);
+        string[] declared = FleetPlanContext.DeclaredPaths(plan, step).ToArray();
+        var found = new List<(string Full, string Relative)>();
+        foreach (Match match in PrintedTypeScriptPath().Matches(checkOutput))
+        {
+            string full;
+            try
+            {
+                full = Path.GetFullPath(Path.Combine(root, match.Value.Replace('\\', '/')));
+            }
+            catch (Exception exception) when (exception is ArgumentException or NotSupportedException)
+            {
+                continue;
+            }
+
+            if (!full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) || !File.Exists(full))
+            {
+                continue;
+            }
+
+            string relative = Path.GetRelativePath(root, full).Replace('\\', '/');
+            if (IsTestPath(relative) && TypecheckPlainPath().IsMatch(relative) && !IsFleetOrDependencyPath(relative) &&
+                !declared.Any(path => FleetPlanContext.Names(path, full)))
+            {
+                found.Add((full, relative));
+            }
+        }
+
+        return found.DistinctBy(file => file.Relative, StringComparer.OrdinalIgnoreCase).Take(TypecheckTestFilesMax).ToArray();
     }
 
     // The test files the step lists that exist and can be named on a command line, with their paths relative to the project and written
