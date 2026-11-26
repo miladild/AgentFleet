@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -87,7 +88,37 @@ internal sealed partial class PlanRunner
 
         string? scriptHint = await TypecheckScriptHintAsync(plan, step, attempt, tier, model, rung, round, cancellationToken);
         string? testFilesHint = await TypecheckTestFilesHintAsync(plan, step, attempt, tier, model, rung, round, checkOutput, scriptHint, cancellationToken);
-        return scriptHint is null ? testFilesHint : testFilesHint is null ? scriptHint : $"{scriptHint}\n\n{testFilesHint}";
+        string? hint = scriptHint is null ? testFilesHint : testFilesHint is null ? scriptHint : $"{scriptHint}\n\n{testFilesHint}";
+        return LimitRepeatedHint(plan, step, attempt, tier, model, rung, round, hint);
+    }
+
+    /// <summary>How many times in a row a step is sent the same type errors. Measured: one hint went out in 14 of 16 rounds and was never acted on.</summary>
+    internal const int MaxIdenticalHints = 3;
+
+    private readonly ConcurrentDictionary<string, (string Text, int Sent)> _lastTypecheckHints = new(StringComparer.Ordinal);
+
+    // The same type errors, word for word, are sent at most MaxIdenticalHints times in a row for a step. A hint that changed is sent
+    // as before, and a round with no hint starts the count again. The run log says when a hint was left out.
+    private string? LimitRepeatedHint(PlanRecord plan, PlanStep step, int attempt, string tier, ModelAttemptResult model, int rung, int round, string? hint)
+    {
+        string key = $"{plan.Id}/{step.Id}";
+        if (hint is null)
+        {
+            _lastTypecheckHints.TryRemove(key, out _);
+            return null;
+        }
+
+        int sent = _lastTypecheckHints.TryGetValue(key, out (string Text, int Sent) last) && string.Equals(last.Text, hint, StringComparison.Ordinal) ? last.Sent : 0;
+        if (sent >= MaxIdenticalHints)
+        {
+            _store.AddEvent(plan.Id, step.Id, attempt, TypecheckHintKind, tier, node: model.ModelNode ?? model.Machine,
+                detail: $"The same type errors were already sent {sent} times in a row and did not change, so they are repeated, not sent again.",
+                modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round);
+            return null;
+        }
+
+        _lastTypecheckHints[key] = (hint, sent + 1);
+        return hint;
     }
 
     /// <summary>

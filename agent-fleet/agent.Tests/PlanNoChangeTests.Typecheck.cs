@@ -141,6 +141,32 @@ public sealed partial class PlanNoChangeTests
         Assert.Equal(PlanStatus.Done, Store.Get(plan.Id)!.Status);
     }
 
+    [Fact]
+    public async Task The_same_type_errors_are_sent_at_most_three_times_in_a_row_and_the_log_says_when_one_was_left_out()
+    {
+        WritePackageScripts("\"typecheck\": \"tsc --noEmit\"");
+        SeedFiles("src/a.ts");
+        PlanRecord plan = Store.Approve(Store.Create("One step", "goal", ProjectDirectory, ["a"], ["q?"], ["r"], null, null,
+            [Listed("write a", "check1", "src/a.ts")]).Id)!;
+        // The worker never changes the file, so every failed check carries the same type errors.
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            WriteProjectFile("src/a.ts", "bad");
+            return Task.FromResult("Done.");
+        });
+        string Verify(string command) => command == TypecheckCommand
+            ? TypecheckErrors
+            : "Exit code: 1\n--- stdout ---\n✖ stores the alert (3 ms)\n  TypeError: store.history is not a function\nℹ fail 1";
+
+        await RepairRunner(agent, Verify).RunPlanAsync(plan.Id, default);
+
+        PlanRecord after = Store.Get(plan.Id)!;
+        int sent = agent.Calls.Count(call => call.Prompt.Contains("src/a.ts(3,11)", StringComparison.Ordinal));
+        Assert.Equal(PlanRunner.MaxIdenticalHints, sent);
+        Assert.Contains(after.Events!, runEvent => runEvent.Kind == TypecheckKind &&
+            runEvent.Detail.Contains("repeated, not sent again", StringComparison.Ordinal));
+    }
+
     [Theory]
     [InlineData("{ \"scripts\": { \"typecheck\": \"tsc --noEmit\" } }", true)]
     [InlineData("{ \"scripts\": { \"test\": \"node --test\", \"typecheck\": \"tsc\" } }", true)]
