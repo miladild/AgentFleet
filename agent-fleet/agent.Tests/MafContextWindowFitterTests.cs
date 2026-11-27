@@ -347,7 +347,7 @@ public sealed class MafContextWindowFitterTests
         var fitter = new MafContextWindowFitter(collapse);
         List<ChatMessage> input = ContextWindowTestHelper.BuildConversation(30);
         var head = input.Take(2).ToList();
-        int budget = ContextSizeChatClient.EstimateTokens(head, null) + 1_000;
+        int budget = ContextSizeChatClient.EstimateTokens(head, null) + 100;
 
         IReadOnlyList<ChatMessage> fitted = await fitter.FitAsync(input, null, budget, 1.0, CancellationToken.None);
 
@@ -422,6 +422,33 @@ public sealed class MafContextWindowFitterTests
         Assert.True(ContextSizeChatClient.EstimateTokens(fitted, null) <= budget);
         Assert.Equal(ContextWindowTestHelper.Signature(input[^2]), ContextWindowTestHelper.Signature(fitted[^2]));
         Assert.Equal(ContextWindowTestHelper.Signature(input[^1]), ContextWindowTestHelper.Signature(fitted[^1]));
+    }
+
+    // Measured: keeping only the newest turn made a worker read two files in turn until its reads were spent, since reading
+    // one pushed the other out. Whole turns give way only when the answer would have too little room, and two stay while
+    // two fit.
+    [Theory]
+    [InlineData(true, 10_500, 3)] // Three turns are a little over the budget: the answer still has room.
+    [InlineData(false, 10_500, 3)]
+    [InlineData(true, 6_500, 2)] // Three turns leave too little room, two are enough.
+    [InlineData(false, 6_500, 2)]
+    public async Task Whole_latest_turns_give_way_only_as_far_as_the_answer_needs(bool collapse, int room, int whole)
+    {
+        var fitter = new MafContextWindowFitter(collapse);
+        List<ChatMessage> input = ContextWindowTestHelper.BuildConversation(0);
+        for (int call = 0; call < 10; call++)
+        {
+            input.Add(new ChatMessage(ChatRole.Assistant, [new FunctionCallContent($"r{call}", "read_file", new Dictionary<string, object?> { ["path"] = $"src/{call}.ts" })]));
+            input.Add(new ChatMessage(ChatRole.Tool, [new FunctionResultContent($"r{call}", new string((char)('a' + call), 9_000))]));
+        }
+
+        int budget = ContextSizeChatClient.EstimateTokens(input.Take(2).ToList(), null) + room; // One turn is about 3 620.
+
+        IReadOnlyList<ChatMessage> fitted = await fitter.FitAsync(input, null, budget, 1.0, CancellationToken.None);
+
+        Assert.Equal(0, fitter.FallbackCount);
+        int kept = fitted.Count(message => message.Contents.OfType<FunctionResultContent>().Any(result => result.Result?.ToString()?.Length == 9_000));
+        Assert.Equal(whole, kept);
     }
 
     // Head pin edge test: system + assistant text + user task.

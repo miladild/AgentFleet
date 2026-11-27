@@ -117,12 +117,14 @@ internal sealed class MafContextWindowFitter : IContextWindowFitter
             CompactionTrigger enough = index =>
                 full - EstimateWithHead(pinned, index.GetIncludedMessages(), options, scale) >= mustDrop;
 
-            // The newest three groups are left whole when that fits. When they are more than the window by themselves (whole
-            // files read in one turn after another), only the newest one is: the model is acting on it.
+            // The newest three groups are left whole while the answer keeps at least half its room. When they take more than
+            // that (whole files read in one turn after another), two are kept, then only the newest one, which the model is
+            // acting on. Not sooner: with one file kept, a model reading two read them in turn until its reads were spent.
+            int most = budgetTokens + ContextSizeChatClient.MaxAnswerTokens / 2;
             List<ChatMessage> result = await ShortenAsync(preserved: 3);
-            if (EstimateWithHead(result, [], options, scale) > budgetTokens)
+            for (int preserved = 2; preserved >= 1 && EstimateWithHead(result, [], options, scale) > most; preserved--)
             {
-                result = await ShortenAsync(preserved: 1);
+                result = await ShortenAsync(preserved);
             }
 
             async Task<List<ChatMessage>> ShortenAsync(int preserved)
