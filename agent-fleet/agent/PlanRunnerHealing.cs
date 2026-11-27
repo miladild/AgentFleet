@@ -169,6 +169,35 @@ internal sealed partial class PlanRunner
             : (false, $"Fleet note: `{repair.Command}` was run to install what the project declares and failed: {Summarize(result)}");
     }
 
+    // A fresh worker copy has no installed packages: the model's first test run then fails on a missing package and the model
+    // installs things itself (measured: it added a package the project never asked for). Done once for each plan and machine,
+    // whose copy of the project stays between rounds. A failure is only recorded: the check's own failure is repaired as before.
+    private async Task PrepareWorkerDependenciesAsync(
+        PlanRecord plan, PlanStep step, int attempt, string tier, int rung, int round, string machine, string? modelMachine,
+        IWorkerWorkspaceSession worker, CancellationToken cancellationToken)
+    {
+        const string failed = "node-modules-setup";
+        if (!_harness.EnablePrepareDependencies || EnvironmentDoctor.Setup(plan.WorkingDirectory) is not { Command: { } command } setup ||
+            (_store.Get(plan.Id)?.Events ?? []).Any(runEvent => runEvent.Kind == RunEventKind.EnvironmentRepaired &&
+                string.Equals(runEvent.WorkspaceNode, machine, StringComparison.OrdinalIgnoreCase) &&
+                (runEvent.FailureSignature == setup.Cause || runEvent.FailureSignature == failed)))
+        {
+            return;
+        }
+
+        bool succeeded;
+        string result;
+        using (worker.Enter())
+        {
+            (succeeded, result) = await _tools.RunRepairCommandAsync(plan, command, cancellationToken);
+        }
+
+        _store.AddEvent(plan.Id, step.Id, attempt, RunEventKind.EnvironmentRepaired, tier, node: machine,
+            detail: $"{setup.Advice} `{command}` {(succeeded ? "succeeded" : "failed")}: {Summarize(result)}",
+            modelNode: modelMachine, workspaceNode: machine, failureClass: succeeded ? "Repaired" : "RepairFailed",
+            failureSignature: succeeded ? setup.Cause : failed, rung: rung, round: round);
+    }
+
     /// <summary>
     /// Audits a check that looks broken and replaces it when the guard allows: the auditor (the hub's model when recovery
     /// scope and Hub mode allow it, otherwise the model of the worker that did the work) reads the project and proposes a

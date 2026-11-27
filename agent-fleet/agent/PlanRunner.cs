@@ -3599,6 +3599,8 @@ internal sealed partial class PlanRunner
                 _store.AddEvent(plan.Id, step.Id, attempt, ToolLoggedEvent, tier, machine,
                     "Tool calls of this round are logged from here on, so a restart can tell whether the round changed anything.",
                     modelNode: modelMachine, workspaceNode: machine);
+                await PrepareWorkerDependenciesAsync(plan, step, attempt, tier, conversation.Rung, conversation.Round, machine!,
+                    modelMachine, worker, attemptCancellation.Token);
                 editCheck = CreateEditCheck(plan, step, worker);
             }
 

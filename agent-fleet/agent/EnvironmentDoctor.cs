@@ -105,6 +105,25 @@ internal static partial class EnvironmentDoctor
         return null;
     }
 
+    /// <summary>
+    /// What to install on a machine that just received a copy of the project, before anything runs there: the packages of a
+    /// Node project that has a lock file, exactly as locked. Null for any other project, where a failed check says what is missing.
+    /// </summary>
+    public static EnvironmentRepair? Setup(string? projectRoot)
+    {
+        if (string.IsNullOrWhiteSpace(projectRoot))
+        {
+            return null;
+        }
+
+        bool Has(string name) => File.Exists(Path.Combine(projectRoot, name));
+        string packagePath = Path.Combine(projectRoot, "package.json");
+        return Has("package.json") && (Has("package-lock.json") || Has("npm-shrinkwrap.json")) && !Has("yarn.lock") && !Has("pnpm-lock.yaml") &&
+               DeclaredNodePackages(packagePath).Count > 0
+            ? new EnvironmentRepair("node-modules", "npm ci", "Installed the project's declared dependencies with npm ci before the model started.")
+            : null;
+    }
+
     /// <summary>The project's own virtual environment's Python, relative to the project folder, when it has one.</summary>
     public static string? VirtualEnvironmentPython(string projectRoot)
     {

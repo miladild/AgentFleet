@@ -37,7 +37,8 @@ internal sealed record HarnessOptions(
     bool StuckGuardEnabled = true,
     int StuckNoteAfter = 2,
     int StuckStopAfter = 3,
-    int StuckUnchargedRoundsPerAttempt = 3)
+    int StuckUnchargedRoundsPerAttempt = 3,
+    bool EnablePrepareDependencies = true)
 {
     private const string Prefix = "FLEET_HARNESS_";
 
@@ -81,7 +82,8 @@ internal sealed record HarnessOptions(
             stuckNoteAfter,
             // A stop below the note would never be reached after it: it is raised to the note's setting.
             Math.Max(stuckNoteAfter, Number("STUCK_STOP_AFTER", defaults.StuckStopAfter, 2, 20)),
-            Number("STUCK_UNCHARGED_ROUNDS_PER_ATTEMPT", defaults.StuckUnchargedRoundsPerAttempt, 0, 10));
+            Number("STUCK_UNCHARGED_ROUNDS_PER_ATTEMPT", defaults.StuckUnchargedRoundsPerAttempt, 0, 10),
+            Flag("ENABLE_PREPARE_DEPENDENCIES", defaults.EnablePrepareDependencies));
     }
 
     /// <summary>One line for the run log: every option and its value.</summary>
@@ -100,6 +102,7 @@ internal sealed record HarnessOptions(
             (nameof(EnableWebLookup), EnableWebLookup), (nameof(WebLookupAfterFailures), WebLookupAfterFailures),
             (nameof(EnableNewPrintCheck), EnableNewPrintCheck),
             (nameof(StuckGuardEnabled), StuckGuardEnabled), (nameof(StuckNoteAfter), StuckNoteAfter), (nameof(StuckStopAfter), StuckStopAfter),
-            (nameof(StuckUnchargedRoundsPerAttempt), StuckUnchargedRoundsPerAttempt)
+            (nameof(StuckUnchargedRoundsPerAttempt), StuckUnchargedRoundsPerAttempt),
+            (nameof(EnablePrepareDependencies), EnablePrepareDependencies)
         }.Select(option => $"{option.Name}={(option.Value is bool flag ? (flag ? "on" : "off") : option.Value)}"));
 }
