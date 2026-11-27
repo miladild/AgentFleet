@@ -358,19 +358,19 @@ public sealed class MafContextWindowFitterTests
         Assert.Equal(ContextWindowTestHelper.Signature(fitted[0]), ContextWindowTestHelper.Signature(input[0]));
         Assert.Equal(ContextWindowTestHelper.Signature(fitted[1]), ContextWindowTestHelper.Signature(input[1]));
 
-        // Last six messages match (last three groups)
-        Assert.True(fitted.Count >= 8);
-        for (int i = 0; i < 6; i++)
+        // Three whole groups do not fit this budget, so only the last call and its result are sure to be whole.
+        Assert.True(fitted.Count >= 4);
+        for (int i = 0; i < 2; i++)
         {
             Assert.Equal(
-                ContextWindowTestHelper.Signature(fitted[fitted.Count - 6 + i]),
-                ContextWindowTestHelper.Signature(input[input.Count - 6 + i]));
+                ContextWindowTestHelper.Signature(fitted[fitted.Count - 2 + i]),
+                ContextWindowTestHelper.Signature(input[input.Count - 2 + i]));
         }
 
-        // For maf-truncate, should be 2 + 6
+        // For maf-truncate, should be 2 + 2
         if (!collapse)
         {
-            Assert.Equal(8, fitted.Count);
+            Assert.Equal(4, fitted.Count);
         }
     }
 
@@ -403,6 +403,25 @@ public sealed class MafContextWindowFitterTests
         Assert.Equal(ContextWindowTestHelper.Signature(after[^1]), ContextWindowTestHelper.Signature(fitted[^1]));
         Assert.True(at < fitted.Count - 1);
         Assert.DoesNotContain(fitted, message => message.Text.Contains("OLD-OUTPUT", StringComparison.Ordinal) && message.Role == ChatRole.User);
+    }
+
+    // Three preserved turns that hold whole files can be more than the window by themselves. The older two are then shortened
+    // too, and only the latest call and its result, which the model is acting on, are sure to stay whole.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Latest_turns_that_are_too_big_give_way_but_never_the_last_one(bool collapse)
+    {
+        var fitter = new MafContextWindowFitter(collapse);
+        List<ChatMessage> input = ContextWindowTestHelper.BuildConversation(10, resultChars: 9_000);
+        int budget = ContextSizeChatClient.EstimateTokens(input.Take(2).ToList(), null) + 5_000; // One turn is about 3 800.
+
+        IReadOnlyList<ChatMessage> fitted = await fitter.FitAsync(input, null, budget, 1.0, CancellationToken.None);
+
+        Assert.Equal(0, fitter.FallbackCount);
+        Assert.True(ContextSizeChatClient.EstimateTokens(fitted, null) <= budget);
+        Assert.Equal(ContextWindowTestHelper.Signature(input[^2]), ContextWindowTestHelper.Signature(fitted[^2]));
+        Assert.Equal(ContextWindowTestHelper.Signature(input[^1]), ContextWindowTestHelper.Signature(fitted[^1]));
     }
 
     // Head pin edge test: system + assistant text + user task.

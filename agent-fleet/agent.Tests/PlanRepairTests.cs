@@ -206,10 +206,12 @@ public sealed partial class PlanRunnerTests
         Assert.Contains("CHECK OUTPUT (as printed):", fresh, StringComparison.Ordinal);
     }
 
+    // On a small window the packet in each later round pushed the pinned messages past the window: the step, the files and the
+    // tried list are left to the first message and the tools, and the round says what failed.
     [Theory]
     [InlineData(16384, false)]
     [InlineData(65536, true)]
-    public async Task A_repair_round_on_a_small_machine_does_not_say_the_step_again(int window, bool repeated)
+    public async Task A_repair_round_on_a_small_machine_carries_the_failure_without_the_packet(int window, bool packet)
     {
         FleetNodeConfig worker = new("worker-a", "http://worker-a.example.test/v1", "m", "worker", "standard", ContextLength: window);
         FleetOptions options = OptionsWithNodes(new FleetNodeConfig("hub", "http://hub.example.test/v1", "m", "hub", "heavy", Fallback: true), worker);
@@ -227,9 +229,11 @@ public sealed partial class PlanRunnerTests
             : FailWith("widget::renders"), options, health).RunPlanAsync(plan.Id, default);
 
         string message = Assert.Single(agent.Sessions).Messages[1].Text;
-        Assert.Equal(repeated, message.Contains("detail of fix the widget", StringComparison.Ordinal));
-        Assert.Contains("FILES YOU MAY WRITE", message, StringComparison.Ordinal);
-        Assert.Contains("ALREADY TRIED", message, StringComparison.Ordinal);
+        Assert.Equal(packet, message.Contains("detail of fix the widget", StringComparison.Ordinal));
+        Assert.Equal(packet, message.Contains("FILES YOU MAY WRITE", StringComparison.Ordinal));
+        Assert.Equal(packet, message.Contains("ALREADY TRIED", StringComparison.Ordinal));
+        Assert.Contains("FAILED widget::renders", message, StringComparison.Ordinal);
+        Assert.Contains("Round 2: the approved check did not pass yet", message, StringComparison.Ordinal);
     }
 
     [Fact]

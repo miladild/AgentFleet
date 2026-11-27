@@ -117,32 +117,45 @@ internal sealed class MafContextWindowFitter : IContextWindowFitter
             CompactionTrigger enough = index =>
                 full - EstimateWithHead(pinned, index.GetIncludedMessages(), options, scale) >= mustDrop;
 
-            // Build and run the compaction strategy.
-            CompactionStrategy strategy = _collapseToolResults
-                ? new PipelineCompactionStrategy(
-                    new ToolResultCompactionStrategy(over, minimumPreservedGroups: 3, target: enough)
-                    {
-                        ToolCallFormatter = FormatCollapsed
-                    },
-                    new TruncationCompactionStrategy(over, minimumPreservedGroups: 3, target: enough))
-                : new TruncationCompactionStrategy(over, minimumPreservedGroups: 3, target: enough);
-
-            var compact = CompactAsyncOverride ?? _compactAsync;
-            IEnumerable<ChatMessage> compactedBody = await compact(strategy, body, _logger, cancellationToken);
-
-            // Merge collapsed messages (maf-collapse only)
-            if (_collapseToolResults)
+            // The newest three groups are left whole when that fits. When they are more than the window by themselves (whole
+            // files read in one turn after another), only the newest one is: the model is acting on it.
+            List<ChatMessage> result = await ShortenAsync(preserved: 3);
+            if (EstimateWithHead(result, [], options, scale) > budgetTokens)
             {
-                compactedBody = MergeCollapsed(compactedBody);
+                result = await ShortenAsync(preserved: 1);
             }
 
-            List<ChatMessage> result = head.Concat(compactedBody).ToList();
-            if (latest >= 0)
+            async Task<List<ChatMessage>> ShortenAsync(int preserved)
             {
-                // Before the first turn that came after it and is still whole; at the end when none is.
-                var later = new HashSet<ChatMessage>(messages.Skip(latest + 1), ReferenceEqualityComparer.Instance);
-                int at = result.FindIndex(headCount, later.Contains);
-                result.Insert(at < 0 ? result.Count : at, messages[latest]);
+                // Build and run the compaction strategy.
+                CompactionStrategy strategy = _collapseToolResults
+                    ? new PipelineCompactionStrategy(
+                        new ToolResultCompactionStrategy(over, minimumPreservedGroups: preserved, target: enough)
+                        {
+                            ToolCallFormatter = FormatCollapsed
+                        },
+                        new TruncationCompactionStrategy(over, minimumPreservedGroups: preserved, target: enough))
+                    : new TruncationCompactionStrategy(over, minimumPreservedGroups: preserved, target: enough);
+
+                var compact = CompactAsyncOverride ?? _compactAsync;
+                IEnumerable<ChatMessage> compactedBody = await compact(strategy, body, _logger, cancellationToken);
+
+                // Merge collapsed messages (maf-collapse only)
+                if (_collapseToolResults)
+                {
+                    compactedBody = MergeCollapsed(compactedBody);
+                }
+
+                List<ChatMessage> shortened = head.Concat(compactedBody).ToList();
+                if (latest >= 0)
+                {
+                    // Before the first turn that came after it and is still whole; at the end when none is.
+                    var later = new HashSet<ChatMessage>(messages.Skip(latest + 1), ReferenceEqualityComparer.Instance);
+                    int at = shortened.FindIndex(headCount, later.Contains);
+                    shortened.Insert(at < 0 ? shortened.Count : at, messages[latest]);
+                }
+
+                return shortened;
             }
 
             // Return the same instance if nothing was removed.

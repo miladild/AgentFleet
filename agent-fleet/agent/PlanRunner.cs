@@ -2148,7 +2148,8 @@ internal sealed partial class PlanRunner
 
     // The packet for a repair round (null when it is switched off, or the project folder or the check's output is not there to read).
     // A fresh conversation's first message already holds the step's text, and its brief tells the earlier rounds, so its packet
-    // leaves both out. A later round's packet leaves the step's text out on a small window, where the first message keeps it.
+    // leaves both out. A later round on a small window gets no packet: that message and the first one are never shortened,
+    // and together they were more than the window; what failed is said without it and the files are a tool call away.
     private string? ContextPacketFor(PlanRecord plan, PlanStep step, string? failure, RollbackNote? rollback, string? node,
         bool fresh = false)
     {
@@ -2159,13 +2160,17 @@ internal sealed partial class PlanRunner
 
         string key = $"{plan.Id}:{step.Id}";
         int? window = ContextWindowOf(node, step.Tier);
-        bool small = window is { } tokens && tokens <= MachineProfile.SmallWindow;
+        if (!fresh && window is { } tokens && tokens <= MachineProfile.SmallWindow)
+        {
+            return null;
+        }
+
         try
         {
             return RepairPacket.Build(plan, step, failure, _filesAtStart.GetValueOrDefault(key) ?? [],
                 _contentAtStart.GetValueOrDefault(key) ?? new Dictionary<string, string>(), _harness.EnableRevertNotes ? rollback : null,
                 fresh ? [] : RepairMessages.TriedLines(StepEventsSinceRetry(plan.Id, step.Id)),
-                MachineProfile.PacketTokenBudget(window, _harness.MaxPacketTokens), showStep: !fresh && !small);
+                MachineProfile.PacketTokenBudget(window, _harness.MaxPacketTokens), showStep: !fresh);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
