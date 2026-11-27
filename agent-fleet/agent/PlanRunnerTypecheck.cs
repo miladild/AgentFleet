@@ -116,16 +116,25 @@ internal sealed partial class PlanRunner
                 continue;
             }
 
-            advice.Add($"`{group.Key.Name}` is declared twice in {group.Key.Path} (lines {string.Join(" and ", lines)}). A class cannot have a field and a " +
+            advice.Add($"`{group.Key.Name}`{DeclaredTwice}{group.Key.Path} (lines {string.Join(" and ", lines)}). A class cannot have a field and a " +
                        $"method with the same name, and the field hides the method, so a call such as `store.{group.Key.Name}()` fails with \"is not a function\". " +
                        $"Keep the name that the step text and the tests use for the public method, and rename the other one (for example the private field to `_{group.Key.Name}`) " +
-                       "in every place it is used, including each `this." + group.Key.Name + "`.");
+                       "in every place it is used, including each `this." + group.Key.Name + "`. Finish the whole rename before you run a test: change the declaration " +
+                       $"first, then use edit_file with replaceAll to change every `this.{group.Key.Name}.` to `this._{group.Key.Name}.` and every " +
+                       $"`this.{group.Key.Name} =` to `this._{group.Key.Name} =`. The failing count can go up while the rename is half done; that is expected.");
         }
 
         return advice.Count == 0 ? string.Empty : "\n" + string.Join('\n', advice);
     }
 
-    /// <summary>How many times in a row a step is sent the same type errors. Measured: one hint went out in 14 of 16 rounds and was never acted on.</summary>
+    // The words of the advice about a name declared twice; the next round's edit check looks for them (see RenameDue).
+    private const string DeclaredTwice = " is declared twice in ";
+
+    // Whether the last type-check hint of the step told the worker to rename a name that is declared twice.
+    private bool RenameDue(PlanRecord plan, PlanStep step) =>
+        _lastTypecheckHints.TryGetValue($"{plan.Id}/{step.Id}", out (string Text, int Sent) last) && last.Text.Contains(DeclaredTwice, StringComparison.Ordinal);
+
+    /// <summary>How many times in a row a step is sent the same type errors.</summary> Measured: one hint went out in 14 of 16 rounds and was never acted on.</summary>
     internal const int MaxIdenticalHints = 3;
 
     private readonly ConcurrentDictionary<string, (string Text, int Sent)> _lastTypecheckHints = new(StringComparer.Ordinal);
@@ -185,7 +194,7 @@ internal sealed partial class PlanRunner
             string errors = string.Join('\n', lines);
             string advice = DuplicateMemberAdvice(lines);
             _store.AddEvent(plan.Id, step.Id, attempt, TypecheckHintKind, tier, node: model.ModelNode ?? model.Machine,
-                detail: $"`{TypecheckScriptCommand}` reports errors in this step's files, sent back with the failed check:\n{errors}{advice}",
+                detail: $"`{TypecheckScriptCommand}` reports errors in this step's files:\n{errors}{advice}",
                 modelNode: model.ModelNode, workspaceNode: model.Machine, rung: rung, round: round);
             return $"The project's type check (`{TypecheckScriptCommand}`) rejects this step's files. The test run does not type check, " +
                    $"so these errors may be the real reason the tests fail:\n{errors}{advice}";

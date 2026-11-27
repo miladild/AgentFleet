@@ -3395,7 +3395,8 @@ internal sealed partial class PlanRunner
 
         string command = step.Verify!;
         return new EditCheckGate(files, cancellationToken => _tools.RunFrozenTestsAsync(plan, command, cancellationToken),
-            output => RoundScore.Of(PlanFailure.FailureSignature(output), output), _editCheck,
+            output => RoundScore.Of(PlanFailure.FailureSignature(output), output),
+            RenameDue(plan, step) ? _editCheck.ForARename() : _editCheck,
             line => _logger.LogInformation("Plan {PlanId} step {StepId}: edit check: {Line}", plan.Id, step.Id, line));
     }
 

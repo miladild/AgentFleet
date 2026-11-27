@@ -29,6 +29,15 @@ internal sealed record EditCheckSettings
     /// <summary>How many edits to one file that break a loading project are undone before the next one is kept with a warning.</summary>
     public int RefusalsBeforeKeeping { get; init; } = 2;
 
+    /// <summary>The patience while a name has to be renamed in several places: the count only falls once the last place is changed.</summary>
+    internal const int RenamePatience = 10;
+
+    /// <summary>
+    /// The settings for a round that has to rename something used in several places. Measured: with a patience of 3, a rename that made
+    /// four tests fail more until it was complete was put back four edits in, again and again, and the worker never finished it.
+    /// </summary>
+    public EditCheckSettings ForARename() => this with { Patience = Math.Max(Patience, RenamePatience) };
+
     /// <summary>
     /// The settings from the three configuration values, as they are read at startup. Anything that is not a recognised
     /// off value leaves the check on; a limit or a patience outside its range, or not a number, takes the default.

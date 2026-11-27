@@ -192,6 +192,9 @@ public sealed partial class PlanNoChangeTests
         Assert.Contains("`history` is declared twice in src/server/alerts.ts (lines 28 and 129)", advice, StringComparison.Ordinal);
         Assert.Contains("`_history`", advice, StringComparison.Ordinal);
         Assert.Contains("`this.history`", advice, StringComparison.Ordinal);
+        Assert.Contains("replaceAll to change every `this.history.` to `this._history.`", advice, StringComparison.Ordinal);
+        Assert.Contains("`this.history =` to `this._history =`", advice, StringComparison.Ordinal);
+        Assert.Contains("Finish the whole rename before you run a test", advice, StringComparison.Ordinal);
         Assert.StartsWith("\n", advice, StringComparison.Ordinal);
     }
 

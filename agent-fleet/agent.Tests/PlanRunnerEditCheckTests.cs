@@ -181,6 +181,49 @@ public sealed partial class PlanRunnerTests
             Assert.Single(after.Events!, e => e.Kind == RunEventKind.AttemptEnded && e.Detail.Contains("Edit check:", StringComparison.Ordinal)).Detail);
     }
 
+    // Renaming a name that is used in several places makes things fail more until the last place is changed. Measured: with the
+    // normal patience the half-done rename was put back again and again, and the worker never finished it.
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task While_the_type_check_says_a_name_is_declared_twice_the_edits_of_the_next_round_are_not_put_back_early(bool declaredTwice, bool restored)
+    {
+        var setup = EditCheckPlan();
+        File.WriteAllText(Path.Combine(setup.Project, "package.json"), "{ \"scripts\": { \"typecheck\": \"tsc --noEmit\" } }");
+        var layer = new EditCheckLayer();
+        var workers = new EditCheckWorkers(layer, setup.Project, new Dictionary<string, string> { ["src/shop.ts"] = EditCheckStart });
+        string typeErrors = "Exit code: 2\n--- stdout ---\nsrc/shop.ts(1,7): error TS2300: Duplicate identifier 'hours'." +
+            (declaredTwice ? "\nsrc/shop.ts(9,3): error TS2300: Duplicate identifier 'hours'." : string.Empty);
+        // Round 1 makes no edit and fails; round 2 makes six edits, none of which lowers the failing count.
+        int round = 0;
+        var replies = new List<string>();
+        var agent = new FakeStepAgent(async (_, _, cancellationToken) =>
+        {
+            if (++round == 2)
+            {
+                for (int index = 0; index < 6; index++)
+                {
+                    (string oldText, string newText) = HoursEdit(index);
+                    replies.Add(await WorkspaceTools.EditFileAsync("src/shop.ts", oldText, newText, null, cancellationToken));
+                }
+            }
+
+            return "Done.";
+        });
+        string Check(string command) => command == "npm run typecheck" ? typeErrors : command == EditCheckCommand ? EditCheckFailing(4) : EditCheckPassing;
+
+        await EditCheckRunner(agent, Check, workers, setup).RunPlanAsync(setup.Plan.Id, default).WaitAsync(EditCheckTimeLimit);
+
+        Assert.Equal(6, replies.Count);
+        Assert.Equal(restored, replies.Any(reply => reply.Contains("Restored:", StringComparison.Ordinal)));
+    }
+
+    [Theory]
+    [InlineData(3, 10)]
+    [InlineData(10, 10)]
+    public void A_rename_gets_a_longer_patience_and_never_a_shorter_one(int configured, int expected) =>
+        Assert.Equal(expected, new EditCheckSettings { Patience = configured }.ForARename().Patience);
+
     [Fact]
     public async Task A_breaking_edit_in_the_worker_is_refused_and_the_file_is_unchanged_before_the_sync()
     {
