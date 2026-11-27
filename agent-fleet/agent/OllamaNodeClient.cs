@@ -64,7 +64,7 @@ internal static class OllamaNodeClient
         else
         {
             var root = new UriBuilder(openAiEndpoint.Scheme, openAiEndpoint.Host, openAiEndpoint.IsDefaultPort ? -1 : openAiEndpoint.Port, "/").Uri;
-            var http = new HttpClient(new OllamaErrorBodyHandler(handler ?? new HttpClientHandler(), logger, model))
+            var http = new HttpClient(new OllamaErrorBodyHandler(new OllamaNoTruncationHandler(handler ?? new HttpClientHandler()), logger, model))
             {
                 BaseAddress = root,
                 Timeout = networkTimeout
@@ -194,7 +194,14 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
     // The latest turns stay whole when a conversation is shortened to fit: the model is in the middle of them.
     internal const int KeepRecentMessages = 6;
 
-    internal sealed record Sized(ChatOptions Options, int Estimate, int Size, bool Chosen, IReadOnlyList<ChatMessage> Messages, bool FollowedShortening = false);
+    internal sealed record Sized(ChatOptions Options, int Estimate, int Size, bool Chosen, IReadOnlyList<ChatMessage> Messages, bool FollowedShortening = false,
+        int Ceiling = 0);
+
+    /// <summary>How many times in a row a refused request is made smaller and sent again.</summary>
+    private const int MaxRefusals = 3;
+
+    // A text shorter than this is never cut: it is not what makes a prompt too long.
+    private const int ShortestCut = 2_000;
 
     // Diagnostics only. The last request sent, as one hash per message rather than the messages themselves, so that the next
     // request can say how much of its start it shares with this one.
@@ -218,14 +225,14 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
     public override async Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
     {
         IReadOnlyList<ChatMessage> list = messages as IReadOnlyList<ChatMessage> ?? messages.ToList();
-        Sized sized = await PrepareAsync(list, options, cancellationToken);
-        ChatResponse response = await AskAsync(sized, cancellationToken);
+        Sized prepared = await PrepareAsync(list, options, cancellationToken);
+        (ChatResponse response, Sized sized) = await AskUntilItFitsAsync(prepared, cancellationToken);
         if (!Observe(sized, response.Usage))
         {
             return response;
         }
 
-        // The answer came from a cut prompt: ask again with the bigger window the prompt turned out to need.
+        // The answer came from a prompt that filled its window: ask again with the bigger window it turned out to need.
         Sized bigger = await PrepareAsync(list, options, cancellationToken);
         if (bigger.Size <= sized.Size)
         {
@@ -233,9 +240,162 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
         }
 
         logger.LogWarning("Asking {Model} again with {Size} tokens of context instead of {Previous}.", model, bigger.Size, sized.Size);
-        response = await AskAsync(bigger, cancellationToken);
+        (response, bigger) = await AskUntilItFitsAsync(bigger, cancellationToken);
         Observe(bigger, response.Usage);
         return response;
+    }
+
+    // Sends the request, and while the server refuses it as too long, a smaller one. Returns the answer with what was sent.
+    private async Task<(ChatResponse Response, Sized Sent)> AskUntilItFitsAsync(Sized sized, CancellationToken cancellationToken)
+    {
+        for (int refusals = 1; ; refusals++)
+        {
+            try
+            {
+                return (await AskAsync(sized, cancellationToken), sized);
+            }
+            catch (Exception exception) when (refusals <= MaxRefusals && IsPromptRefused(exception))
+            {
+                if (await SmallerAsync(sized, cancellationToken) is not { } smaller)
+                {
+                    throw;
+                }
+
+                sized = smaller;
+            }
+        }
+    }
+
+    /// <summary>Whether the server refused the request because the prompt is longer than its window (both wordings seen).</summary>
+    internal static bool IsPromptRefused(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current.Message.Contains("longer than the context length", StringComparison.OrdinalIgnoreCase) ||
+                current.Message.Contains("exceeds the available context size", StringComparison.OrdinalIgnoreCase) ||
+                current.Message.Contains("exceed_context_size_error", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // What to send after a refusal: the same prompt with the machine's largest window, or, when that was already asked for, a
+    // shorter prompt, at most what is left beside an answer and a quarter less than the one refused. Null when nothing can go.
+    private async Task<Sized?> SmallerAsync(Sized refused, CancellationToken cancellationToken)
+    {
+        if (!refused.Chosen || refused.Estimate <= 0)
+        {
+            return null;
+        }
+
+        double before = Scale;
+        lock (_gate)
+        {
+            // The prompt was longer than its window, so longer than estimated: later requests ask for more room.
+            _scale = Math.Clamp(Math.Max(_scale, (double)refused.Size / refused.Estimate * 1.05), 1.0, 4.0);
+        }
+
+        if (refused.Size < refused.Ceiling)
+        {
+            ChatOptions wider = refused.Options.Clone();
+            wider.AdditionalProperties!["num_ctx"] = refused.Ceiling;
+            lock (_gate)
+            {
+                _kept = refused.Ceiling;
+                _keptUntil = DateTimeOffset.UtcNow + KeepSize;
+            }
+
+            logger.LogInformation("{Model} refused a prompt as longer than its {Size}-token window: sending it again with {Ceiling} tokens.",
+                model, refused.Size, refused.Ceiling);
+            return refused with { Options = wider, Size = refused.Ceiling };
+        }
+
+        int target = (int)Math.Min(refused.Estimate * 0.75, Math.Max(0, refused.Ceiling - MaxAnswerTokens) / before);
+        double scale = Scale;
+        IReadOnlyList<ChatMessage> fitted = await _fitter.FitAsync(refused.Messages, refused.Options, (int)(target * scale), scale, cancellationToken);
+        fitted = CutToFit(fitted, refused.Options, target);
+        int estimate = EstimateTokens(fitted, refused.Options);
+        if (estimate >= refused.Estimate)
+        {
+            return null;
+        }
+
+        logger.LogWarning(
+            "{Model} refused a prompt of about {Before} estimated tokens as longer than its {Size}-token window: sending it again at about " +
+            "{After}, with older turns left out and the middle of its longest parts removed.", model, refused.Estimate, refused.Size, estimate);
+        return refused with { Messages = fitted, Estimate = estimate, FollowedShortening = true };
+    }
+
+    /// <summary>
+    /// The last resort, for a prompt the server refused: the longest text that is not the system's loses its middle, again and
+    /// again until the estimate is within the budget. The task (the first user message) goes last, and keeps its start and its
+    /// end like the others. A tool call is never changed (see FitToWindow). The caller's list and messages are not changed.
+    /// </summary>
+    internal static IReadOnlyList<ChatMessage> CutToFit(IReadOnlyList<ChatMessage> messages, ChatOptions? options, int budgetTokens)
+    {
+        List<ChatMessage> cut = [.. messages];
+        int task = cut.FindIndex(message => message.Role == ChatRole.User);
+        while (EstimateTokens(cut, options) is var estimate && estimate > budgetTokens)
+        {
+            int excess = (int)Math.Min(int.MaxValue, (estimate - (long)budgetTokens) * CharactersPerToken);
+            if (!CutLongest(cut, index => index != task, excess) && !CutLongest(cut, index => index == task, excess))
+            {
+                break;
+            }
+        }
+
+        return cut;
+    }
+
+    private static bool CutLongest(List<ChatMessage> messages, Func<int, bool> allowed, int excess)
+    {
+        (int Message, int Content, string Text) longest = (-1, -1, string.Empty);
+        for (int index = 0; index < messages.Count; index++)
+        {
+            if (!allowed(index) || messages[index].Role == ChatRole.System)
+            {
+                continue;
+            }
+
+            for (int part = 0; part < messages[index].Contents.Count; part++)
+            {
+                string? text = messages[index].Contents[part] switch
+                {
+                    TextContent content => content.Text,
+                    FunctionResultContent result => result.Result?.ToString(),
+                    _ => null
+                };
+                if (text is not null && text.Length > ShortestCut && text.Length > longest.Text.Length)
+                {
+                    longest = (index, part, text);
+                }
+            }
+        }
+
+        if (longest.Message < 0)
+        {
+            return false;
+        }
+
+        // Only as much as is needed, and never more than half at once. The start says what the text is, the end how it came out.
+        int keep = Math.Max(ShortestCut / 2, Math.Max(longest.Text.Length / 2, longest.Text.Length - excess - 200));
+        int head = keep * 2 / 3;
+        string shorter = $"{longest.Text[..head]}\n{RemovedMarker}\n{longest.Text[^(keep - head)..]}";
+        ChatMessage message = messages[longest.Message];
+        List<AIContent> contents = [.. message.Contents];
+        contents[longest.Content] = contents[longest.Content] is FunctionResultContent answered
+            ? new FunctionResultContent(answered.CallId, shorter)
+            : new TextContent(shorter);
+        messages[longest.Message] = new ChatMessage(message.Role, contents)
+        {
+            AuthorName = message.AuthorName,
+            MessageId = message.MessageId,
+            AdditionalProperties = message.AdditionalProperties
+        };
+        return true;
     }
 
     public override async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
@@ -244,23 +404,56 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         IReadOnlyList<ChatMessage> list = messages as IReadOnlyList<ChatMessage> ?? messages.ToList();
-        Sized sized = await PrepareAsync(list, options, cancellationToken);
-        Attempt attempt = StartAttempt(sized);
+        Sized prepared = await PrepareAsync(list, options, cancellationToken);
         UsageDetails? usage = null;
 
         // Read by hand rather than with await foreach: a failure must be reported before it leaves the iterator, and a yield
         // cannot sit inside a try block that catches.
-        await using IAsyncEnumerator<ChatResponseUpdate> updates = StartStream(attempt, cancellationToken);
-        while (await NextUpdateAsync(updates, attempt, cancellationToken))
+        (IAsyncEnumerator<ChatResponseUpdate> opened, Attempt attempt, Sized sized, bool more) = await OpenStreamAsync(prepared, cancellationToken);
+        await using IAsyncEnumerator<ChatResponseUpdate> updates = opened;
+        while (more)
         {
             usage = updates.Current.Contents.OfType<UsageContent>().LastOrDefault()?.Details ?? usage;
             yield return updates.Current;
+            more = await NextUpdateAsync(updates, attempt, cancellationToken);
         }
 
         ReportSuccess(attempt);
 
         // Too late to ask again (the answer is already on its way), but the next request gets the bigger window.
         Observe(sized, usage);
+    }
+
+    // Starts the stream and reads up to its first update, which is where a refusal shows: nothing has been passed on yet, so a
+    // smaller request can still take its place.
+    private async Task<(IAsyncEnumerator<ChatResponseUpdate> Updates, Attempt Attempt, Sized Sent, bool More)> OpenStreamAsync(
+        Sized sized, CancellationToken cancellationToken)
+    {
+        for (int refusals = 1; ; refusals++)
+        {
+            Attempt attempt = StartAttempt(sized);
+            IAsyncEnumerator<ChatResponseUpdate>? updates = null;
+            try
+            {
+                updates = StartStream(attempt, cancellationToken);
+                bool more = await NextUpdateAsync(updates, attempt, cancellationToken);
+                return (updates, attempt, sized, more);
+            }
+            catch (Exception exception)
+            {
+                if (updates is not null)
+                {
+                    await updates.DisposeAsync();
+                }
+
+                if (refusals > MaxRefusals || !IsPromptRefused(exception) || await SmallerAsync(sized, cancellationToken) is not { } smaller)
+                {
+                    throw;
+                }
+
+                sized = smaller;
+            }
+        }
     }
 
     internal async Task<ChatOptions> WithContextAsync(IReadOnlyList<ChatMessage> messages, ChatOptions? options, CancellationToken cancellationToken) =>
@@ -354,8 +547,9 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
         if (needed > ceiling)
         {
             logger.LogWarning(
-                "A request to {Model} needs about {Needed} tokens but the most it may use is {Ceiling}: Ollama will drop the start of it. " +
-                "Give this machine a larger contextLength (if its memory allows) or a model with a longer window.", model, needed, ceiling);
+                "A request to {Model} needs about {Needed} tokens by estimate but the most it may use is {Ceiling}: if the server refuses it, " +
+                "it is shortened further. Give this machine a larger contextLength (if its memory allows) or a model with a longer window.",
+                model, needed, ceiling);
         }
 
         sized.AdditionalProperties["num_ctx"] = size;
@@ -364,7 +558,7 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
         // could hold a machine past the network timeout (measured: a worker ran for over five minutes on one call). 4096
         // tokens is room for a file of a few hundred lines in one write_file call; bigger files are what edit_file is for.
         sized.MaxOutputTokens ??= Math.Min(MaxAnswerTokens, size / 2);
-        return new Sized(sized, estimate, size, Chosen: true, messages, FollowedShortening: shortened);
+        return new Sized(sized, estimate, size, Chosen: true, messages, FollowedShortening: shortened, Ceiling: ceiling);
     }
 
     // The request is sent from here so that a failure can be reported with what it looked like. A failure is logged once,
