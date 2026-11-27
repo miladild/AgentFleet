@@ -151,6 +151,73 @@ public sealed partial class PlanRunnerTests
         Assert.Contains("Round 2: the approved check did not pass yet", message, StringComparison.Ordinal);
     }
 
+    // Round 1 changes nothing, so round 2 opens a fresh conversation with a brief. Returns each conversation's first message.
+    private async Task<(string First, string Fresh)> FirstMessages(HarnessOptions? harness, FleetOptions? options = null,
+        FleetHealthMonitor? health = null, string? machine = null)
+    {
+        PlanRecord plan = RepairPlan(machine, PlanRecoveryScope.WorkerOnly);
+        FakeStepAgent agent = null!;
+        agent = new FakeStepAgent((_, _, _) =>
+        {
+            if (agent.Calls.Count == 2)
+            {
+                File.WriteAllText(SourceFile, "fixed");
+            }
+
+            return Task.FromResult("Looked at it.");
+        })
+        {
+            ToolsOf = _ => (2, false)
+        };
+
+        await RepairRunner(agent, _ => File.ReadAllText(SourceFile).Contains("fixed", StringComparison.Ordinal)
+            ? Pass("check")
+            : FailWith("widget::renders"), options, health, harness: harness).RunPlanAsync(plan.Id, default);
+
+        Assert.Equal(2, agent.Sessions.Count);
+        return (agent.Sessions[0].Messages[0].Text, agent.Sessions[1].Messages[0].Text);
+    }
+
+    [Fact]
+    public async Task A_fresh_conversation_whose_brief_shows_the_files_does_not_send_them_a_second_time()
+    {
+        File.WriteAllText(SourceFile, "ONLY-ONCE content");
+
+        (string first, string fresh) = await FirstMessages(null);
+
+        Assert.Contains("BEGIN UNTRUSTED FILE", first, StringComparison.Ordinal);
+        Assert.Contains("FILES YOU MAY WRITE", fresh, StringComparison.Ordinal);
+        Assert.DoesNotContain("BEGIN UNTRUSTED FILE", fresh, StringComparison.Ordinal);
+        Assert.Equal(1, fresh.Split("ONLY-ONCE content").Length - 1);
+    }
+
+    [Fact]
+    public async Task A_fresh_conversation_without_the_packet_still_gets_the_files()
+    {
+        File.WriteAllText(SourceFile, "ONLY-ONCE content");
+
+        (_, string fresh) = await FirstMessages(new HarnessOptions(EnableContextPacket: false));
+
+        Assert.Contains("BEGIN UNTRUSTED FILE", fresh, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(16384, false)]
+    [InlineData(65536, true)]
+    public async Task A_small_machine_is_sent_less_of_a_large_file(int window, bool whole)
+    {
+        File.WriteAllText(SourceFile, string.Join('\n', Enumerable.Range(1, 2000).Select(number => $"// line {number:0000}")) + "\n// LAST-LINE");
+        FleetNodeConfig worker = new("worker-a", "http://worker-a.example.test/v1", "m", "worker", "standard", ContextLength: window);
+        FleetOptions options = OptionsWithNodes(new FleetNodeConfig("hub", "http://hub.example.test/v1", "m", "hub", "heavy", Fallback: true), worker);
+        var health = new FleetHealthMonitor(options, new HealthyNodeFactory());
+
+        (string first, string fresh) = await FirstMessages(null, options, health, "worker-a");
+
+        Assert.Contains("// line 0001", first, StringComparison.Ordinal);
+        Assert.Equal(whole, first.Contains("// LAST-LINE", StringComparison.Ordinal));
+        Assert.Equal(whole, fresh.Contains("// LAST-LINE", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task With_the_packet_switched_off_the_repair_message_is_what_it_was()
     {

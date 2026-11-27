@@ -30,6 +30,25 @@ internal sealed record MachineProfile(bool RulerReadsFiles, string Reason, int? 
     /// </summary>
     internal const int SmallWindow = 16384;
 
+    /// <summary>The share of a window a repair round's packet may take: one part in this many (counted at four characters a token).</summary>
+    private const int PacketShare = 6;
+
+    /// <summary>
+    /// The most a repair round's packet may be, in the packet's own tokens: the configured limit, or less on a machine with a small
+    /// window. Measured on a machine with 16384 tokens: the instructions and tool list alone take about 6200 of them, and a packet
+    /// and the step's files sized for a large machine left no room for the round itself.
+    /// </summary>
+    internal static int PacketTokenBudget(int? window, int configured) =>
+        window is { } tokens ? Math.Min(configured, Math.Max(1000, tokens / PacketShare)) : configured;
+
+    /// <summary>
+    /// The most characters of the step's files sent with its first message: three quarters of one for each token of the window,
+    /// never under 8000. That message is never shortened, so what it holds stays for the whole conversation; a file read with a
+    /// tool can be dropped again.
+    /// </summary>
+    internal static int StepFileCharacterBudget(int? window, int most) =>
+        window is { } tokens ? (int)Math.Min(most, Math.Max(8000L, tokens * 3L / 4)) : most;
+
     /// <summary>The environment setting that overrides the rule for every machine: "on" always reads, "off" never reads, anything else decides by window.</summary>
     internal const string RulerReadsSetting = "FLEET_RULER_READS";
 

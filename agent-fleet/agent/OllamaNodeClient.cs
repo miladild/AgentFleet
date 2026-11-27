@@ -2,6 +2,7 @@ using System.ClientModel;
 using System.Diagnostics;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using OllamaSharp;
@@ -164,7 +165,7 @@ internal sealed class NodeTelemetryChatClient(IChatClient inner, string? nodeNam
 /// to the processor at 32K and takes minutes per call). A size, once used, is kept for twenty minutes so a conversation
 /// that grows does not make Ollama reload the model at every step down and up.
 /// </summary>
-internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, string model, int maximum, ILogger logger, bool thinkingOff = false, IContextWindowFitter? fitter = null, string? nodeName = null) : DelegatingChatClient(inner)
+internal sealed partial class ContextSizeChatClient(IChatClient inner, HttpClient http, string model, int maximum, ILogger logger, bool thinkingOff = false, IContextWindowFitter? fitter = null, string? nodeName = null) : DelegatingChatClient(inner)
 {
     /// <summary>The smallest window a request asks for; the health probe asks for it when nothing is loaded.</summary>
     internal const int SmallestSize = 8192;
@@ -177,17 +178,27 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
     // 2.57 characters per token; code about 3.75, prose about 4.1. Estimating at 2.5 keeps the worst case in the window.
     internal const double CharactersPerToken = 2.5;
 
-    // A prompt this close to the window's end ate the room kept for the answer: Ollama then drops the start of the
-    // conversation to make it fit, task included (measured: a worker lost its task after fifteen tool rounds and
-    // answered as a "personal life coach").
+    // A prompt this close to the window's end ate the room kept for the answer.
     internal const int FullMargin = MaxAnswerTokens / 2;
+
+    // The estimate is corrected by what the server counted. Measured over 236 requests of one plan: the real size was 0.67 to
+    // 0.78 of the estimate, so a 16384-token window was used by half. The highest of the recent counts decides, with a margin,
+    // and never less than the floor: a count lower than that is not believed.
+    private const int RememberedCounts = 16;
+    private const double CountMargin = 1.08;
+    private const double LeastScale = 0.75;
+    private const double MostScale = 4.0;
+
+    // A prompt smaller than this teaches nothing: the server's own wrapping of the messages and tools is most of it.
+    private const int SmallestLesson = 2_000;
 
     private readonly object _gate = new();
     private int? _modelMaximum;
     private bool _looked;
     private int _kept;
     private DateTimeOffset _keptUntil;
-    private double _scale = 1.0;
+    private readonly Queue<double> _counts = new(); // Real size over estimate, newest last. Guarded by _gate.
+    private double _scale = 1.0; // Guarded by _gate.
     private readonly IContextWindowFitter _fitter = fitter ?? ClassicContextWindowFitter.Instance;
     private SentRequest? _lastSent; // Guarded by _gate.
 
@@ -195,7 +206,7 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
     internal const int KeepRecentMessages = 6;
 
     internal sealed record Sized(ChatOptions Options, int Estimate, int Size, bool Chosen, IReadOnlyList<ChatMessage> Messages, bool FollowedShortening = false,
-        int Ceiling = 0);
+        int Ceiling = 0, bool Cut = false);
 
     /// <summary>How many times in a row a refused request is made smaller and sent again.</summary>
     private const int MaxRefusals = 3;
@@ -210,7 +221,7 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
     // One request on its way to the model, with what is reported about it if it fails or follows a shortening.
     private sealed record Attempt(Sized Prepared, int SharedPrefix, string Previous, Stopwatch Clock);
 
-    /// <summary>How much bigger this machine's prompts have turned out than estimated (1 until one did).</summary>
+    /// <summary>What an estimate for this machine is multiplied by to get the room to ask for (1 until a prompt was counted).</summary>
     internal double Scale
     {
         get
@@ -256,7 +267,7 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
             }
             catch (Exception exception) when (refusals <= MaxRefusals && IsPromptRefused(exception))
             {
-                if (await SmallerAsync(sized, cancellationToken) is not { } smaller)
+                if (await SmallerAsync(sized, exception, cancellationToken) is not { } smaller)
                 {
                     throw;
                 }
@@ -282,20 +293,44 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
         return false;
     }
 
+    /// <summary>The size the server says a refused prompt had, or null when its wording gives none.</summary>
+    internal static int? RefusedSize(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            Match said = RefusedTokens().Match(current.Message);
+            if (said.Success && int.TryParse(said.Groups[1].Value, out int tokens))
+            {
+                return tokens;
+            }
+        }
+
+        return null;
+    }
+
+    [GeneratedRegex(@"request \((\d+) tokens\) exceeds")]
+    private static partial Regex RefusedTokens();
+
     // What to send after a refusal: the same prompt with the machine's largest window, or, when that was already asked for, a
-    // shorter prompt, at most what is left beside an answer and a quarter less than the one refused. Null when nothing can go.
-    private async Task<Sized?> SmallerAsync(Sized refused, CancellationToken cancellationToken)
+    // shorter prompt, at most what is left beside an answer and always shorter than the one refused. Null when nothing can go.
+    private async Task<Sized?> SmallerAsync(Sized refused, Exception refusal, CancellationToken cancellationToken)
     {
         if (!refused.Chosen || refused.Estimate <= 0)
         {
             return null;
         }
 
-        double before = Scale;
-        lock (_gate)
+        // The prompt was longer than its window. A count says by how much; without one all that is known is that it was at least
+        // a little longer than the window, which may raise the scale and never lowers it.
+        int? counted = RefusedSize(refusal);
+        double atLeast = (double)refused.Size / refused.Estimate * 1.05;
+        if (counted is { } tokens)
         {
-            // The prompt was longer than its window, so longer than estimated: later requests ask for more room.
-            _scale = Math.Clamp(Math.Max(_scale, (double)refused.Size / refused.Estimate * 1.05), 1.0, 4.0);
+            Learn((double)tokens / refused.Estimate);
+        }
+        else if (atLeast * CountMargin > Scale)
+        {
+            Learn(atLeast);
         }
 
         if (refused.Size < refused.Ceiling)
@@ -313,8 +348,11 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
             return refused with { Options = wider, Size = refused.Ceiling };
         }
 
-        int target = (int)Math.Min(refused.Estimate * 0.75, Math.Max(0, refused.Ceiling - MaxAnswerTokens) / before);
+        // A first refusal with a count says how far to go; without one, or after a cut that was not enough, a quarter goes, so
+        // that a few tries are enough.
         double scale = Scale;
+        double atMost = refused.Estimate * (counted is null || refused.Cut ? 0.75 : 0.9);
+        int target = (int)Math.Min(atMost, Math.Max(0, refused.Ceiling - MaxAnswerTokens) / scale);
         IReadOnlyList<ChatMessage> fitted = await _fitter.FitAsync(refused.Messages, refused.Options, (int)(target * scale), scale, cancellationToken);
         fitted = CutToFit(fitted, refused.Options, target);
         int estimate = EstimateTokens(fitted, refused.Options);
@@ -326,7 +364,7 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
         logger.LogWarning(
             "{Model} refused a prompt of about {Before} estimated tokens as longer than its {Size}-token window: sending it again at about " +
             "{After}, with older turns left out and the middle of its longest parts removed.", model, refused.Estimate, refused.Size, estimate);
-        return refused with { Messages = fitted, Estimate = estimate, FollowedShortening = true };
+        return refused with { Messages = fitted, Estimate = estimate, FollowedShortening = true, Cut = true };
     }
 
     /// <summary>
@@ -446,7 +484,8 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
                     await updates.DisposeAsync();
                 }
 
-                if (refusals > MaxRefusals || !IsPromptRefused(exception) || await SmallerAsync(sized, cancellationToken) is not { } smaller)
+                if (refusals > MaxRefusals || !IsPromptRefused(exception) ||
+                    await SmallerAsync(sized, exception, cancellationToken) is not { } smaller)
                 {
                     throw;
                 }
@@ -460,37 +499,47 @@ internal sealed class ContextSizeChatClient(IChatClient inner, HttpClient http, 
         (await PrepareAsync(messages, options, cancellationToken)).Options;
 
     /// <summary>
-    /// Learns from the prompt size Ollama reports. True when the prompt filled the window, so the answer came from a
-    /// conversation with its start cut off.
+    /// Learns from the prompt size Ollama reports. True when the prompt left less than the room kept for an answer, so the same
+    /// request is worth asking again if a bigger window can be had.
     /// </summary>
     internal bool Observe(Sized sized, UsageDetails? usage)
     {
-        if (!sized.Chosen || usage?.InputTokenCount is not long actual || sized.Estimate <= 0)
+        if (!sized.Chosen || usage?.InputTokenCount is not long actual || actual <= 0 || sized.Estimate <= 0)
         {
             return false;
         }
 
+        // The server is asked to refuse rather than cut, so a count is the whole prompt. One that ends this close to the window is
+        // taken as the window at least, in case a server cuts all the same.
         bool full = actual >= sized.Size - FullMargin;
-        double observed = (double)actual / sized.Estimate;
-        if (full)
+        if (full || sized.Estimate >= SmallestLesson)
         {
-            // What Ollama kept is only a lower bound for what the prompt needed.
-            observed = Math.Max(observed, (double)sized.Size / sized.Estimate) * 1.25;
-        }
-
-        lock (_gate)
-        {
-            _scale = Math.Clamp(Math.Max(_scale, observed * 1.1), 1.0, 4.0);
+            Learn((double)(full ? Math.Max(actual, sized.Size) : actual) / sized.Estimate);
         }
 
         if (full)
         {
             logger.LogWarning(
-                "A prompt to {Model} used {Actual} of its {Size} tokens of context, so Ollama may have dropped the start of the " +
-                "conversation. Estimates for this machine are now scaled by {Scale:0.00}.", model, actual, sized.Size, Scale);
+                "A prompt to {Model} used {Actual} of its {Size} tokens of context, leaving little room for the answer. Estimates for " +
+                "this machine are now scaled by {Scale:0.00}.", model, actual, sized.Size, Scale);
         }
 
         return full;
+    }
+
+    // Remembers one count against its estimate and works the scale out again.
+    private void Learn(double ratio)
+    {
+        lock (_gate)
+        {
+            _counts.Enqueue(ratio);
+            if (_counts.Count > RememberedCounts)
+            {
+                _counts.Dequeue();
+            }
+
+            _scale = Math.Clamp(_counts.Max() * CountMargin, LeastScale, MostScale);
+        }
     }
 
     private async Task<Sized> PrepareAsync(IReadOnlyList<ChatMessage> messages, ChatOptions? options, CancellationToken cancellationToken)

@@ -146,7 +146,8 @@ public sealed class ContextRefusalTests
         ChatResponse response = await Client(server).GetResponseAsync(HugeNewestResult());
 
         Assert.Equal("done reading", response.Text);
-        Assert.Equal(2, server.Chats.Count);
+        // This server's count says far less is too much than its limit does, so a first cut by the count is not enough.
+        Assert.InRange(server.Chats.Count, 2, 3);
     }
 
     [Fact]

@@ -1221,14 +1221,19 @@ internal sealed partial class PlanRunner
                 int round = roundsInRung + 1;
                 string? repairMessage = null;
                 string? brief = null;
+                bool briefHasPacket = false;
+                // The machine that will answer, as far as it is known yet: what is sent to it is sized to its window.
+                string? answering = modelOverride ?? workspaceOverride ?? conversationWorkspace ?? step.Machine;
                 if (conversation.HasHistory)
                 {
-                    repairMessage = BuildRepairMessage(plan, step, lastFailure, round, lastRound, handover, rollback);
+                    repairMessage = BuildRepairMessage(plan, step, lastFailure, round, lastRound, handover, rollback, answering);
                     if (IsTestsStep(step)) repairMessage = PlanTestsStepPrompt.Append(repairMessage, plan.Requirements);
                 }
                 else if (RepairMessages.Brief(StepEventsSinceRetry(plan.Id, step.Id)) is { Length: > 0 } earlierRounds)
                 {
-                    brief = ContextPacketFor(plan, step, lastFailure, rollback) is { } packet ? packet + "\n" + earlierRounds : earlierRounds;
+                    string? packet = ContextPacketFor(plan, step, lastFailure, rollback, answering);
+                    briefHasPacket = packet is not null;
+                    brief = packet is null ? earlierRounds : packet + "\n" + earlierRounds;
                 }
 
                 handover = null;
@@ -1239,7 +1244,8 @@ internal sealed partial class PlanRunner
                 ModelAttemptResult model = await RunModelAttemptAsync(
                     plan, step, attempt, lastFailure, tier, parallelGroup: false, cancellationToken: cancellationToken,
                     workspaceOverride: workspaceOverride ?? (continuing ? conversationWorkspace : null), modelMachineOverride: modelOverride,
-                    round: new RoundContext(conversation, rung, round, repairMessage, brief), limit: LimitFor(plan, worked));
+                    round: new RoundContext(conversation, rung, round, repairMessage, brief, briefHasPacket),
+                    limit: LimitFor(plan, worked));
                 roundActivity?.SetTag("fleet.model_node", model.ModelNode);
                 roundActivity?.SetTag("fleet.workspace_node", model.Machine);
                 if (_testFirstMode == TestFirstMode.On && !IsTestsStep(step) && model.Dispute is { } dispute)
@@ -2129,18 +2135,19 @@ internal sealed partial class PlanRunner
     }
 
     private string BuildRepairMessage(PlanRecord plan, PlanStep step, string? failure, int round, RoundOutcome? last, string? handover,
-        RollbackNote? rollback = null)
+        RollbackNote? rollback = null, string? node = null)
     {
         IReadOnlyList<string> current = last is not null
             ? last.Signature.Items
             : PlanFailure.FailureSignature(failure).Items;
         IReadOnlyList<string> previous = last is null ? [] : RepairMessages.FailingNames(last.PreviousSignature);
         return RepairMessages.Build(plan, step, failure ?? string.Empty, round, previous, current, last?.SameAsPrevious ?? false,
-            last is { FilesKnown: true } ? last.ChangedFiles : null, handover, rollback, ContextPacketFor(plan, step, failure, rollback));
+            last is { FilesKnown: true } ? last.ChangedFiles : null, handover, rollback,
+            ContextPacketFor(plan, step, failure, rollback, node));
     }
 
     // The packet for a repair round (null when it is switched off, or the project folder or the check's output is not there to read).
-    private string? ContextPacketFor(PlanRecord plan, PlanStep step, string? failure, RollbackNote? rollback)
+    private string? ContextPacketFor(PlanRecord plan, PlanStep step, string? failure, RollbackNote? rollback, string? node)
     {
         if (!_harness.EnableContextPacket || string.IsNullOrWhiteSpace(failure) || string.IsNullOrWhiteSpace(plan.WorkingDirectory))
         {
@@ -2152,7 +2159,8 @@ internal sealed partial class PlanRunner
         {
             return RepairPacket.Build(plan, step, failure, _filesAtStart.GetValueOrDefault(key) ?? [],
                 _contentAtStart.GetValueOrDefault(key) ?? new Dictionary<string, string>(), _harness.EnableRevertNotes ? rollback : null,
-                RepairMessages.TriedLines(StepEventsSinceRetry(plan.Id, step.Id)), _harness.MaxPacketTokens);
+                RepairMessages.TriedLines(StepEventsSinceRetry(plan.Id, step.Id)),
+                MachineProfile.PacketTokenBudget(ContextWindowOf(node, step.Tier), _harness.MaxPacketTokens));
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
@@ -2160,6 +2168,15 @@ internal sealed partial class PlanRunner
             return null;
         }
     }
+
+    // The configured context window of a machine, or of the smallest machine of the tier while none is chosen yet. Null when no
+    // window is set for it.
+    private int? ContextWindowOf(string? node, string tier) =>
+        _fleetOptions?.Nodes
+            .Where(candidate => node is null
+                ? !candidate.Vision && string.Equals(candidate.Tier, tier, StringComparison.OrdinalIgnoreCase)
+                : string.Equals(candidate.Name, node, StringComparison.OrdinalIgnoreCase))
+            .Min(candidate => candidate.ContextLength);
 
     /// <summary>The best state the step's project has been in, as the approved check saw it, and the files as they were then.</summary>
     private sealed record StepCheckpoint(
@@ -2282,7 +2299,8 @@ internal sealed partial class PlanRunner
     /// <summary>The conversation a model call belongs to, and where on the repair ladder it is.</summary>
     /// <param name="RepairMessage">The follow-up to send; null when the conversation has to be told the whole task.</param>
     /// <param name="Brief">What the rounds before this conversation tried, for a fresh conversation after them.</param>
-    private sealed record RoundContext(IStepSession Session, int Rung, int Round, string? RepairMessage = null, string? Brief = null);
+    private sealed record RoundContext(IStepSession Session, int Rung, int Round, string? RepairMessage = null, string? Brief = null,
+        bool BriefShowsFiles = false);
 
     private async Task<string?> ReconcileInterruptedWorkspaceAsync(PlanRecord plan, PlanStep step, CancellationToken cancellationToken)
     {
@@ -3542,8 +3560,13 @@ internal sealed partial class PlanRunner
         {
             SnapshotFilesToCreate(plan, step);
             work = await _tools.SnapshotWorkAsync(plan, attemptCancellation.Token);
-            // A follow-up message needs no file contents: the conversation has the task, and the files are one tool call away.
-            string fileContext = continuing ? string.Empty : await LoadStepFileContextAsync(plan, step, attemptCancellation.Token);
+            // A follow-up message needs no file contents: the conversation has the task, and the files are one tool call away. A
+            // brief that shows the files as they are now needs no second copy of them either.
+            string fileContext = continuing || conversation.BriefShowsFiles
+                ? string.Empty
+                : await LoadStepFileContextAsync(plan, step,
+                    MachineProfile.StepFileCharacterBudget(ContextWindowOf(modelMachine ?? machine, tier), MaxStepContextCharacters),
+                    attemptCancellation.Token);
 
             if (_workerWorkspaces is not null)
             {
@@ -3995,7 +4018,8 @@ internal sealed partial class PlanRunner
     /// </summary>
     internal const string ActFirst = PlanStepPromptProvider.ActFirst;
 
-    private static async Task<string> LoadStepFileContextAsync(PlanRecord plan, PlanStep step, CancellationToken cancellationToken)
+    private static async Task<string> LoadStepFileContextAsync(PlanRecord plan, PlanStep step, int maxCharacters,
+        CancellationToken cancellationToken)
     {
         if (step.Files.Count == 0)
         {
@@ -4030,7 +4054,7 @@ internal sealed partial class PlanRunner
         foreach (string requestedPath in step.Files)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (filesAdded >= MaxStepContextFiles || result.Length >= MaxStepContextCharacters)
+            if (filesAdded >= MaxStepContextFiles || result.Length >= maxCharacters)
             {
                 skipped++;
                 continue;
@@ -4112,7 +4136,7 @@ internal sealed partial class PlanRunner
                 contents += "\n[truncated: file context is limited to 32 KiB per file]";
             }
 
-            int remaining = MaxStepContextCharacters - result.Length;
+            int remaining = maxCharacters - result.Length;
             if (contents.Length > remaining)
             {
                 contents = contents[..remaining] + "\n[truncated: step file context limit reached]";
