@@ -15,6 +15,7 @@ internal sealed record PacketFile(string Path, string Content, IReadOnlyCollecti
 /// <param name="Reverted">The round the runner undid, if the last one was.</param>
 /// <param name="Tried">One line per earlier round, oldest first.</param>
 /// <param name="Output">The failures, already split (see FailureReport).</param>
+/// <param name="ShowStep">False when whoever reads the packet already has the step's text.</param>
 internal sealed record ContextPacketInput(
     string StepText,
     IReadOnlyList<string> WritablePaths,
@@ -23,7 +24,8 @@ internal sealed record ContextPacketInput(
     string Diff,
     RollbackNote? Reverted,
     IReadOnlyList<string> Tried,
-    string Output);
+    string Output,
+    bool ShowStep = true);
 
 /// <summary>
 /// The message every repair round starts with, in one order that runs from what stays the same between rounds to what changes, so the
@@ -90,11 +92,14 @@ internal static class ContextPacket
     private static string Compose(ContextPacketInput input, List<Section> files, Section diff)
     {
         var text = new StringBuilder();
-        text.AppendLine("STEP");
-        text.AppendLine(input.StepText.Trim());
-        if (input.WritablePaths.Count > 0)
+        if (input.ShowStep)
         {
-            text.AppendLine($"Files this step may write: {string.Join(", ", input.WritablePaths)}.");
+            text.AppendLine("STEP");
+            text.AppendLine(input.StepText.Trim());
+            if (input.WritablePaths.Count > 0)
+            {
+                text.AppendLine($"Files this step may write: {string.Join(", ", input.WritablePaths)}.");
+            }
         }
 
         if (input.FailingTests.Count > 0)
@@ -156,7 +161,7 @@ internal static class ContextPacket
 
         text.AppendLine();
         text.AppendLine(input.Output.Trim());
-        return text.ToString();
+        return text.ToString().TrimStart('\r', '\n');
     }
 
     // Said the way the runner undid it: which files, and how the failures went. Nothing that was undone is described as if it still stood.

@@ -192,6 +192,47 @@ public sealed partial class PlanRunnerTests
     }
 
     [Fact]
+    public async Task A_fresh_conversation_says_the_step_the_earlier_rounds_and_the_check_output_once()
+    {
+        File.WriteAllText(SourceFile, "ONLY-ONCE content");
+
+        (_, string fresh) = await FirstMessages(null);
+
+        Assert.Equal(1, fresh.Split("detail of fix the widget").Length - 1);
+        Assert.Equal(1, fresh.Split("FAILED widget::renders").Length - 1);
+        Assert.DoesNotContain("ALREADY TRIED", fresh, StringComparison.Ordinal);
+        Assert.Contains("A conversation before this one worked on this step", fresh, StringComparison.Ordinal);
+        Assert.Contains("The previous attempt did not pass", fresh, StringComparison.Ordinal);
+        Assert.Contains("CHECK OUTPUT (as printed):", fresh, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(16384, false)]
+    [InlineData(65536, true)]
+    public async Task A_repair_round_on_a_small_machine_does_not_say_the_step_again(int window, bool repeated)
+    {
+        FleetNodeConfig worker = new("worker-a", "http://worker-a.example.test/v1", "m", "worker", "standard", ContextLength: window);
+        FleetOptions options = OptionsWithNodes(new FleetNodeConfig("hub", "http://hub.example.test/v1", "m", "hub", "heavy", Fallback: true), worker);
+        var health = new FleetHealthMonitor(options, new HealthyNodeFactory());
+        PlanRecord plan = RepairPlan("worker-a", PlanRecoveryScope.WorkerOnly);
+        int calls = 0;
+        var agent = new FakeStepAgent((_, _, _) =>
+        {
+            File.WriteAllText(SourceFile, ++calls == 1 ? "first try" : "fixed");
+            return Task.FromResult("Worked on it.");
+        });
+
+        await RepairRunner(agent, _ => File.ReadAllText(SourceFile).Contains("fixed", StringComparison.Ordinal)
+            ? Pass("check")
+            : FailWith("widget::renders"), options, health).RunPlanAsync(plan.Id, default);
+
+        string message = Assert.Single(agent.Sessions).Messages[1].Text;
+        Assert.Equal(repeated, message.Contains("detail of fix the widget", StringComparison.Ordinal));
+        Assert.Contains("FILES YOU MAY WRITE", message, StringComparison.Ordinal);
+        Assert.Contains("ALREADY TRIED", message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task A_fresh_conversation_without_the_packet_still_gets_the_files()
     {
         File.WriteAllText(SourceFile, "ONLY-ONCE content");
@@ -1030,7 +1071,8 @@ public sealed partial class PlanRunnerTests
         Assert.Contains("Round 2 on worker-a: changed a.cs; the check then failed on t1, t2, t3, t4.", brief);
         Assert.Contains("It left the step worse than the best round before it, so it was undone.", brief);
         // The fresh conversation is told the check's output for the state the project is in (the best round's), not the worst round's.
-        string wrong = brief[brief.IndexOf("What went wrong:", StringComparison.Ordinal)..brief.IndexOf("Look at what is already on disk", StringComparison.Ordinal)];
+        string wrong = brief[brief.IndexOf("CHECK OUTPUT (as printed):", StringComparison.Ordinal)..
+            brief.IndexOf("A conversation before this one worked", StringComparison.Ordinal)];
         Assert.Contains("FAILED t1", wrong);
         Assert.DoesNotContain("FAILED t3", wrong);
     }

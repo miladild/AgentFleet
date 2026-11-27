@@ -40,7 +40,8 @@ internal static class RepairPacket
         IReadOnlyDictionary<string, string> contentAtStart,
         RollbackNote? reverted,
         IReadOnlyList<string> tried,
-        int maxTokens)
+        int maxTokens,
+        bool showStep = true)
     {
         string root = plan.WorkingDirectory ?? string.Empty;
         string[] writable = WritableFiles(plan, step).ToArray();
@@ -90,7 +91,7 @@ internal static class RepairPacket
         }
 
         return ContextPacket.Build(new ContextPacketInput(stepText.ToString(), step.Files, failing, shown, diff.ToString().TrimEnd(), reverted, tried,
-            FailureReport.Build(failure, testFiles, existedAtStart)), maxTokens);
+            FailureReport.Build(failure, testFiles, existedAtStart), showStep), maxTokens);
     }
 
     private static void AppendChange(StringBuilder diff, string relative, string full, string now, IReadOnlySet<string> filesAtStart,

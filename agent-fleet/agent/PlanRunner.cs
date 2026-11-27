@@ -1231,7 +1231,7 @@ internal sealed partial class PlanRunner
                 }
                 else if (RepairMessages.Brief(StepEventsSinceRetry(plan.Id, step.Id)) is { Length: > 0 } earlierRounds)
                 {
-                    string? packet = ContextPacketFor(plan, step, lastFailure, rollback, answering);
+                    string? packet = ContextPacketFor(plan, step, lastFailure, rollback, answering, fresh: true);
                     briefHasPacket = packet is not null;
                     brief = packet is null ? earlierRounds : packet + "\n" + earlierRounds;
                 }
@@ -2147,7 +2147,10 @@ internal sealed partial class PlanRunner
     }
 
     // The packet for a repair round (null when it is switched off, or the project folder or the check's output is not there to read).
-    private string? ContextPacketFor(PlanRecord plan, PlanStep step, string? failure, RollbackNote? rollback, string? node)
+    // A fresh conversation's first message already holds the step's text, and its brief tells the earlier rounds, so its packet
+    // leaves both out. A later round's packet leaves the step's text out on a small window, where the first message keeps it.
+    private string? ContextPacketFor(PlanRecord plan, PlanStep step, string? failure, RollbackNote? rollback, string? node,
+        bool fresh = false)
     {
         if (!_harness.EnableContextPacket || string.IsNullOrWhiteSpace(failure) || string.IsNullOrWhiteSpace(plan.WorkingDirectory))
         {
@@ -2155,12 +2158,14 @@ internal sealed partial class PlanRunner
         }
 
         string key = $"{plan.Id}:{step.Id}";
+        int? window = ContextWindowOf(node, step.Tier);
+        bool small = window is { } tokens && tokens <= MachineProfile.SmallWindow;
         try
         {
             return RepairPacket.Build(plan, step, failure, _filesAtStart.GetValueOrDefault(key) ?? [],
                 _contentAtStart.GetValueOrDefault(key) ?? new Dictionary<string, string>(), _harness.EnableRevertNotes ? rollback : null,
-                RepairMessages.TriedLines(StepEventsSinceRetry(plan.Id, step.Id)),
-                MachineProfile.PacketTokenBudget(ContextWindowOf(node, step.Tier), _harness.MaxPacketTokens));
+                fresh ? [] : RepairMessages.TriedLines(StepEventsSinceRetry(plan.Id, step.Id)),
+                MachineProfile.PacketTokenBudget(window, _harness.MaxPacketTokens), showStep: !fresh && !small);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
@@ -2300,7 +2305,7 @@ internal sealed partial class PlanRunner
     /// <param name="RepairMessage">The follow-up to send; null when the conversation has to be told the whole task.</param>
     /// <param name="Brief">What the rounds before this conversation tried, for a fresh conversation after them.</param>
     private sealed record RoundContext(IStepSession Session, int Rung, int Round, string? RepairMessage = null, string? Brief = null,
-        bool BriefShowsFiles = false);
+        bool BriefIsPacket = false);
 
     private async Task<string?> ReconcileInterruptedWorkspaceAsync(PlanRecord plan, PlanStep step, CancellationToken cancellationToken)
     {
@@ -3561,8 +3566,8 @@ internal sealed partial class PlanRunner
             SnapshotFilesToCreate(plan, step);
             work = await _tools.SnapshotWorkAsync(plan, attemptCancellation.Token);
             // A follow-up message needs no file contents: the conversation has the task, and the files are one tool call away. A
-            // brief that shows the files as they are now needs no second copy of them either.
-            string fileContext = continuing || conversation.BriefShowsFiles
+            // brief with the packet shows the files as they are now, so it needs no second copy of them either.
+            string fileContext = continuing || conversation.BriefIsPacket
                 ? string.Empty
                 : await LoadStepFileContextAsync(plan, step,
                     MachineProfile.StepFileCharacterBudget(ContextWindowOf(modelMachine ?? machine, tier), MaxStepContextCharacters),
@@ -3638,6 +3643,12 @@ internal sealed partial class PlanRunner
 
                 // The brief is read by the prompt providers, so what a tests step adds to it has to be in the data they get.
                 string? stepBrief = IsTestsStep(step) ? PlanTestsStepPrompt.Append(conversation.Brief, plan.Requirements) : conversation.Brief;
+                // A brief with the packet shows what the check printed, so the prompt does not print it above the brief as well.
+                if (conversation.BriefIsPacket && webOffered)
+                {
+                    stepBrief = $"{WebLookupNote}\n\n{stepBrief}";
+                }
+
                 conversation.Session.OfferDispute(disputeOffered);
                 conversation.Session.OfferWebLookup(webOffered);
                 conversation.Session.TrackActivity(activity);
@@ -3647,7 +3658,7 @@ internal sealed partial class PlanRunner
                 conversation.Session.ConfigurePrompt(conversation.RepairMessage is null
                     ? new PlanStepPromptData(plan, step, attempt, failure, fileContext, parallelGroup,
                         contextId is not null, retryRoute, worker is not null, machine, worker?.Platform,
-                        stepBrief, _stepGuidance)
+                        stepBrief, _stepGuidance, conversation.BriefIsPacket)
                     : null);
                 string message = conversation.RepairMessage is { } repair
                     ? webOffered ? $"{repair}\n\n{WebLookupNote}" : repair

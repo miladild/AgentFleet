@@ -47,7 +47,7 @@ internal sealed record PlanStepPromptData(
     PlanRecord Plan, PlanStep Step, int Attempt, string? LastFailure, string? FileContext = null,
     bool ParallelGroup = false, bool DurableContext = false, string? RetryRoute = null,
     bool WorkerWorkspace = false, string? WorkerMachine = null, string? WorkerPlatform = null,
-    string? Brief = null, bool StepGuidance = false)
+    string? Brief = null, bool StepGuidance = false, bool FailureInBrief = false)
 {
     public PlanStepPromptParts Parts { get; } = PlanStepPromptParts.Create(Plan, Step, ParallelGroup, WorkerWorkspace, WorkerMachine);
 }
@@ -271,11 +271,20 @@ internal sealed class PlanContinuationContextProvider() : PlanStepPromptProvider
 
         if (!string.IsNullOrWhiteSpace(lastFailure))
         {
+            string before = attempt > 1
+                ? $"Attempt {attempt}. The previous attempt did not pass."
+                : "This step was tried before and did not pass, and the plan stopped here; the user has asked for another go.";
             text.AppendLine();
-            text.AppendLine(attempt > 1
-                ? $"Attempt {attempt}. The previous attempt did not pass. What went wrong:"
-                : "This step was tried before and did not pass, and the plan stopped here; the user has asked for another go. What went wrong the last time:");
-            text.AppendLine(lastFailure);
+            if (data.FailureInBrief)
+            {
+                text.AppendLine($"{before} What the check printed is in the last section of the notes below.");
+            }
+            else
+            {
+                text.AppendLine(attempt > 1 ? $"{before} What went wrong:" : $"{before} What went wrong the last time:");
+                text.AppendLine(lastFailure);
+            }
+
             if (FailureLocation.Describe(lastFailure, plan, step) is { } where)
             {
                 text.AppendLine(where);
