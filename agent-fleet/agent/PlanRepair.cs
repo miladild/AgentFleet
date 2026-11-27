@@ -238,6 +238,10 @@ internal sealed record RollbackNote(
 /// <summary>The words the runner says to a model between rounds, and the brief a fresh conversation starts from.</summary>
 internal static class RepairMessages
 {
+    /// <summary>How many earlier rounds a fresh conversation is told about, and how many on a small window.</summary>
+    internal const int BriefRounds = 9;
+    internal const int SmallWindowRounds = 4;
+
     private const int MaxListed = 8;
     private const int MaxSaidCharacters = 160;
 
@@ -379,10 +383,10 @@ internal static class RepairMessages
     /// last approved a retry): which machine worked, what it changed, what the check then said, and in its own words what it
     /// thought it had done. Empty when no round has run.
     /// </summary>
-    public static string Brief(IReadOnlyList<PlanRunEvent> stepEvents)
+    public static string Brief(IReadOnlyList<PlanRunEvent> stepEvents, int mostRounds = BriefRounds)
     {
         PlanRunEvent[] all = stepEvents.Where(RepairLadder.IsVerdictRound).ToArray();
-        PlanRunEvent[] rounds = all.TakeLast(9).ToArray();
+        PlanRunEvent[] rounds = all.TakeLast(mostRounds).ToArray();
         if (rounds.Length == 0)
         {
             return string.Empty;

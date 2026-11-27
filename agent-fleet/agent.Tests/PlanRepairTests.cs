@@ -246,10 +246,12 @@ public sealed partial class PlanRunnerTests
         Assert.Contains("BEGIN UNTRUSTED FILE", fresh, StringComparison.Ordinal);
     }
 
+    // A retry's first message is never shortened. Measured on a 16K window: with copies of the files in it only one file read
+    // afterwards fitted beside it, and the model read the files in turn until its reads were spent.
     [Theory]
     [InlineData(16384, false)]
     [InlineData(65536, true)]
-    public async Task A_small_machine_is_sent_less_of_a_large_file(int window, bool whole)
+    public async Task A_small_machine_is_sent_less_of_a_large_file_and_none_in_a_retry(int window, bool whole)
     {
         File.WriteAllText(SourceFile, string.Join('\n', Enumerable.Range(1, 2000).Select(number => $"// line {number:0000}")) + "\n// LAST-LINE");
         FleetNodeConfig worker = new("worker-a", "http://worker-a.example.test/v1", "m", "worker", "standard", ContextLength: window);
@@ -260,7 +262,10 @@ public sealed partial class PlanRunnerTests
 
         Assert.Contains("// line 0001", first, StringComparison.Ordinal);
         Assert.Equal(whole, first.Contains("// LAST-LINE", StringComparison.Ordinal));
+        Assert.Equal(whole, fresh.Contains("// line 0001", StringComparison.Ordinal));
         Assert.Equal(whole, fresh.Contains("// LAST-LINE", StringComparison.Ordinal));
+        Assert.Contains("FAILED widget::renders", fresh, StringComparison.Ordinal);
+        Assert.Contains("A conversation before this one worked on this step", fresh, StringComparison.Ordinal);
     }
 
     [Fact]

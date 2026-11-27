@@ -1229,7 +1229,9 @@ internal sealed partial class PlanRunner
                     repairMessage = BuildRepairMessage(plan, step, lastFailure, round, lastRound, handover, rollback, answering);
                     if (IsTestsStep(step)) repairMessage = PlanTestsStepPrompt.Append(repairMessage, plan.Requirements);
                 }
-                else if (RepairMessages.Brief(StepEventsSinceRetry(plan.Id, step.Id)) is { Length: > 0 } earlierRounds)
+                else if (RepairMessages.Brief(StepEventsSinceRetry(plan.Id, step.Id),
+                             SmallWindow(ContextWindowOf(answering, step.Tier)) ? RepairMessages.SmallWindowRounds : RepairMessages.BriefRounds)
+                         is { Length: > 0 } earlierRounds)
                 {
                     string? packet = ContextPacketFor(plan, step, lastFailure, rollback, answering, fresh: true);
                     briefHasPacket = packet is not null;
@@ -2148,8 +2150,8 @@ internal sealed partial class PlanRunner
 
     // The packet for a repair round (null when it is switched off, or the project folder or the check's output is not there to read).
     // A fresh conversation's first message already holds the step's text, and its brief tells the earlier rounds, so its packet
-    // leaves both out. A later round on a small window gets no packet: that message and the first one are never shortened,
-    // and together they were more than the window; what failed is said without it and the files are a tool call away.
+    // leaves both out. A small window gets no packet at all: the first message and the newest follow-up are never shortened,
+    // and with copies of the files in them nothing else fitted; what failed is said without it and the files are a tool call away.
     private string? ContextPacketFor(PlanRecord plan, PlanStep step, string? failure, RollbackNote? rollback, string? node,
         bool fresh = false)
     {
@@ -2160,7 +2162,7 @@ internal sealed partial class PlanRunner
 
         string key = $"{plan.Id}:{step.Id}";
         int? window = ContextWindowOf(node, step.Tier);
-        if (!fresh && window is { } tokens && tokens <= MachineProfile.SmallWindow)
+        if (SmallWindow(window))
         {
             return null;
         }
@@ -2178,6 +2180,8 @@ internal sealed partial class PlanRunner
             return null;
         }
     }
+
+    private static bool SmallWindow(int? window) => window is { } tokens && tokens <= MachineProfile.SmallWindow;
 
     // The configured context window of a machine, or of the smallest machine of the tier while none is chosen yet. Null when no
     // window is set for it.
@@ -3571,11 +3575,13 @@ internal sealed partial class PlanRunner
             SnapshotFilesToCreate(plan, step);
             work = await _tools.SnapshotWorkAsync(plan, attemptCancellation.Token);
             // A follow-up message needs no file contents: the conversation has the task, and the files are one tool call away. A
-            // brief with the packet shows the files as they are now, so it needs no second copy of them either.
-            string fileContext = continuing || conversation.BriefIsPacket
+            // brief with the packet shows the files as they are now, so it needs no second copy of them either. A retry on a
+            // small window gets none: its first message is never shortened, and the files it reads can be.
+            int? answerWindow = ContextWindowOf(modelMachine ?? machine, tier);
+            string fileContext = continuing || conversation.BriefIsPacket || lastFailure is not null && SmallWindow(answerWindow)
                 ? string.Empty
                 : await LoadStepFileContextAsync(plan, step,
-                    MachineProfile.StepFileCharacterBudget(ContextWindowOf(modelMachine ?? machine, tier), MaxStepContextCharacters),
+                    MachineProfile.StepFileCharacterBudget(answerWindow, MaxStepContextCharacters),
                     attemptCancellation.Token);
 
             if (_workerWorkspaces is not null)
