@@ -374,6 +374,37 @@ public sealed class MafContextWindowFitterTests
         }
     }
 
+    // The newest check follow-up of a plan step says what is still failing; losing it left a worker re-reading files and
+    // running the check again to find out. An older one may go.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task The_newest_check_follow_up_stays_in_the_conversation_where_it_was(bool collapse)
+    {
+        const string marker = " [plan:0123456789abcdef0123456789abcdef]";
+        var fitter = new MafContextWindowFitter(collapse);
+        List<ChatMessage> input = ContextWindowTestHelper.BuildConversation(8);
+        input.Add(new ChatMessage(ChatRole.User, "Round 2: the check failed. OLD-OUTPUT" + marker));
+        input.AddRange(ContextWindowTestHelper.BuildConversation(8, withSystem: false, withUser: false));
+        var newest = new ChatMessage(ChatRole.User, "Round 3: the check failed. NEWEST-OUTPUT " + new string('o', 3_000) + marker);
+        input.Add(newest);
+        List<ChatMessage> after = ContextWindowTestHelper.BuildConversation(6, withSystem: false, withUser: false);
+        input.AddRange(after);
+        int budget = ContextSizeChatClient.EstimateTokens(input.Take(2).ToList(), null) + 6_000;
+
+        IReadOnlyList<ChatMessage> fitted = await fitter.FitAsync(input, null, budget, 1.0, CancellationToken.None);
+
+        Assert.Equal(0, fitter.FallbackCount);
+        Assert.True(fitted.Count < input.Count);
+        int at = Array.FindIndex(fitted.ToArray(), message => ReferenceEquals(message, newest));
+        Assert.True(at >= 2, "the newest follow-up was left out");
+        Assert.Single(fitted, message => ReferenceEquals(message, newest));
+        // The turns that came after it still come after it.
+        Assert.Equal(ContextWindowTestHelper.Signature(after[^1]), ContextWindowTestHelper.Signature(fitted[^1]));
+        Assert.True(at < fitted.Count - 1);
+        Assert.DoesNotContain(fitted, message => message.Text.Contains("OLD-OUTPUT", StringComparison.Ordinal) && message.Role == ChatRole.User);
+    }
+
     // Head pin edge test: system + assistant text + user task.
     [Theory]
     [InlineData(true)]

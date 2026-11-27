@@ -92,16 +92,30 @@ internal sealed class MafContextWindowFitter : IContextWindowFitter
             }
 
             List<ChatMessage> head = new(messages.Take(headCount));
-            IEnumerable<ChatMessage> body = messages.Skip(headCount);
+
+            // The newest check follow-up of a plan step says what is still failing and nothing newer replaces it, so it is
+            // kept out of the shortening, as the classic policy keeps it, and put back where it was.
+            int latest = -1;
+            for (int i = messages.Count - 1; i >= headCount; i--)
+            {
+                if (messages[i].Role == ChatRole.User && FleetPlanStore.FindMarkerId(messages[i].Text) is not null)
+                {
+                    latest = i;
+                    break;
+                }
+            }
+
+            IEnumerable<ChatMessage> body = messages.Skip(headCount).Where((_, i) => i + headCount != latest);
+            List<ChatMessage> pinned = latest < 0 ? head : [.. head, messages[latest]];
 
             // Quantized target: compute once, used by both triggers.
             double quantum = budgetTokens * 0.25;
             double mustDrop = Math.Ceiling(Math.Max(full - budgetTokens, 1) / quantum) * quantum;
 
             // Triggers that work with the FLEET's token estimate.
-            CompactionTrigger over = index => EstimateWithHead(head, index.GetIncludedMessages(), options, scale) > budgetTokens;
+            CompactionTrigger over = index => EstimateWithHead(pinned, index.GetIncludedMessages(), options, scale) > budgetTokens;
             CompactionTrigger enough = index =>
-                full - EstimateWithHead(head, index.GetIncludedMessages(), options, scale) >= mustDrop;
+                full - EstimateWithHead(pinned, index.GetIncludedMessages(), options, scale) >= mustDrop;
 
             // Build and run the compaction strategy.
             CompactionStrategy strategy = _collapseToolResults
@@ -123,6 +137,13 @@ internal sealed class MafContextWindowFitter : IContextWindowFitter
             }
 
             List<ChatMessage> result = head.Concat(compactedBody).ToList();
+            if (latest >= 0)
+            {
+                // Before the first turn that came after it and is still whole; at the end when none is.
+                var later = new HashSet<ChatMessage>(messages.Skip(latest + 1), ReferenceEqualityComparer.Instance);
+                int at = result.FindIndex(headCount, later.Contains);
+                result.Insert(at < 0 ? result.Count : at, messages[latest]);
+            }
 
             // Return the same instance if nothing was removed.
             if (result.Count == messages.Count && result.SequenceEqual(messages))
