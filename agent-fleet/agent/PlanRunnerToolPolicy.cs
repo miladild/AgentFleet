@@ -41,6 +41,9 @@ internal static partial class PlanRunnerToolPolicy
     /// </summary>
     public const string TestRulingPromptOnlyRole = "test-ruling-prompt-only";
 
+    /// <summary>A model asked for a stuck step's files whole (see FileRewrite): it is offered no tool and answers with the files.</summary>
+    public const string FileRewriteRole = "file-rewrite";
+
     // The reviewer and the ruler read. They cannot run a command, write a file or call anything else.
     private static readonly HashSet<string> ReviewTools = new(StringComparer.Ordinal)
     {
@@ -60,7 +63,7 @@ internal static partial class PlanRunnerToolPolicy
             return webOffered && role is null;
         }
 
-        if (fromRunner && role == TestRulingPromptOnlyRole)
+        if (fromRunner && role is TestRulingPromptOnlyRole or FileRewriteRole)
         {
             return false;
         }

@@ -48,7 +48,18 @@ internal sealed class FakeStepAgent(
     /// <summary>Every message that went to an auditor, oldest first.</summary>
     public List<FakeAuditCall> Audits { get; } = [];
 
-    public IStepSession OpenSession(string? role) => role is null ? OpenSession() : new FakeAuditSession(this, role);
+    public IStepSession OpenSession(string? role)
+    {
+        if (role is not (null or PlanRunnerToolPolicy.FileRewriteRole))
+        {
+            return new FakeAuditSession(this, role);
+        }
+
+        // A rewrite is a step call like any other, asked without tools.
+        IStepSession session = OpenSession();
+        ((FakeStepSession)session).Role = role;
+        return session;
+    }
 
     internal StepAgentReply Audit(FakeAuditCall call)
     {
@@ -132,6 +143,8 @@ internal sealed class FakeStepSession(FakeStepAgent owner, int index) : IStepSes
     public void OfferDispute(bool offered) => DisputeOffers.Add(offered);
 
     public int Index => index;
+
+    public string? Role { get; set; }
 
     public List<FakeStepCall> Messages { get; } = [];
 

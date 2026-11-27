@@ -562,9 +562,11 @@ internal sealed partial class ContextSizeChatClient(IChatClient inner, HttpClien
         double scale = Scale;
         int estimate = EstimateTokens(messages, options);
         bool shortened = false;
-        if (estimate * scale + 4096 > ceiling)
+        // The room kept for the answer: a request that asks for a longer one than usual gets room for it.
+        int reserve = Math.Max(MaxAnswerTokens, Math.Min(sized.MaxOutputTokens ?? 0, ceiling / 2));
+        if (estimate * scale + reserve > ceiling)
         {
-            IReadOnlyList<ChatMessage> fitted = await _fitter.FitAsync(messages, options, ceiling - 4096, scale, cancellationToken);
+            IReadOnlyList<ChatMessage> fitted = await _fitter.FitAsync(messages, options, ceiling - reserve, scale, cancellationToken);
             if (!ReferenceEquals(fitted, messages))
             {
                 int before = estimate;
@@ -578,7 +580,7 @@ internal sealed partial class ContextSizeChatClient(IChatClient inner, HttpClien
             }
         }
 
-        int needed = (int)Math.Min(int.MaxValue - 8192, estimate * scale) + 4096;
+        int needed = (int)Math.Min(int.MaxValue - 8192, estimate * scale) + reserve;
         int size;
         lock (_gate)
         {

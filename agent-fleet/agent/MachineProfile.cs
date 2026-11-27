@@ -49,6 +49,19 @@ internal sealed record MachineProfile(bool RulerReadsFiles, string Reason, int? 
     internal static int StepFileCharacterBudget(int? window, int most) =>
         window is { } tokens ? (int)Math.Min(most, Math.Max(8000L, tokens * 3L / 4)) : most;
 
+    /// <summary>The largest window whose stuck steps are asked for whole files; a larger one can hold them while it uses tools.</summary>
+    private const int MostRewriteWindow = 32768;
+
+    // An answer is capped (FileRewrite.AnswerTokens, about 20 000 characters), and it may have to write every file again.
+    private const int MostRewriteCharacters = 20_000;
+
+    /// <summary>
+    /// The most characters a step's files may hold together to be asked for whole on a machine with this window (the request and an
+    /// answer that writes them all again must both fit), or 0 when the machine is not asked that way.
+    /// </summary>
+    internal static int RewriteFileBudget(int? window) =>
+        window is { } tokens && tokens <= MostRewriteWindow ? (int)Math.Min(MostRewriteCharacters, tokens * 5L / 4) : 0;
+
     /// <summary>The environment setting that overrides the rule for every machine: "on" always reads, "off" never reads, anything else decides by window.</summary>
     internal const string RulerReadsSetting = "FLEET_RULER_READS";
 

@@ -268,6 +268,86 @@ public sealed partial class PlanRunnerTests
         Assert.Contains("A conversation before this one worked on this step", fresh, StringComparison.Ordinal);
     }
 
+    // A worker with a small window that never edits: the step climbs to a fresh start, which asks for whole files.
+    private async Task<(PlanRecord Plan, FakeStepAgent Agent)> StuckOnSmallWorker(Func<int, string> rewrite, HarnessOptions? harness = null)
+    {
+        FleetNodeConfig worker = new("worker-a", "http://worker-a.example.test/v1", "m", "worker", "standard", ContextLength: 16384);
+        FleetOptions options = OptionsWithNodes(new FleetNodeConfig("hub", "http://hub.example.test/v1", "m", "hub", "heavy", Fallback: true), worker);
+        var health = new FleetHealthMonitor(options, new HealthyNodeFactory());
+        PlanRecord plan = RepairPlan("worker-a", PlanRecoveryScope.WorkerOnly);
+        int rewrites = 0;
+        FakeStepAgent agent = null!;
+        agent = new FakeStepAgent((prompt, _, _) =>
+            Task.FromResult(prompt.StartsWith("The task:", StringComparison.Ordinal) ? rewrite(++rewrites) : "Looked at it."))
+        {
+            ToolsOf = _ => (2, false)
+        };
+
+        await RepairRunner(agent, _ => File.Exists(SourceFile) && File.ReadAllText(SourceFile).Contains("fixed", StringComparison.Ordinal)
+            ? Pass("check")
+            : FailWith("widget::renders"), options, health, harness: harness).RunPlanAsync(plan.Id, default);
+
+        return (Store.Get(plan.Id)!, agent);
+    }
+
+    [Fact]
+    public async Task A_stuck_step_on_small_files_is_asked_for_whole_files_and_they_are_written()
+    {
+        File.WriteAllText(SourceFile, "OLD-CONTENT");
+
+        (PlanRecord after, FakeStepAgent agent) = await StuckOnSmallWorker(_ =>
+            $"FILE: {Path.GetFileName(SourceFile)}\n```\nfixed\n```\nFILE: other.cs\n```\nnot named\n```\n");
+
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.Equal("fixed", File.ReadAllText(SourceFile).Trim());
+        Assert.False(File.Exists(Path.Combine(ProjectDirectory, "other.cs")));
+        FakeStepSession rewrite = agent.Sessions[^1];
+        Assert.Equal(PlanRunnerToolPolicy.FileRewriteRole, rewrite.Role);
+        string asked = Assert.Single(rewrite.Messages).Text;
+        Assert.Contains("OLD-CONTENT", asked, StringComparison.Ordinal);
+        Assert.Contains("FAILED widget::renders", asked, StringComparison.Ordinal);
+        PlanRunEvent written = Assert.Single(after.Events!, runEvent => runEvent.Kind == "file-rewrite");
+        Assert.Contains("a.cs", written.Detail, StringComparison.Ordinal);
+        Assert.Contains("other.cs", written.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task The_rewrite_stage_has_its_own_rounds_and_a_useless_reply_does_not_end_it()
+    {
+        File.WriteAllText(SourceFile, "OLD-CONTENT");
+
+        (PlanRecord after, FakeStepAgent agent) = await StuckOnSmallWorker(_ => "I do not know.");
+
+        Assert.Equal(PlanStatus.Blocked, after.Status);
+        Assert.Equal(10, agent.Calls.Count(call => call.Prompt.StartsWith("The task:", StringComparison.Ordinal)));
+        Assert.Equal(11, agent.Calls.Count);
+    }
+
+    [Fact]
+    public async Task A_machine_with_no_window_set_keeps_the_fresh_conversation_even_for_files_not_written_yet()
+    {
+        PlanRecord plan = RepairPlan(machine: null, PlanRecoveryScope.WorkerOnly);
+        var agent = new FakeStepAgent((_, _, _) => Task.FromResult("Looked at it.")) { ToolsOf = _ => (2, false) };
+
+        await RepairRunner(agent, _ => FailWith("widget::renders")).RunPlanAsync(plan.Id, default);
+
+        Assert.DoesNotContain(agent.Calls, call => call.Prompt.StartsWith("The task:", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(true, 30_000)] // The files are more than the window can be asked to write back.
+    [InlineData(false, 100)] // Switched off.
+    public async Task Files_too_large_or_the_stage_switched_off_keep_the_fresh_conversation(bool enabled, int size)
+    {
+        File.WriteAllText(SourceFile, new string('a', size));
+
+        (PlanRecord after, FakeStepAgent agent) = await StuckOnSmallWorker(_ => "unused",
+            new HarnessOptions(EnableFileRewrite: enabled));
+
+        Assert.Equal(PlanStatus.Blocked, after.Status);
+        Assert.DoesNotContain(agent.Calls, call => call.Prompt.StartsWith("The task:", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task With_the_packet_switched_off_the_repair_message_is_what_it_was()
     {

@@ -1165,6 +1165,7 @@ internal sealed partial class PlanRunner
         }
 
         IStepSession? session = continuingSession;
+        IStepSession? rewriteSession = null;
         string? conversationWorkspace = null;
         RoundOutcome? lastRound = null;
         string? lastCheckOutput = null;
@@ -1176,9 +1177,10 @@ internal sealed partial class PlanRunner
         RollbackNote? rollback = null;
 
         // The restart landed after the last round of a rung and before the climb was written down.
-        if (roundsInRung >= _roundsPerRung)
+        int restartRounds = RoundsAllowed(Rewrites(plan, step, rung, modelOverride ?? workspaceOverride ?? step.Machine));
+        if (roundsInRung >= restartRounds)
         {
-            RepairDecision spent = RepairLadder.Decide(rung, roundsInRung, _roundsPerRung, noChange: false, string.Empty, hubRungAvailable: false);
+            RepairDecision spent = RepairLadder.Decide(rung, roundsInRung, restartRounds, noChange: false, string.Empty, hubRungAvailable: false);
             if (spent.Move == RepairMove.GiveUp)
             {
                 gaveUp = true;
@@ -1224,7 +1226,24 @@ internal sealed partial class PlanRunner
                 bool briefHasPacket = false;
                 // The machine that will answer, as far as it is known yet: what is sent to it is sized to its window.
                 string? answering = modelOverride ?? workspaceOverride ?? conversationWorkspace ?? step.Machine;
-                if (conversation.HasHistory)
+                // A stuck step on small files starts afresh by asking for the files whole, one conversation for each round.
+                bool rewrite = lastFailure is not null && Rewrites(plan, step, rung, answering);
+                // A conversation asked for whole files has no tools, so any other round after it starts a new one.
+                if (!rewrite && rewriteSession is not null && ReferenceEquals(conversation, rewriteSession))
+                {
+                    session = IsTestsStep(step) ? _agent.OpenSession(PlanRunnerToolPolicy.TestWriterRole) : _agent.OpenSession();
+                    conversation = session;
+                    conversationWorkspace = null;
+                }
+
+                if (rewrite)
+                {
+                    session = rewriteSession = _agent.OpenSession(PlanRunnerToolPolicy.FileRewriteRole);
+                    conversation = session;
+                    conversationWorkspace = null;
+                    repairMessage = RewriteMessage(plan, step, lastFailure!);
+                }
+                else if (conversation.HasHistory)
                 {
                     repairMessage = BuildRepairMessage(plan, step, lastFailure, round, lastRound, handover, rollback, answering);
                     if (IsTestsStep(step)) repairMessage = PlanTestsStepPrompt.Append(repairMessage, plan.Requirements);
@@ -1246,7 +1265,7 @@ internal sealed partial class PlanRunner
                 ModelAttemptResult model = await RunModelAttemptAsync(
                     plan, step, attempt, lastFailure, tier, parallelGroup: false, cancellationToken: cancellationToken,
                     workspaceOverride: workspaceOverride ?? (continuing ? conversationWorkspace : null), modelMachineOverride: modelOverride,
-                    round: new RoundContext(conversation, rung, round, repairMessage, brief, briefHasPacket),
+                    round: new RoundContext(conversation, rung, round, repairMessage, brief, briefHasPacket, rewrite),
                     limit: LimitFor(plan, worked));
                 roundActivity?.SetTag("fleet.model_node", model.ModelNode);
                 roundActivity?.SetTag("fleet.workspace_node", model.Machine);
@@ -1379,7 +1398,7 @@ internal sealed partial class PlanRunner
 
                     roundsInRung++;
                     roundsTotal++;
-                    RepairDecision failedDecision = RepairLadder.Decide(rung, roundsInRung, _roundsPerRung, noChange: false, string.Empty,
+                    RepairDecision failedDecision = RepairLadder.Decide(rung, roundsInRung, RoundsAllowed(rewrite), noChange: false, string.Empty,
                         HubRungAvailable(step, hub, hubAllowed, model.ModelNode));
                     if (failedDecision.Move != RepairMove.NextRound)
                     {
@@ -1911,7 +1930,8 @@ internal sealed partial class PlanRunner
                 // over: the rescue starts at once (a worker-only plan keeps its worker, as before).
                 bool hubRung = HubRungAvailable(step, hub, hubAllowed, model.ModelNode);
                 bool tooSlow = model.TimedOut && hubRung && rung == RepairLadder.RequestedTierRung;
-                RepairDecision decision = RepairLadder.Decide(rung, roundsInRung, _roundsPerRung, outcome.NoChange || tooSlow,
+                // A rewrite that changed nothing (an answer that held no whole file) does not end the stage: the next one is asked afresh.
+                RepairDecision decision = RepairLadder.Decide(rung, roundsInRung, RoundsAllowed(rewrite), !rewrite && (outcome.NoChange || tooSlow),
                     tooSlow && !outcome.NoChange ? "the worker ran out of time on this round" : NoChangeReason(outcome), hubRung);
                 if (decision.Move != RepairMove.NextRound)
                 {
@@ -2314,7 +2334,7 @@ internal sealed partial class PlanRunner
     /// <param name="RepairMessage">The follow-up to send; null when the conversation has to be told the whole task.</param>
     /// <param name="Brief">What the rounds before this conversation tried, for a fresh conversation after them.</param>
     private sealed record RoundContext(IStepSession Session, int Rung, int Round, string? RepairMessage = null, string? Brief = null,
-        bool BriefIsPacket = false);
+        bool BriefIsPacket = false, bool Rewrite = false);
 
     private async Task<string?> ReconcileInterruptedWorkspaceAsync(PlanRecord plan, PlanStep step, CancellationToken cancellationToken)
     {
@@ -3513,7 +3533,9 @@ internal sealed partial class PlanRunner
             }
         }
 
-        string attemptDetail = continuing
+        string attemptDetail = conversation.Rewrite
+            ? $"Round {conversation.Round}: the step's files are asked for whole, with what the check printed."
+            : continuing
             ? $"Round {conversation.Round}: the output of the failed check goes back into the same conversation."
             : retryRoute ?? (string.IsNullOrWhiteSpace(lastFailure)
                 ? string.Empty
@@ -3612,7 +3634,7 @@ internal sealed partial class PlanRunner
                     modelNode: modelMachine, workspaceNode: machine);
                 await PrepareWorkerDependenciesAsync(plan, step, attempt, tier, conversation.Rung, conversation.Round, machine!,
                     modelMachine, worker, attemptCancellation.Token);
-                editCheck = CreateEditCheck(plan, step, worker);
+                editCheck = conversation.Rewrite ? null : CreateEditCheck(plan, step, worker);
             }
 
             // Everything the step's model does (routing, tool calls, decisions it pins) is recorded in the
@@ -3624,12 +3646,13 @@ internal sealed partial class PlanRunner
             }
 
             string runId = continuing ? $"{plan.Id}:{step.Id}:{attempt}:{conversation.Round}" : $"{plan.Id}:{step.Id}:{attempt}";
-            using IDisposable? scope = _journal is not null && contextId is not null
+            // A rewrite is sent on its own: no record of the plan is put into it.
+            using IDisposable? scope = _journal is not null && contextId is not null && !conversation.Rewrite
                 ? _journal.Push(new FleetRequestIdentity(contextId, runId, "plan-runner", FleetPlanContext.StepTaskId(plan.Id, step.Id)))
                 : null;
             // dispute_test is offered to an ordinary step while frozen tests are in play, and a dispute from any other reply is not read.
             bool disputeOffered = !IsTestsStep(step) && _testFirstMode == TestFirstMode.On && plan.FrozenTests is { Count: > 0 };
-            bool webOffered = WebLookupOffered(plan, step);
+            bool webOffered = !conversation.Rewrite && WebLookupOffered(plan, step);
             if (webOffered && !(_store.Get(plan.Id)?.Events ?? []).Any(runEvent =>
                     runEvent.Kind == WebLookupOfferedEvent && runEvent.StepId == step.Id && runEvent.Attempt == attempt))
             {
@@ -3679,12 +3702,22 @@ internal sealed partial class PlanRunner
                         durableContext: contextId is not null, retryRoute: retryRoute,
                         workerWorkspace: worker is not null, workerMachine: machine, workerPlatform: worker?.Platform,
                         brief: stepBrief, stepGuidance: _stepGuidance);
+                if (conversation.Rewrite)
+                {
+                    conversation.Session.CapAnswer(FileRewrite.AnswerTokens);
+                }
+
                 Task<StepAgentReply> call = conversation.Session.SendAsync(
                     message,
                     tier,
                     modelMachine,
                     attemptCancellation.Token);
                 reply = await stall.WaitAsync(call, attemptCancellation, cancellationToken);
+                if (conversation.Rewrite)
+                {
+                    reply = await WriteRewriteAsync(plan, step, attempt, tier, machine, modelMachine, conversation.Rung, conversation.Round,
+                        reply, attemptCancellation.Token);
+                }
             }
             editCheckNote = await FinishEditCheckAsync(editCheck, plan, step, attempt);
             editCheck = null;

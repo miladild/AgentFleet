@@ -153,7 +153,8 @@ without server-side conversation state.
   worker workspace. An explicitly pinned worker normally handles its own model call. When a step's check fails, its output
   goes back into the same model conversation (`IStepSession`, a round) and the step climbs a repair ladder in `PlanRepair.cs`:
   more rounds on its machine, then the same conversation on the hub model if the saved plan recovery scope allows it, then a
-  fresh conversation with a brief of what was tried. A round that changed nothing, or repeated the same failures with no file
+  fresh conversation with a brief of what was tried (on a small or medium window, with files that fit, rounds that ask for the
+  files whole without tools instead: `FileRewrite.cs`, `PlanRunnerRewrite.cs`). A round that changed nothing, or repeated the same failures with no file
   changed, climbs at once; a round that leaves the step worse than its best round is undone from an in-memory checkpoint of
   the changed files (`PlanTools.RestoreToSnapshotAsync`); a step also has a working-time limit and a loop guard stops a model
   turn that repeats one failing call (`ToolLoopGuard`); climbing changes only the model route, never the workspace or the

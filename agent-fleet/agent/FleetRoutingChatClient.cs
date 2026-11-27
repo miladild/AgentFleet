@@ -111,8 +111,10 @@ internal sealed class FleetRoutingChatClient : IChatClient
         // the "answered by" footer that GetStreamingResponseAsync appends.
         (FleetRouteTarget target, string routeReason) = await SelectTargetWithJournalAsync(messageList, gate, runnerTier, runnerMachine, cancellationToken);
         StepToolActivity? stepRound = StepRound(options);
+        string? runnerRole = RunnerRole(options);
         options = StripRunnerKey(options);
         (IReadOnlyList<ChatMessage> sendMessages, ChatOptions? sendOptions) = ApplyPlanMode(messageList, options, gate);
+        sendOptions = ForRole(runnerRole, sendOptions);
         RecordRoute(target, gate, runnerTier, routeReason);
         sendMessages = InjectContext(sendMessages, target.Node);
         ChatResponse response;
@@ -162,9 +164,11 @@ internal sealed class FleetRoutingChatClient : IChatClient
         string route = target.Node.Name;
         StepToolActivity? stepRound = StepRound(options);
         OllamaCallTiming? timing = null;
+        string? runnerRole = RunnerRole(options);
         options = StripRunnerKey(options);
 
         (IReadOnlyList<ChatMessage> sendMessages, ChatOptions? sendOptions) = ApplyPlanMode(messageList, options, gate);
+        sendOptions = ForRole(runnerRole, sendOptions);
         RecordRoute(target, gate, runnerTier, routeReason);
         sendMessages = InjectContext(sendMessages, target.Node);
 
@@ -732,6 +736,19 @@ internal sealed class FleetRoutingChatClient : IChatClient
             UriContent uri => uri.MediaType?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) == true,
             _ => false
         };
+
+    // A rewrite is told only how to answer: the agent's own instructions describe tools it is not offered.
+    internal static ChatOptions? ForRole(string? role, ChatOptions? options)
+    {
+        if (role != PlanRunnerToolPolicy.FileRewriteRole)
+        {
+            return options;
+        }
+
+        ChatOptions rewrite = options?.Clone() ?? new ChatOptions();
+        rewrite.Instructions = FileRewrite.Instructions;
+        return rewrite;
+    }
 
     // Plan-first is enforced here, in code: while there is no approved plan the model is only
     // offered read-only tools (plus propose_plan), so no prompt wording can get it to write.

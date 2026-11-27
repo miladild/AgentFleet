@@ -121,7 +121,11 @@ steps, and checks each step with a real command instead of trusting itself.
     2. the hub model, continuing the same conversation, while file tools and checks stay on the selected worker (only when
        the plan allows hub rescue, and only when the hub answers a small test request);
     3. a fresh conversation, on the hub when the plan allows it and otherwise on a worker, that starts from a brief of what
-       the earlier rounds tried and is told to find the root cause first.
+       the earlier rounds tried and is told to find the root cause first. When the answering machine's window is 32768 tokens
+       or less and the step's files fit in it, this rung asks for the files whole instead, without tools: each round sends the
+       step's text, its files, what the check printed and what the earlier rounds led to, and writes the files of the reply
+       that the step lists. It may take up to ten rounds (`FLEET_HARNESS_REWRITE_ROUNDS`), and an answer that held no whole
+       file does not end it. `FLEET_HARNESS_ENABLE_FILE_REWRITE=false` keeps the fresh conversation.
 
     Inside a round, the step's check also runs after each file edit a worker model makes (`FLEET_PLAN_EDIT_CHECK`, on by default). The model is told the result in one line after each edit. An edit that makes a project that loaded stop loading is undone at once: the file is exactly as it was, and the reply says what the problem was. After three edits in a row that do not improve the result (`FLEET_PLAN_EDIT_CHECK_PATIENCE`), the files go back to the best state so far and the model must read them again before it edits them. The check that runs here is the step's own check, on the same worker. It is not used for tests steps (their tests may fail while they are written), for steps with no check, or on the hub. A check that cannot finish within `FLEET_PLAN_EDIT_CHECK_SECONDS`, or that does not run at all, switches the check off for the rest of the round; the edits made stay as they are, and the attempt's event says so. At the end of each round the best state is put back before the files are synced to the hub if the last state is worse.
 
