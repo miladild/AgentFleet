@@ -114,7 +114,8 @@ internal static partial class PlanFailure
     public static FailureFingerprint FailureSignature(string? checkOutput)
     {
         string output = AnsiEscape().Replace(checkOutput ?? string.Empty, string.Empty);
-        string[] found = FailingItemsIn(output, namesOnly: true);
+        // A run in which no test ran names no failing test to count, whatever line it prints as failing.
+        string[] found = NoTestRan(output) ? [] : FailingItemsIn(output, namesOnly: true);
         if (found.Length > 0)
         {
             string[] names = found.Take(40).ToArray();
@@ -194,7 +195,26 @@ internal static partial class PlanFailure
         string unnamed = string.Join('\n', lines.Where(line => !NamesATest(line)));
         return BuildBrokenOutput().IsMatch(unnamed) || TransformFailure().IsMatch(output) ||
                lines.Any(line => !char.IsWhiteSpace(line[0]) && !NamesATest(line) && UnexpectedTokenInSource().IsMatch(line)) ||
-               TestFileDidNotLoad(output);
+               TestFileDidNotLoad(output) || NoTestRan(output);
+    }
+
+    // A suite that threw while it was being built: node prints it as failing and counts no test at all. A check may print one
+    // count per test run it made, so no test ran only when all of them add up to none.
+    private static bool NoTestRan(string output)
+    {
+        int? tests = null;
+        bool failed = false;
+        foreach (string line in output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (NodeTestCount().Match(line) is { Success: true } count && int.TryParse(count.Groups["count"].Value, out int counted))
+            {
+                tests = (tests ?? 0) + counted;
+            }
+
+            failed |= FailedTestLine().IsMatch(line) && !TestDispute.SpecFailingHeader().IsMatch(line);
+        }
+
+        return failed && tests == 0;
     }
 
     // The runners' own spellings of a failing test: FAIL/FAILED (jest, pytest), the symbols (node:test, TAP). FailedTestLine ignores case,

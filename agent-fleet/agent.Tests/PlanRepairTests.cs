@@ -1044,8 +1044,31 @@ public sealed partial class PlanRunnerTests
         "broke the build" => "Exit code: 1\n--- stdout ---\nsrc/a.ts(3,5): error TS2322: Type 'string' is not assignable to type 'number'.",
         "two" => FailWith("t1", "t3"),
         "two again" => FailWith("t2", "t4"),
+        "broke the suite" => PlanCheckOutputFixtures.SuiteThatDidNotLoad,
         _ => FailWith("t1", "t2", "t3")
     };
+
+    // Measured: a test file that called a hook it had not imported ran no test, was counted as one failing name, and every
+    // later round that ran the tests was undone as worse than it.
+    [Fact]
+    public async Task A_round_that_ran_the_tests_is_kept_after_a_round_in_which_no_test_ran()
+    {
+        (PlanRecord after, _) = await RunWritingAsync(["broke the suite", "one", "fixed"]);
+
+        Assert.Equal(PlanStatus.Done, after.Status);
+        Assert.DoesNotContain(after.Events!, runEvent => runEvent.Kind == RunEventKind.RoundRolledBack);
+    }
+
+    [Fact]
+    public async Task A_round_in_which_no_test_ran_is_undone_after_a_round_that_ran_them()
+    {
+        (PlanRecord after, _) = await RunWritingAsync(["one", "broke the suite", "fixed"]);
+
+        Assert.Equal(PlanStatus.Done, after.Status);
+        PlanRunEvent undone = Assert.Single(after.Events!, runEvent => runEvent.Kind == RunEventKind.RoundRolledBack);
+        Assert.Equal(2, undone.Round);
+        Assert.Contains("code that does not build", undone.Detail);
+    }
 
     private async Task<(PlanRecord Plan, FakeStepAgent Agent)> RunWritingAsync(string[] writes, int roundsPerRung = 3, bool allowHub = false)
     {

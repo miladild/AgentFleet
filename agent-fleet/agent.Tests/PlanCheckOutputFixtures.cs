@@ -7,6 +7,30 @@ namespace AgentFleet.Tests;
 /// </summary>
 internal static class PlanCheckOutputFixtures
 {
+    // Node's report of a suite that threw while it was being built: it names the suite as failing and counts no test.
+    public const string SuiteThatDidNotLoad = """
+Exit code: 1
+--- stdout ---
+✖ AlertStore (0.416246ms)
+ℹ tests 0
+ℹ suites 1
+ℹ pass 0
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 142.981553
+
+✖ failing tests:
+
+test at test/alerts.test.ts:1:484
+✖ AlertStore (0.416246ms)
+  ReferenceError: beforeEach is not defined
+      at SuiteContext.<anonymous> (test/alerts.test.ts:16:3)
+      at Suite.runInAsyncScope (node:async_hooks:227:14)
+      at Suite.createBuild (node:internal/test_runner/test:1724:13)
+""";
+
     public const string Round01 = """
 Exit code: 1
 --- stdout ---

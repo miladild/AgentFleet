@@ -14,7 +14,8 @@ public sealed class PlanBuildBrokenTests
         "Exit code: 1\nFailed to parse source for import analysis because the content contains invalid syntax.\n",
         "Exit code: 1\nsrc/app.ts:3:1: Unexpected token `}`\n",
         "Exit code: 1\n✖ tests/limits.test.js (12ms)\nℹ tests 1\nℹ fail 1\n",
-        "Exit code: 1\n✖ failing tests:\n\ntest at tests/limits.test.ts:1:1\n✖ tests/limits.test.ts (12ms)\nℹ tests 1\nℹ fail 1\n"
+        "Exit code: 1\n✖ failing tests:\n\ntest at tests/limits.test.ts:1:1\n✖ tests/limits.test.ts (12ms)\nℹ tests 1\nℹ fail 1\n",
+        PlanCheckOutputFixtures.SuiteThatDidNotLoad
     };
 
     public static TheoryData<string> OutputsThatRunTheTests => new()
@@ -78,6 +79,26 @@ public sealed class PlanBuildBrokenTests
         FailureFingerprint notLoaded = PlanFailure.FailureSignature(PlanCheckOutputFixtures.Round01);
         Assert.Empty(notLoaded.Items);
         Assert.StartsWith("sha256:", notLoaded.Value);
+    }
+
+    // A count of no tests beside a failure leaves nothing to count: the repair ladder must not read it as fewer failures.
+    [Fact]
+    public void A_run_in_which_no_test_ran_signs_no_failing_name()
+    {
+        FailureFingerprint signature = PlanFailure.FailureSignature(PlanCheckOutputFixtures.SuiteThatDidNotLoad);
+
+        Assert.Empty(signature.Items);
+        Assert.StartsWith("sha256:", signature.Value);
+    }
+
+    // One of several runs counting no tests does not hide the tests another run did.
+    [Fact]
+    public void A_check_with_one_empty_run_beside_a_run_that_failed_a_test_still_builds()
+    {
+        const string output = "Exit code: 1\nℹ tests 0\n✖ rejects zero (2ms)\nℹ tests 3\nℹ fail 1\n";
+
+        Assert.False(PlanFailure.BuildBroken(output));
+        Assert.Equal(["rejects zero"], PlanFailure.FailureSignature(output).Items);
     }
 
     public static TheoryData<string, int> RunsThatFailSomeTests => new()

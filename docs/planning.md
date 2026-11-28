@@ -140,8 +140,9 @@ steps, and checks each step with a real command instead of trusting itself.
     not wait for its three rounds: the step climbs at once, except on the last rung, which has nowhere to climb to: there such a
     round is spent like any other, and the step is parked when the rung's rounds are used up. Every climb is a **rung changed** line in the run log with its
     reason. A round that leaves the step worse than its best round so far (more failing names, or code that stopped
-    building) is **undone**: the runner puts the project's changed and new files back as they were after the best round
-    before the next round, tells the model what it broke, and logs **round rolled back**. Lock files and build caches that a
+    building) is **undone**: a failed run in which no test ran, such as a test suite that threw while it was being set up,
+    counts as code that does not build and has no failing names to count. The runner puts the project's changed and new files
+    back as they were after the best round before the next round, tells the model what it broke, and logs **round rolled back**. Lock files and build caches that a
     round only rewrote as a side effect do not count as progress. When the last rung has had its rounds, or the working time
     is used, the plan stops as **Blocked** with the project left at the best state it reached. (The best state is kept in
     memory: a backend restart forgets it, and the step goes on from the files as they are.) The runner executes the last step's approved
