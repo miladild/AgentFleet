@@ -77,7 +77,24 @@ internal sealed partial class PlanRunner
             .Select(path => new RewriteFile(path, ReadRewriteFile(RewritePath(root, path))))
             .Where(file => file.Text is not null)
             .ToArray();
-        return FileRewrite.Prompt(step, files, readOnly, failure, RepairMessages.TriedLines(StepEventsSinceRetry(plan.Id, step.Id)));
+        return FileRewrite.Prompt(step, files, readOnly, failure, RepairMessages.TriedLines(StepEventsSinceRetry(plan.Id, step.Id)),
+            step.Files.Count > 1 ? OnlyRewritten(StepEventsSinceRetry(plan.Id, step.Id)) : null);
+    }
+
+    private const int SameFileRounds = 3;
+
+    // The one file the last rounds of the rewrite rung changed, when they all changed only it and the check got no better.
+    private static string? OnlyRewritten(IReadOnlyList<PlanRunEvent> events)
+    {
+        PlanRunEvent[] last = events.Where(runEvent => RepairLadder.IsVerdictRound(runEvent) && runEvent.Rung == RepairLadder.FreshRung)
+            .TakeLast(SameFileRounds).ToArray();
+        if (last.Length < SameFileRounds || last.Any(round => round.ChangedFiles is not { Count: 1 }) ||
+            last.Select(round => round.ChangedFiles![0]).Distinct(StringComparer.OrdinalIgnoreCase).Count() != 1)
+        {
+            return null;
+        }
+
+        return RepairLadder.Improved(RepairLadder.FailingCount(last[^1]), RepairLadder.FailingCount(last[0])) ? null : last[0].ChangedFiles![0];
     }
 
     private static string? ReadRewriteFile(string? full)
@@ -100,7 +117,7 @@ internal sealed partial class PlanRunner
         var written = new List<string>();
         var left = new List<string>();
         string[] listed = step.Files.Select(FileRewrite.Normalize).ToArray();
-        foreach (RewriteFile file in FileRewrite.Parse(reply.Text))
+        foreach (RewriteFile file in FileRewrite.Parse(FileRewrite.Continued(reply.Text)))
         {
             string? path = listed.FirstOrDefault(candidate => candidate.Equals(file.Path, StringComparison.OrdinalIgnoreCase));
             if (path is null || RewritePath(plan.WorkingDirectory!, path) is not { } full)

@@ -116,7 +116,7 @@ internal sealed class FleetRoutingChatClient : IChatClient
         (IReadOnlyList<ChatMessage> sendMessages, ChatOptions? sendOptions) = ApplyPlanMode(messageList, options, gate);
         sendOptions = ForRole(runnerRole, sendOptions);
         RecordRoute(target, gate, runnerTier, routeReason);
-        sendMessages = InjectContext(sendMessages, target.Node);
+        sendMessages = StartAnswer(runnerRole, InjectContext(sendMessages, target.Node));
         ChatResponse response;
         try
         {
@@ -170,7 +170,7 @@ internal sealed class FleetRoutingChatClient : IChatClient
         (IReadOnlyList<ChatMessage> sendMessages, ChatOptions? sendOptions) = ApplyPlanMode(messageList, options, gate);
         sendOptions = ForRole(runnerRole, sendOptions);
         RecordRoute(target, gate, runnerTier, routeReason);
-        sendMessages = InjectContext(sendMessages, target.Node);
+        sendMessages = StartAnswer(runnerRole, InjectContext(sendMessages, target.Node));
 
         bool sawToolCall = false;
         bool responseFailed = false;
@@ -736,6 +736,12 @@ internal sealed class FleetRoutingChatClient : IChatClient
             UriContent uri => uri.MediaType?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) == true,
             _ => false
         };
+
+    // A rewrite's answer is started for it (see FileRewrite.AnswerStart).
+    internal static IReadOnlyList<ChatMessage> StartAnswer(string? role, IReadOnlyList<ChatMessage> messages) =>
+        role == PlanRunnerToolPolicy.FileRewriteRole
+            ? [.. messages, new ChatMessage(ChatRole.Assistant, FileRewrite.AnswerStart)]
+            : messages;
 
     // A rewrite is told only how to answer: the agent's own instructions describe tools it is not offered.
     internal static ChatOptions? ForRole(string? role, ChatOptions? options)

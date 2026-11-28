@@ -16,6 +16,20 @@ internal static partial class FileRewrite
     /// <summary>The most an answer may run to: two files of a few hundred lines each.</summary>
     public const int AnswerTokens = 6144;
 
+    /// <summary>
+    /// The start of the answer, sent as the model's own words, so that it goes on with the files. Measured: asked only in words not
+    /// to explain, a worker's answers ran to their cap as analysis and wrote nothing in three of four rounds, eight minutes each;
+    /// with this start the answer was the files.
+    /// </summary>
+    public const string AnswerStart = "FILE: ";
+
+    /// <summary>The reply as a whole answer: what goes on from the start, or the reply as it is when it starts the answer again.</summary>
+    public static string Continued(string? reply)
+    {
+        string text = reply ?? string.Empty;
+        return text.TrimStart().StartsWith("FILE:", StringComparison.Ordinal) ? text : AnswerStart + text.TrimStart(' ', '\t');
+    }
+
     /// <summary>The check's output is cut to this many characters, keeping its start and its end.</summary>
     internal const int MaxOutputCharacters = 6000;
 
@@ -55,7 +69,7 @@ internal static partial class FileRewrite
 
     /// <summary>The request: the task, the files to write, files to read only, what the check printed and what was tried.</summary>
     public static string Prompt(PlanStep step, IReadOnlyList<RewriteFile> files, IReadOnlyList<RewriteFile> readOnly, string failure,
-        IReadOnlyList<string> tried)
+        IReadOnlyList<string> tried, string? onlyRewritten = null)
     {
         var text = new StringBuilder();
         text.AppendLine("The task:");
@@ -88,6 +102,14 @@ internal static partial class FileRewrite
             {
                 text.AppendLine($"- {line}");
             }
+        }
+
+        if (onlyRewritten is not null)
+        {
+            // Measured: nine rounds rewrote a step's test while the fault was in its code.
+            text.AppendLine();
+            text.AppendLine($"The last rounds rewrote only {onlyRewritten} and the check got no better. Look at the step's other files " +
+                            "against the task: the fault may be there.");
         }
 
         text.AppendLine();

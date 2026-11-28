@@ -324,6 +324,32 @@ public sealed partial class PlanRunnerTests
     }
 
     [Fact]
+    public async Task After_three_rewrites_of_one_file_with_no_gain_the_next_request_says_to_look_at_the_others()
+    {
+        FleetNodeConfig worker = new("worker-a", "http://worker-a.example.test/v1", "m", "worker", "standard", ContextLength: 16384);
+        FleetOptions options = OptionsWithNodes(new FleetNodeConfig("hub", "http://hub.example.test/v1", "m", "hub", "heavy", Fallback: true), worker);
+        var health = new FleetHealthMonitor(options, new HealthyNodeFactory());
+        PlanRecord plan = Store.Create("Repair", "Fix the widget", ProjectDirectory, ["a"], ["q?"], ["r"], null, null,
+            [new PlanStepInput("fix the widget", "detail", ["a.cs", "b.cs"], "dotnet build", "standard")]);
+        plan = Store.SelectMachine(plan.Id, 1, "worker-a", out _)!;
+        plan = Store.Approve(plan.Id, recoveryScope: PlanRecoveryScope.WorkerOnly, autoRetries: 0, review: PlanSecondOpinion.Off)!;
+        int rewrites = 0;
+        var agent = new FakeStepAgent((prompt, _, _) => Task.FromResult(prompt.StartsWith("The task:", StringComparison.Ordinal)
+            ? $"FILE: a.cs\n```\nversion {++rewrites}\n```\n"
+            : "Looked at it."))
+        {
+            ToolsOf = _ => (2, false)
+        };
+
+        await RepairRunner(agent, _ => FailWith("widget::renders"), options, health).RunPlanAsync(plan.Id, default);
+
+        string[] asked = agent.Calls.Select(call => call.Prompt).Where(prompt => prompt.StartsWith("The task:", StringComparison.Ordinal)).ToArray();
+        Assert.True(asked.Length >= 5);
+        Assert.All(asked.Take(3), prompt => Assert.DoesNotContain("rewrote only", prompt, StringComparison.Ordinal));
+        Assert.Contains("rewrote only a.cs", asked[3], StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task A_machine_with_no_window_set_keeps_the_fresh_conversation_even_for_files_not_written_yet()
     {
         PlanRecord plan = RepairPlan(machine: null, PlanRecoveryScope.WorkerOnly);

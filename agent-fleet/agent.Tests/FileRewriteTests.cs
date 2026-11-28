@@ -47,6 +47,45 @@ public sealed class FileRewriteTests
         Assert.EndsWith("your reply starts with 'FILE:'.", prompt, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(" src/a.ts\n```ts\nx\n```")] // The answer goes on from the start the fleet wrote.
+    [InlineData("FILE: src/a.ts\n```ts\nx\n```")] // The server started it again.
+    [InlineData("\nFILE: src/a.ts\n```ts\nx\n```")]
+    public void A_reply_that_goes_on_from_the_started_answer_or_starts_it_again_gives_the_file(string reply)
+    {
+        RewriteFile file = Assert.Single(FileRewrite.Parse(FileRewrite.Continued(reply)));
+
+        Assert.Equal("src/a.ts", file.Path);
+        Assert.Equal("x\n", file.Text);
+    }
+
+    [Fact]
+    public void Only_a_rewrite_request_has_its_answer_started()
+    {
+        List<ChatMessage> messages = [new(ChatRole.User, "The task: fix it")];
+
+        IReadOnlyList<ChatMessage> started = FleetRoutingChatClient.StartAnswer(PlanRunnerToolPolicy.FileRewriteRole, messages);
+
+        Assert.Equal(2, started.Count);
+        Assert.Equal(ChatRole.Assistant, started[^1].Role);
+        Assert.Equal(FileRewrite.AnswerStart, started[^1].Text);
+        Assert.Same(messages, FleetRoutingChatClient.StartAnswer(null, messages));
+        Assert.Same(messages, FleetRoutingChatClient.StartAnswer(PlanRunnerToolPolicy.TestRulingRole, messages));
+    }
+
+    [Fact]
+    public void A_stage_that_keeps_rewriting_one_file_is_told_to_look_at_the_others()
+    {
+        var step = new PlanStep(1, "Alert store", "Store the alerts.", ["src/a.ts", "test/a.test.ts"], "npm test", "light", StepStatus.Pending,
+            null, 0, null, null);
+
+        string stuck = FileRewrite.Prompt(step, [new("src/a.ts", "code")], [], "FAILED one", [], onlyRewritten: "test/a.test.ts");
+
+        Assert.Contains("rewrote only test/a.test.ts", stuck, StringComparison.Ordinal);
+        Assert.DoesNotContain("rewrote only", FileRewrite.Prompt(step, [new("src/a.ts", "code")], [], "FAILED one", []), StringComparison.Ordinal);
+        Assert.EndsWith("your reply starts with 'FILE:'.", stuck, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void A_rewrite_is_offered_no_tool()
     {

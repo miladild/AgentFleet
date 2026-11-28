@@ -244,7 +244,7 @@ internal sealed partial class PlanRunner
             ? "With the corrected test the step's check passes now: keep it as it is and change nothing else the check does not ask for."
             : "Keep the corrected test as it is and make the code pass it.";
         return new TestRulingOutcome(
-            $"An independent model ruled that the failing test this step wrote was wrong and corrected it: {names}. {then}", true);
+            $"An independent model ruled that the failing test this step wrote was wrong and corrected it: {names}. {then}", true, passesNow);
     }
 
     /// <summary>

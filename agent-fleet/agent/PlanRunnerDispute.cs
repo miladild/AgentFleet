@@ -9,7 +9,8 @@ namespace AgentFleet;
 /// What a ruling changed for the step: a note for the next round's feedback, and whether a frozen test was corrected (which
 /// gives the step's rung its rounds back).
 /// </summary>
-internal sealed record TestRulingOutcome(string? Note, bool TestCorrected);
+/// <param name="PassesNow">The corrected test passes the step's check, so no model round is needed to say so.</param>
+internal sealed record TestRulingOutcome(string? Note, bool TestCorrected, bool PassesNow = false);
 
 /// <summary>
 /// A step's model may say that a frozen test is wrong (dispute_test). When the failing check shows only frozen tests fail, an

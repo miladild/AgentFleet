@@ -57,8 +57,10 @@ public sealed partial class PlanRunnerTests
             Assert.Contains("failed 2 rounds in a row on tests the step wrote", ruling.Detail);
             Assert.Contains("+ " + "    public void rejects_zero() { Assert.True(true); } // CORRECTED", ruling.Detail);
             Assert.Equal(2, after.Events!.TakeWhile(e => e != ruling).Count(e => e.Kind is RunEventKind.CheckFailed or RunEventKind.FinalValidationFailed));
-            Assert.Contains(fake.Calls.Skip(2), call => call.Prompt.Contains("ruled that the failing test this step wrote was wrong", StringComparison.Ordinal));
-            Assert.Contains(fake.Calls.Skip(2), call => call.Prompt.Contains("the step's check passes now", StringComparison.Ordinal));
+            // The corrected test passes the check, so the step is checked again without asking its model for another round.
+            // Measured: such a round took eight minutes and changed nothing.
+            Assert.Equal(2, fake.Calls.Count);
+            Assert.Contains(after.Events!.SkipWhile(e => e != ruling), e => e.Kind == RunEventKind.CheckPassed);
             Assert.Null(after.FrozenTests);
         }
         finally { FailFirstTests.DeleteTree(project); }

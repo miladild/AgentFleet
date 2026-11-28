@@ -1166,6 +1166,7 @@ internal sealed partial class PlanRunner
 
         IStepSession? session = continuingSession;
         IStepSession? rewriteSession = null;
+        bool verifyOnly = false;
         string? conversationWorkspace = null;
         RoundOutcome? lastRound = null;
         string? lastCheckOutput = null;
@@ -1265,7 +1266,7 @@ internal sealed partial class PlanRunner
                 ModelAttemptResult model = await RunModelAttemptAsync(
                     plan, step, attempt, lastFailure, tier, parallelGroup: false, cancellationToken: cancellationToken,
                     workspaceOverride: workspaceOverride ?? (continuing ? conversationWorkspace : null), modelMachineOverride: modelOverride,
-                    round: new RoundContext(conversation, rung, round, repairMessage, brief, briefHasPacket, rewrite),
+                    round: new RoundContext(conversation, rung, round, repairMessage, brief, briefHasPacket, rewrite, verifyOnly),
                     limit: LimitFor(plan, worked));
                 roundActivity?.SetTag("fleet.model_node", model.ModelNode);
                 roundActivity?.SetTag("fleet.workspace_node", model.Machine);
@@ -1895,6 +1896,8 @@ internal sealed partial class PlanRunner
                     best = null;
                 }
 
+                // A correction that passes the check is verified by the next round without asking the step's model anything.
+                verifyOnly = ruling.PassesNow;
                 string checkTextNow = result.Output ?? result.Message;
                 if (ruling.Note is not null)
                 {
@@ -2334,7 +2337,7 @@ internal sealed partial class PlanRunner
     /// <param name="RepairMessage">The follow-up to send; null when the conversation has to be told the whole task.</param>
     /// <param name="Brief">What the rounds before this conversation tried, for a fresh conversation after them.</param>
     private sealed record RoundContext(IStepSession Session, int Rung, int Round, string? RepairMessage = null, string? Brief = null,
-        bool BriefIsPacket = false, bool Rewrite = false);
+        bool BriefIsPacket = false, bool Rewrite = false, bool VerifyOnly = false);
 
     private async Task<string?> ReconcileInterruptedWorkspaceAsync(PlanRecord plan, PlanStep step, CancellationToken cancellationToken)
     {
@@ -3533,7 +3536,9 @@ internal sealed partial class PlanRunner
             }
         }
 
-        string attemptDetail = conversation.Rewrite
+        string attemptDetail = conversation.VerifyOnly
+            ? $"Round {conversation.Round}: the corrected test passes the check, so the step is checked again without asking its model."
+            : conversation.Rewrite
             ? $"Round {conversation.Round}: the step's files are asked for whole, with what the check printed."
             : continuing
             ? $"Round {conversation.Round}: the output of the failed check goes back into the same conversation."
@@ -3707,13 +3712,15 @@ internal sealed partial class PlanRunner
                     conversation.Session.CapAnswer(FileRewrite.AnswerTokens);
                 }
 
-                Task<StepAgentReply> call = conversation.Session.SendAsync(
-                    message,
-                    tier,
-                    modelMachine,
-                    attemptCancellation.Token);
+                Task<StepAgentReply> call = conversation.VerifyOnly
+                    ? Task.FromResult(new StepAgentReply("No model round: the corrected test passes the check.", 0, false))
+                    : conversation.Session.SendAsync(
+                        message,
+                        tier,
+                        modelMachine,
+                        attemptCancellation.Token);
                 reply = await stall.WaitAsync(call, attemptCancellation, cancellationToken);
-                if (conversation.Rewrite)
+                if (conversation.Rewrite && !conversation.VerifyOnly)
                 {
                     reply = await WriteRewriteAsync(plan, step, attempt, tier, machine, modelMachine, conversation.Rung, conversation.Round,
                         reply, attemptCancellation.Token);
