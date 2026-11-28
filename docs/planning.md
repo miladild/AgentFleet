@@ -123,9 +123,9 @@ steps, and checks each step with a real command instead of trusting itself.
     3. a fresh conversation, on the hub when the plan allows it and otherwise on a worker, that starts from a brief of what
        the earlier rounds tried and is told to find the root cause first. When the answering machine's window is 32768 tokens
        or less and the step's files fit in it, this rung asks for the files whole instead, without tools: each round sends the
-       step's text, its files, what the check printed and what the earlier rounds led to, and writes the files of the reply
-       that the step lists. It may take up to ten rounds (`FLEET_HARNESS_REWRITE_ROUNDS`), and an answer that held no whole
-       file does not end it. The request starts the answer for the model (`FILE: `), so it goes on with the files instead
+       step's text, its files, the project files they import (to read only), what the check printed and what the earlier
+       rounds led to, and writes the files of the reply that the step lists. It may take up to ten rounds
+       (`FLEET_HARNESS_REWRITE_ROUNDS`), and an answer that held no whole file does not end it. The request starts the answer for the model (`FILE: `), so it goes on with the files instead
        of an explanation, and after three rounds that rewrote only one of the step's files without getting closer it is told
        to look at the others. `FLEET_HARNESS_ENABLE_FILE_REWRITE=false` keeps the fresh conversation.
 

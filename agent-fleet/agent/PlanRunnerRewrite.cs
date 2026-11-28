@@ -1,3 +1,5 @@
+using System.Text.RegularExpressions;
+
 namespace AgentFleet;
 
 /// <summary>
@@ -68,17 +70,61 @@ internal sealed partial class PlanRunner
             files.Add(new RewriteFile(FileRewrite.Normalize(listed), ReadRewriteFile(RewritePath(root, listed))));
         }
 
-        // The failing files the step does not list (a test of an earlier step), so the model can see what they ask for.
-        RewriteFile[] readOnly = FailureLocation.ProjectFrames(failure, root)
-            .Select(frame => frame.Path)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Where(path => IsTestPath(path) && !files.Any(file => file.Path.Equals(path, StringComparison.OrdinalIgnoreCase)))
-            .Take(2)
-            .Select(path => new RewriteFile(path, ReadRewriteFile(RewritePath(root, path))))
-            .Where(file => file.Text is not null)
-            .ToArray();
+        // What the step does not list but needs to be seen: the failing test files (a test of an earlier step) and the project's
+        // files the step's files import. Measured: a model rewrote a store it had never been shown while its own test was wrong.
+        IEnumerable<string> failingTests = FailureLocation.ProjectFrames(failure, root).Select(frame => frame.Path)
+            .Where(IsTestPath).Take(2);
+        var readOnly = new List<RewriteFile>();
+        long left = MaxReadOnlyCharacters;
+        foreach (string path in failingTests.Concat(Imported(root, files)).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (files.Any(file => file.Path.Equals(path, StringComparison.OrdinalIgnoreCase)) ||
+                ReadRewriteFile(RewritePath(root, path)) is not { } text || text.Length > left)
+            {
+                continue;
+            }
+
+            left -= text.Length;
+            readOnly.Add(new RewriteFile(path, text));
+        }
+
         return FileRewrite.Prompt(step, files, readOnly, failure, RepairMessages.TriedLines(StepEventsSinceRetry(plan.Id, step.Id)),
             step.Files.Count > 1 ? OnlyRewritten(StepEventsSinceRetry(plan.Id, step.Id)) : null);
+    }
+
+    // The most characters of files shown to read only.
+    private const int MaxReadOnlyCharacters = 12_000;
+
+    // A relative module specifier of a JavaScript or TypeScript import, export-from, require or dynamic import.
+    [GeneratedRegex(@"(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*|^\s*import\s+)['""](\.{1,2}/[^'""\r\n]+)['""]", RegexOptions.Multiline)]
+    private static partial Regex RelativeImport();
+
+    private static readonly string[] ModuleEndings = ["", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", "/index.ts", "/index.js"];
+
+    // The project files the given files import by a relative path, as project-relative paths, in the order they are named.
+    private static IEnumerable<string> Imported(string root, IReadOnlyList<RewriteFile> files)
+    {
+        string fullRoot = Path.GetFullPath(root);
+        foreach (RewriteFile file in files.Where(file => file.Text is not null))
+        {
+            string folder = Path.GetDirectoryName(Path.Combine(fullRoot, file.Path)) ?? fullRoot;
+            foreach (Match match in RelativeImport().Matches(file.Text!))
+            {
+                string target = Path.GetFullPath(Path.Combine(folder, match.Groups[1].Value));
+                // A TypeScript module may be imported with the .js ending it will have once built.
+                IEnumerable<string> candidates = ModuleEndings.Select(ending => target + ending);
+                if (target.EndsWith(".js", StringComparison.OrdinalIgnoreCase))
+                {
+                    candidates = candidates.Append(target[..^3] + ".ts");
+                }
+
+                if (candidates.FirstOrDefault(File.Exists) is { } found &&
+                    found.StartsWith(Path.TrimEndingDirectorySeparator(fullRoot) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                {
+                    yield return Path.GetRelativePath(fullRoot, found).Replace('\\', '/');
+                }
+            }
+        }
     }
 
     private const int SameFileRounds = 3;

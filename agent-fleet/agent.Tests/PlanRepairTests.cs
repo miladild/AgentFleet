@@ -349,6 +349,34 @@ public sealed partial class PlanRunnerTests
         Assert.Contains("rewrote only a.cs", asked[3], StringComparison.Ordinal);
     }
 
+    // Measured: a model rewrote a store it had never been shown, in seven of ten rounds, while the step's own test was wrong.
+    [Fact]
+    public async Task A_rewrite_request_shows_the_files_the_steps_files_import_to_read_only()
+    {
+        Directory.CreateDirectory(Path.Combine(ProjectDirectory, "src"));
+        Directory.CreateDirectory(Path.Combine(ProjectDirectory, "test"));
+        File.WriteAllText(Path.Combine(ProjectDirectory, "src", "store.ts"), "STORE-CONTENT");
+        File.WriteAllText(Path.Combine(ProjectDirectory, "src", "unused.ts"), "UNUSED-CONTENT");
+        File.WriteAllText(Path.Combine(ProjectDirectory, "test", "app.test.ts"),
+            "import { Store } from \"../src/store\";\nimport express from \"express\";\n");
+        FleetNodeConfig worker = new("worker-a", "http://worker-a.example.test/v1", "m", "worker", "standard", ContextLength: 16384);
+        FleetOptions options = OptionsWithNodes(new FleetNodeConfig("hub", "http://hub.example.test/v1", "m", "hub", "heavy", Fallback: true), worker);
+        var health = new FleetHealthMonitor(options, new HealthyNodeFactory());
+        PlanRecord plan = Store.Create("Repair", "Fix the app", ProjectDirectory, ["a"], ["q?"], ["r"], null, null,
+            [new PlanStepInput("fix the app", "detail", ["test/app.test.ts"], "dotnet build", "standard")]);
+        plan = Store.SelectMachine(plan.Id, 1, "worker-a", out _)!;
+        plan = Store.Approve(plan.Id, recoveryScope: PlanRecoveryScope.WorkerOnly, autoRetries: 0, review: PlanSecondOpinion.Off)!;
+        var agent = new FakeStepAgent((_, _, _) => Task.FromResult("Looked at it.")) { ToolsOf = _ => (2, false) };
+
+        await RepairRunner(agent, _ => FailWith("widget::renders"), options, health).RunPlanAsync(plan.Id, default);
+
+        string asked = agent.Calls.Select(call => call.Prompt).First(prompt => prompt.StartsWith("The task:", StringComparison.Ordinal));
+        Assert.Contains("to read only", asked, StringComparison.Ordinal);
+        Assert.Contains("FILE: src/store.ts", asked, StringComparison.Ordinal);
+        Assert.Contains("STORE-CONTENT", asked, StringComparison.Ordinal);
+        Assert.DoesNotContain("UNUSED-CONTENT", asked, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task A_machine_with_no_window_set_keeps_the_fresh_conversation_even_for_files_not_written_yet()
     {
